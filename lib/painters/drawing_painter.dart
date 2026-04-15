@@ -5,11 +5,24 @@ import '../models/stroke.dart';
 class DrawingPainter extends CustomPainter {
   final List<Stroke> strokes;
   final Stroke? currentStroke;
+  final Matrix4? transform; // Transform for PDF scroll/zoom
 
-  DrawingPainter({required this.strokes, this.currentStroke});
+  DrawingPainter({required this.strokes, this.currentStroke, this.transform});
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Apply PDF transformation only if valid
+    if (transform != null) {
+      try {
+        final storage = transform!.storage;
+        if (storage.isNotEmpty && storage.length >= 16) {
+          canvas.transform(storage);
+        }
+      } catch (e) {
+        // If transform fails, continue without it
+      }
+    }
+
     for (var stroke in strokes) {
       _drawStroke(canvas, stroke);
     }

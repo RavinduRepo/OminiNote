@@ -12,6 +12,39 @@ class NoteScreen extends StatefulWidget {
   State<NoteScreen> createState() => _NoteScreenState();
 }
 
+/// Overlay that only captures stylus events, allowing all other input to pass through
+class _StylusDrawingOverlay extends StatelessWidget {
+  final List<Stroke> strokes;
+  final Stroke? currentStroke;
+  final ValueChanged<PointerDownEvent> onPointerDown;
+  final ValueChanged<PointerMoveEvent> onPointerMove;
+  final ValueChanged<PointerUpEvent> onPointerUp;
+
+  const _StylusDrawingOverlay({
+    required this.strokes,
+    required this.currentStroke,
+    required this.onPointerDown,
+    required this.onPointerMove,
+    required this.onPointerUp,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        ignoring: true, // Don't intercept any input
+        child: CustomPaint(
+          painter: DrawingPainter(
+            strokes: strokes,
+            currentStroke: currentStroke,
+          ),
+          child: Container(),
+        ),
+      ),
+    );
+  }
+}
+
 class _NoteScreenState extends State<NoteScreen> {
   final List<Stroke> _strokes = [];
   Stroke? _currentStroke;
@@ -95,130 +128,132 @@ class _NoteScreenState extends State<NoteScreen> {
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          PdfViewer.asset(
-            'assets/sample.pdf',
-            controller: _pdfController,
-            params: const PdfViewerParams(
-              backgroundColor: Color(0xFF1E1E2E),
+      body: Listener(
+        onPointerDown: (event) {
+          if (event.kind == PointerDeviceKind.stylus) _onPointerDown(event);
+        },
+        onPointerMove: (event) {
+          if (event.kind == PointerDeviceKind.stylus) _onPointerMove(event);
+        },
+        onPointerUp: (event) {
+          if (event.kind == PointerDeviceKind.stylus) _onPointerUp(event);
+        },
+        onPointerCancel: (event) {
+          if (event.kind == PointerDeviceKind.stylus) {
+            _onPointerUp(PointerUpEvent(pointer: event.pointer));
+          }
+        },
+        child: Stack(
+          children: [
+            PdfViewer.asset(
+              'assets/sample.pdf',
+              controller: _pdfController,
+              params: const PdfViewerParams(backgroundColor: Color(0xFF1E1E2E)),
             ),
-          ),
-          Positioned.fill(
-            child: Listener(
-              behavior: HitTestBehavior.translucent,
+            _StylusDrawingOverlay(
+              strokes: _strokes,
+              currentStroke: _currentStroke,
               onPointerDown: _onPointerDown,
               onPointerMove: _onPointerMove,
               onPointerUp: _onPointerUp,
-              onPointerCancel: (e) =>
-                  _onPointerUp(PointerUpEvent(pointer: e.pointer)),
-              child: CustomPaint(
-                painter: DrawingPainter(
-                  strokes: _strokes,
-                  currentStroke: _currentStroke,
-                ),
-                child: Container(),
-              ),
             ),
-          ),
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFF2E2E3E).withOpacity(0.95),
-                border: const Border(
-                  top: BorderSide(color: Color(0xFF3C3C54), width: 1),
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2E2E3E).withOpacity(0.95),
+                  border: const Border(
+                    top: BorderSide(color: Color(0xFF3C3C54), width: 1),
+                  ),
                 ),
-              ),
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                spellOut: [CrossAxisAlignment.start],
-                children: [
-                  // Color picker
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        const Text(
-                          'Color: ',
-                          style: TextStyle(
-                            color: Colors.grey,
-                            fontSize: 12,
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Color picker
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          const Text(
+                            'Color: ',
+                            style: TextStyle(color: Colors.grey, fontSize: 12),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        ...List.generate(
-                          _colorOptions.length,
-                          (index) => Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4),
-                            child: GestureDetector(
-                              onTap: () => setState(
-                                () => _currentColor = _colorOptions[index],
+                          const SizedBox(width: 8),
+                          ...List.generate(
+                            _colorOptions.length,
+                            (index) => Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
                               ),
-                              child: Container(
-                                width: 32,
-                                height: 32,
-                                decoration: BoxDecoration(
-                                  color: _colorOptions[index],
-                                  border: Border.all(
-                                    color: _currentColor == _colorOptions[index]
-                                        ? Colors.white
-                                        : Colors.grey[700]!,
-                                    width: _currentColor == _colorOptions[index]
-                                        ? 3
-                                        : 1,
+                              child: GestureDetector(
+                                onTap: () => setState(
+                                  () => _currentColor = _colorOptions[index],
+                                ),
+                                child: Container(
+                                  width: 32,
+                                  height: 32,
+                                  decoration: BoxDecoration(
+                                    color: _colorOptions[index],
+                                    border: Border.all(
+                                      color:
+                                          _currentColor == _colorOptions[index]
+                                          ? Colors.white
+                                          : Colors.grey[700]!,
+                                      width:
+                                          _currentColor == _colorOptions[index]
+                                          ? 3
+                                          : 1,
+                                    ),
+                                    borderRadius: BorderRadius.circular(4),
                                   ),
-                                  borderRadius: BorderRadius.circular(4),
                                 ),
                               ),
                             ),
                           ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // Stroke size slider
+                    Row(
+                      children: [
+                        const Text(
+                          'Size: ',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Slider(
+                            value: _currentStrokeSize,
+                            min: 1.0,
+                            max: 20.0,
+                            divisions: 19,
+                            label: _currentStrokeSize.toStringAsFixed(1),
+                            onChanged: (value) =>
+                                setState(() => _currentStrokeSize = value),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _currentStrokeSize.toStringAsFixed(1),
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                          ),
                         ),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  // Stroke size slider
-                  Row(
-                    children: [
-                      const Text(
-                        'Size: ',
-                        style: TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Slider(
-                          value: _currentStrokeSize,
-                          min: 1.0,
-                          max: 20.0,
-                          divisions: 19,
-                          label: _currentStrokeSize.toStringAsFixed(1),
-                          onChanged: (value) =>
-                              setState(() => _currentStrokeSize = value),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _currentStrokeSize.toStringAsFixed(1),
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
