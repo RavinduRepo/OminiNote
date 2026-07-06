@@ -35,6 +35,8 @@ dependencies:
   file_picker: ^8.0.0
   path_provider: ^2.1.1
   cupertino_icons: ^1.0.8
+  crypto: ^3.0.7
+  syncfusion_flutter_pdf: ^33.2.15
 
 dev_dependencies:
   flutter_test:
@@ -46,6 +48,24 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+# App icon (Android/Windows/macOS — iOS is not a project priority) generated
+# via `dart run flutter_launcher_icons` from the "Stroke Page" mark. See
+# assets/branding/ and CLAUDE.md's Branding section.
+flutter_launcher_icons:
+  image_path: "assets/branding/icon_flat.png"
+  android: true
+  ios: false
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/branding/icon_foreground_light.png"
+  windows:
+    generate: true
+    image_path: "assets/branding/icon_flat.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/branding/icon_flat.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -57,8 +77,6 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
-  assets:
-    - assets/sample.pdf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

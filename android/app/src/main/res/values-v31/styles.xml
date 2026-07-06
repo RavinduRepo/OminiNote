@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ (API 31) uses the SplashScreen API instead of the
+         drawable/launch_background.xml layer-list, so LaunchTheme needs its
+         own v31 items here. @color/splash_background and @drawable/splash_logo
+         resolve to their values-night/drawable-night variants automatically,
+         so this single file covers both light and dark — no values-night-v31
+         override needed. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_logo</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/splash_background</item>
+    </style>
+</resources>

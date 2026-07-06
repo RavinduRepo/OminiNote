@@ -1,0 +1,318 @@
+import 'package:flutter/material.dart';
+import '../models/canvas.dart';
+import '../models/section.dart';
+import '../models/tree.dart';
+import '../services/notebook_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/color_swatch_picker.dart';
+import '../widgets/item_tree_view.dart';
+import '../widgets/location_picker.dart';
+import 'canvas_screen.dart';
+
+/// Mobile screen 3: a section's tree of **canvases** + nested super-sections.
+/// Tapping a canvas opens the drawing surface (`CanvasScreen`).
+class SectionScreen extends StatefulWidget {
+  final Section section;
+
+  const SectionScreen({super.key, required this.section});
+
+  @override
+  State<SectionScreen> createState() => _SectionScreenState();
+}
+
+class _SectionScreenState extends State<SectionScreen> {
+  final _service = NotebookService();
+  Section? _section;
+  Map<String, Canvas> _canvases = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final sec = await _service.getSection(
+      widget.section.notebookId,
+      widget.section.id,
+    );
+    final s = sec ?? widget.section;
+    final map = await _service.getCanvasMap(s);
+    if (!mounted) return;
+    setState(() {
+      _section = s;
+      _canvases = map;
+    });
+  }
+
+  // ── Actions ─────────────────────────────────────────────────────────
+
+  Future<void> _addCanvas({String? folderId}) async {
+    final name = await _prompt(title: 'New canvas', hint: 'Canvas name');
+    if (name == null || name.isEmpty) return;
+    final canvas = await _service.createCanvas(
+      _section!,
+      name,
+      parentFolderId: folderId,
+    );
+    await _reload();
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      fadeThroughRoute(CanvasScreen(canvas: canvas)),
+    ).then((_) => _reload());
+  }
+
+  Future<void> _addFolder({String? folderId}) async {
+    final name = await _prompt(title: 'New super-section', hint: 'Group name');
+    if (name == null || name.isEmpty) return;
+    await _service.createCanvasFolder(_section!, name, parentFolderId: folderId);
+    await _reload();
+  }
+
+  void _openCanvas(Canvas canvas) {
+    Navigator.push(
+      context,
+      fadeThroughRoute(CanvasScreen(canvas: canvas)),
+    ).then((_) => _reload());
+  }
+
+  Future<void> _renameCanvas(Canvas canvas) async {
+    final name = await _prompt(
+      title: 'Rename canvas',
+      hint: 'Canvas name',
+      initial: canvas.name,
+      cta: 'Rename',
+    );
+    if (name == null || name.isEmpty) return;
+    await _service.renameCanvas(canvas, name);
+    await _reload();
+  }
+
+  Future<void> _colorCanvas(Canvas canvas) async {
+    final choice = await showColorSwatchPicker(context, current: canvas.color);
+    if (choice == null) return;
+    await _service.setCanvasColor(canvas, choice.color);
+    await _reload();
+  }
+
+  Future<void> _deleteCanvas(Canvas canvas) async {
+    await _service.deleteCanvas(_section!, canvas.id);
+    await _reload();
+  }
+
+  Future<void> _renameFolder(FolderNode folder) async {
+    final name = await _prompt(
+      title: 'Rename super-section',
+      hint: 'Group name',
+      initial: folder.name,
+      cta: 'Rename',
+    );
+    if (name == null || name.isEmpty) return;
+    folder.name = name;
+    await _service.saveSection(_section!);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _colorFolder(FolderNode folder) async {
+    final choice = await showColorSwatchPicker(context, current: folder.color);
+    if (choice == null) return;
+    folder.color = choice.color;
+    await _service.saveSection(_section!);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _ungroup(FolderNode folder) async {
+    await _service.ungroupInSection(_section!, folder.id);
+    await _reload();
+  }
+
+  Future<void> _deleteFolder(FolderNode folder) async {
+    final count = folder.collectLeafIds().length;
+    final ok = await _confirm(
+      'Delete super-section?',
+      count == 0
+          ? '"${folder.name}" will be deleted.'
+          : '"${folder.name}" and its $count canvas(es) will be permanently deleted.',
+    );
+    if (!ok) return;
+    await _service.deleteCanvasFolder(_section!, folder.id);
+    await _reload();
+  }
+
+  Future<void> _relocate(TreeNode node, {required bool copy}) async {
+    final dst = await pickSectionDestination(
+      context,
+      title: copy ? 'Copy to section' : 'Move to section',
+    );
+    if (dst == null) return;
+    if (copy) {
+      await _service.copyCanvasNode(
+        widget.section.notebookId,
+        widget.section.id,
+        node,
+        dst.notebookId,
+        dst.sectionId,
+      );
+    } else {
+      await _service.moveCanvasNode(
+        widget.section.notebookId,
+        widget.section.id,
+        node,
+        dst.notebookId,
+        dst.sectionId,
+      );
+    }
+    await _reload();
+  }
+
+  // ── Dialogs ─────────────────────────────────────────────────────────
+
+  Future<String?> _prompt({
+    required String title,
+    required String hint,
+    String initial = '',
+    String cta = 'Create',
+  }) {
+    final controller = TextEditingController(text: initial);
+    controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: initial.length,
+    );
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: InputDecoration(hintText: hint),
+          onSubmitted: (v) => Navigator.pop(context, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: Text(cta),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool> _confirm(String title, String message) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final section = _section;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.section.name),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.add),
+            tooltip: 'Add',
+            onSelected: (action) {
+              if (action == 'canvas') _addCanvas();
+              if (action == 'group') _addFolder();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'canvas', child: Text('New canvas')),
+              PopupMenuItem(value: 'group', child: Text('New super-section')),
+            ],
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: section == null
+          ? const Center(child: CircularProgressIndicator())
+          : section.nodes.isEmpty
+          ? _EmptyState(onAdd: _addCanvas)
+          : SingleChildScrollView(
+              padding: const EdgeInsets.only(top: 4, bottom: 96),
+              child: ItemTreeView<Canvas>(
+                containerId: section.id,
+                nodes: section.nodes,
+                items: _canvases,
+                nameOf: (c) => c.name,
+                colorOf: (c) => c.color,
+                idOf: (c) => c.id,
+                leafIcon: Icons.crop_portrait,
+                selectedId: null,
+                onOpen: _openCanvas,
+                onRenameLeaf: _renameCanvas,
+                onColorLeaf: _colorCanvas,
+                onDeleteLeaf: _deleteCanvas,
+                onRenameFolder: _renameFolder,
+                onColorFolder: _colorFolder,
+                onAddLeafToFolder: (f) => _addCanvas(folderId: f.id),
+                onAddFolderToFolder: (f) => _addFolder(folderId: f.id),
+                onUngroup: _ungroup,
+                onDeleteFolder: _deleteFolder,
+                onRelocate: _relocate,
+                onTreeChanged: () => _service.saveSection(section),
+              ),
+            ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _addCanvas,
+        tooltip: 'New canvas',
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  final VoidCallback onAdd;
+  const _EmptyState({required this.onAdd});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.edit_note_outlined, size: 56, color: palette.textDim),
+          const SizedBox(height: 18),
+          Text(
+            'No canvases yet',
+            style: TextStyle(color: palette.textDim, fontSize: 15),
+          ),
+          const SizedBox(height: 24),
+          FilledButton.icon(
+            onPressed: onAdd,
+            icon: const Icon(Icons.add),
+            label: const Text('New canvas'),
+          ),
+        ],
+      ),
+    );
+  }
+}

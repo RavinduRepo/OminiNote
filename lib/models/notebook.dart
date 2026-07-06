@@ -1,41 +1,45 @@
+import 'tree.dart';
+
+/// Top-level collection: a tree of **Sections** + nested super-sections
+/// (`FolderNode`). Leaves reference sections by id.
 class Notebook {
   final String id;
-  final String name;
+  String name;
   final DateTime createdAt;
-  final List<String> pageIds; // List of page IDs
+  int? color; // ARGB; null → deterministic identity color
+  final List<TreeNode> nodes; // leaves = section ids
 
   Notebook({
     required this.id,
     required this.name,
     required this.createdAt,
-    this.pageIds = const [],
-  });
+    this.color,
+    List<TreeNode>? nodes,
+  }) : nodes = nodes ?? [];
 
-  Notebook copyWith({
-    String? id,
-    String? name,
-    DateTime? createdAt,
-    List<String>? pageIds,
-  }) {
-    return Notebook(
-      id: id ?? this.id,
-      name: name ?? this.name,
-      createdAt: createdAt ?? this.createdAt,
-      pageIds: pageIds ?? this.pageIds,
-    );
-  }
+  /// Every section id in this notebook, depth-first.
+  List<String> get allSectionIds => TreeOps.allLeafIds(nodes);
+
+  int get sectionCount => allSectionIds.length;
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
     'createdAt': createdAt.toIso8601String(),
-    'pageIds': pageIds,
+    'color': color,
+    'nodes': nodes.map((n) => n.toJson()).toList(),
+    // Derived flat list, kept for any back-compat reader.
+    'sectionIds': allSectionIds,
   };
 
   factory Notebook.fromJson(Map<String, dynamic> json) => Notebook(
     id: json['id'],
     name: json['name'],
     createdAt: DateTime.parse(json['createdAt']),
-    pageIds: List<String>.from(json['pageIds'] ?? []),
+    color: (json['color'] as num?)?.toInt(),
+    nodes: TreeOps.parse(
+      json['nodes'],
+      legacyIds: List<String>.from(json['sectionIds'] ?? []),
+    ),
   );
 }
