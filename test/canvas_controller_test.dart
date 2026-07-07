@@ -214,6 +214,35 @@ void main() {
     });
   });
 
+  group('per-tool style memory', () {
+    test('pen, highlighter, and text keep independent colors', () {
+      final page = CanvasPage(id: 'a', deviceId: 'test_device');
+      final canvas = Canvas(
+        id: 'c-colors',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Colors',
+        createdAt: DateTime(2026, 7, 7),
+        rows: [PageRow(id: 'r1', pageIds: ['a'])],
+      );
+      final c = CanvasController(canvas: canvas, pages: {'a': page});
+
+      c.setTool(CanvasTool.pen);
+      c.color = const Color(0xFF111111);
+      c.setTool(CanvasTool.highlighter);
+      c.color = const Color(0xFF222222);
+      c.setTool(CanvasTool.text);
+      c.color = const Color(0xFF333333);
+
+      c.setTool(CanvasTool.pen);
+      expect(c.color.toARGB32(), 0xFF111111);
+      c.setTool(CanvasTool.highlighter);
+      expect(c.color.toARGB32(), 0xFF222222);
+      c.setTool(CanvasTool.text);
+      expect(c.color.toARGB32(), 0xFF333333);
+    });
+  });
+
   group('element rev stamping (LWW convergence)', () {
     test('a selection transform bumps rev/updatedAt on the moved elements',
         () {

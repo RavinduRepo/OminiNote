@@ -40,6 +40,13 @@ sealed class CanvasElement {
   String deviceId;
   DateTime? deletedAt;
 
+  /// Cross-list paint order. Strokes and objects live in separate lists (the
+  /// sync model needs that), so without this an image could never go behind
+  /// ink — the painter/exporter draw the combined list stable-sorted by
+  /// [zIndex] (ties keep strokes-under-objects list order). Mutated by
+  /// bring-to-front / send-to-back; syncs like any other element property.
+  double zIndex = 0;
+
   CanvasElement({
     this.schemaVersion = 1,
     required this.id,
@@ -157,7 +164,7 @@ class StrokeElement extends CanvasElement {
         color: color,
         size: size,
         points: points.map((p) => StrokePoint(p.x, p.y, p.p)).toList(),
-      );
+      )..zIndex = zIndex;
 
   @override
   void translate(double dx, double dy) {
@@ -198,6 +205,7 @@ class StrokeElement extends CanvasElement {
         'updatedAt': updatedAt.millisecondsSinceEpoch,
         'deviceId': deviceId,
         'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    'zi': zIndex,
         'createdAt': createdAt.millisecondsSinceEpoch,
         'z': z,
         'tool': tool.name,
@@ -230,7 +238,7 @@ class StrokeElement extends CanvasElement {
         points: List<Map<String, dynamic>>.from(
           json['points'] ?? [],
         ).map(StrokePoint.fromJson).toList(),
-      );
+      )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
 }
 
 enum TextAlignOption { left, center, right }
@@ -366,7 +374,7 @@ class TextElement extends CanvasElement {
     bold: bold,
     italic: italic,
     align: align,
-  );
+  )..zIndex = zIndex;
 
   @override
   void translate(double dx, double dy) => rect = rect.shift(Offset(dx, dy));
@@ -407,6 +415,7 @@ class TextElement extends CanvasElement {
     'updatedAt': updatedAt.millisecondsSinceEpoch,
     'deviceId': deviceId,
     'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    'zi': zIndex,
     'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
     'rotation': rotation,
     'runs': [for (final r in runs) r.toJson()],
@@ -453,7 +462,7 @@ class TextElement extends CanvasElement {
         (a) => a.name == json['align'],
         orElse: () => TextAlignOption.left,
       ),
-    );
+    )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
   }
 }
 
@@ -497,7 +506,7 @@ class ImageElement extends CanvasElement {
     rect: rect,
     rotation: rotation,
     assetId: assetId,
-  );
+  )..zIndex = zIndex;
 
   @override
   void translate(double dx, double dy) => rect = rect.shift(Offset(dx, dy));
@@ -534,6 +543,7 @@ class ImageElement extends CanvasElement {
     'updatedAt': updatedAt.millisecondsSinceEpoch,
     'deviceId': deviceId,
     'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    'zi': zIndex,
     'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
     'rotation': rotation,
     'assetId': assetId,
@@ -556,7 +566,7 @@ class ImageElement extends CanvasElement {
       ),
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0,
       assetId: json['assetId'] ?? '',
-    );
+    )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
   }
 }
 
@@ -613,7 +623,7 @@ class AttachmentElement extends CanvasElement {
     assetId: assetId,
     name: name,
     mime: mime,
-  );
+  )..zIndex = zIndex;
 
   @override
   void translate(double dx, double dy) => rect = rect.shift(Offset(dx, dy));
@@ -650,6 +660,7 @@ class AttachmentElement extends CanvasElement {
     'updatedAt': updatedAt.millisecondsSinceEpoch,
     'deviceId': deviceId,
     'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    'zi': zIndex,
     'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
     'rotation': rotation,
     'assetId': assetId,
@@ -676,6 +687,6 @@ class AttachmentElement extends CanvasElement {
       assetId: json['assetId'] ?? '',
       name: json['name'] ?? 'attachment.pdf',
       mime: json['mime'] ?? 'application/pdf',
-    );
+    )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
   }
 }

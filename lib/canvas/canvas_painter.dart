@@ -96,7 +96,7 @@ class CanvasPainter extends CustomPainter {
     canvas.clipRect(rect);
     canvas.translate(rect.left, rect.top);
 
-    for (final el in [...page.strokes, ...page.objects]) {
+    for (final el in zOrderedElements(page)) {
       if (el.id == controller.editingElementId) continue; // text overlay open
       _paintElement(canvas, el);
     }

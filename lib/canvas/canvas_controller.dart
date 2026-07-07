@@ -108,7 +108,16 @@ class CanvasController extends ChangeNotifier {
     screenSize = size;
     if (!_viewportInitialized && layout.pages.isNotEmpty && !size.isEmpty) {
       _viewportInitialized = true;
-      fitPageWidth(layout.pages.first.pageId, notify: false);
+      // Reopen where the user left this canvas (device-local memory);
+      // first-ever open falls back to fitting the first page.
+      final saved = SettingsService().viewportFor(canvas.id);
+      if (saved != null) {
+        zoom = saved.zoom.clamp(minZoom, maxZoom);
+        pan = Offset(saved.panX, saved.panY);
+        _clampPan();
+      } else {
+        fitPageWidth(layout.pages.first.pageId, notify: false);
+      }
     } else {
       _clampPan();
     }
@@ -360,8 +369,45 @@ class CanvasController extends ChangeNotifier {
   // ── Tool & style state ─────────────────────────────────────────────────
 
   CanvasTool tool = CanvasTool.pen;
-  Color color = const Color(0xFFD9553B); // red default
-  double strokeSize = 4.0;
+
+  // Per-tool style memory: pen, highlighter, and text each keep their own
+  // color (and the two ink tools their own width) — switching tools restores
+  // that tool's last choice instead of sharing one global color.
+  Color penColor = const Color(0xFFD9553B); // red default
+  Color highlighterColor = const Color(0xFFF2C230); // amber default
+  Color textColor = const Color(0xFF17171A);
+  double penSize = 4.0;
+  double highlighterSize = 6.0;
+
+  /// The active tool's color (pen color for eraser/lasso, where it only
+  /// matters as the "apply color to selection" source).
+  Color get color => switch (tool) {
+        CanvasTool.highlighter => highlighterColor,
+        CanvasTool.text => textColor,
+        _ => penColor,
+      };
+
+  set color(Color v) {
+    switch (tool) {
+      case CanvasTool.highlighter:
+        highlighterColor = v;
+      case CanvasTool.text:
+        textColor = v;
+      default:
+        penColor = v;
+    }
+  }
+
+  double get strokeSize =>
+      tool == CanvasTool.highlighter ? highlighterSize : penSize;
+
+  set strokeSize(double v) {
+    if (tool == CanvasTool.highlighter) {
+      highlighterSize = v;
+    } else {
+      penSize = v;
+    }
+  }
 
   // Current text style — the single source of truth for the toolbar. Applies
   // to the element being edited (live), else the text selection (undoable),
@@ -448,7 +494,7 @@ class CanvasController extends ChangeNotifier {
   }
 
   void setTextColor(Color value) {
-    color = value; // keep the shared color in sync
+    textColor = value;
     _applyTextStyle(attr: (a) => a.color = value, run: (r) => r.color = value);
   }
 
@@ -1269,6 +1315,13 @@ class CanvasController extends ChangeNotifier {
   static List<CanvasElement> _appClipboard = [];
   static bool get clipboardHasContent => _appClipboard.isNotEmpty;
 
+  /// Set by the screen: mirrors a copy to the OS clipboard (text or a PNG of
+  /// the selection) and handles paste when the internal clipboard is empty
+  /// (OS image/text). Kept as hooks because capturing pixels needs the
+  /// widget tree (RepaintBoundary), which the controller doesn't own.
+  Future<void> Function()? systemCopyHook;
+  Future<void> Function()? systemPasteFallback;
+
   void deleteSelection() {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
@@ -1323,6 +1376,7 @@ class CanvasController extends ChangeNotifier {
 
   void copySelection() {
     _appClipboard = [for (final el in selection) el.deepCopy()];
+    unawaited(systemCopyHook?.call()); // mirror to the OS clipboard
     notifyListeners();
   }
 
@@ -1344,9 +1398,13 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Paste the internal clipboard centered in the current page.
+  /// Paste the internal clipboard centered in the current page; falls back to
+  /// the OS clipboard (image, then text) when the internal one is empty.
   void pasteClipboard() {
-    if (_appClipboard.isEmpty) return;
+    if (_appClipboard.isEmpty) {
+      unawaited(systemPasteFallback?.call());
+      return;
+    }
     final target = currentPageLayout;
     if (target == null) return;
     final page = pages[target.pageId]!;
@@ -1382,12 +1440,26 @@ class CanvasController extends ChangeNotifier {
     final beforeObjects = List.of(page.objects);
     final selectedStrokes = selection.whereType<StrokeElement>().toList();
     final selectedObjects = selection.where((e) => e is! StrokeElement).toList();
-    
+
     final restStrokes = page.strokes.where((e) => !selectedStrokes.contains(e)).toList();
     final restObjects = page.objects.where((e) => !selectedObjects.contains(e)).toList();
-    
+
     final afterStrokes = front ? [...restStrokes, ...selectedStrokes] : [...selectedStrokes, ...restStrokes];
     final afterObjects = front ? [...restObjects, ...selectedObjects] : [...selectedObjects, ...restObjects];
+
+    // zIndex is what actually moves the selection across the stroke/object
+    // split (an image behind ink, ink above an image); the list reorder above
+    // only settles ties within each list.
+    final all = [...page.strokes, ...page.objects];
+    var minZ = 0.0, maxZ = 0.0;
+    for (final el in all) {
+      if (el.zIndex < minZ) minZ = el.zIndex;
+      if (el.zIndex > maxZ) maxZ = el.zIndex;
+    }
+    final newZ = front ? maxZ + 1 : minZ - 1;
+    final beforeZ = {for (final el in selection) el.id: el.zIndex};
+    final selected = List.of(selection);
+    _stamp(selected); // z change must sync (LWW needs a newer rev)
 
     _doOp(
       _CanvasOp(
@@ -1396,10 +1468,16 @@ class CanvasController extends ChangeNotifier {
         apply: () {
           page.strokes..clear()..addAll(afterStrokes);
           page.objects..clear()..addAll(afterObjects);
+          for (final el in selected) {
+            el.zIndex = newZ;
+          }
         },
         revert: () {
           page.strokes..clear()..addAll(beforeStrokes);
           page.objects..clear()..addAll(beforeObjects);
+          for (final el in selected) {
+            el.zIndex = beforeZ[el.id] ?? 0;
+          }
         },
       ),
     );
@@ -1894,6 +1972,44 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ── Bookmarks (stored in canvas.json → synced) ─────────────────────────
+
+  /// Bookmarks the page currently centered in the viewport.
+  Bookmark? addBookmarkHere(String name) {
+    final current = currentPageLayout;
+    if (current == null) return null;
+    final bm = Bookmark(
+      id: newModelId('bm'),
+      name: name,
+      pageId: current.pageId,
+      createdAt: DateTime.now(),
+    );
+    canvas.bookmarks.add(bm);
+    _markDirty(const {}, structural: true);
+    notifyListeners();
+    return bm;
+  }
+
+  void removeBookmark(Bookmark bm) {
+    canvas.bookmarks.removeWhere((b) => b.id == bm.id);
+    _markDirty(const {}, structural: true);
+    notifyListeners();
+  }
+
+  /// Jumps to a bookmark's page (no-op if that page is gone).
+  void jumpToBookmark(Bookmark bm) {
+    if (layout.layoutOf(bm.pageId) == null) return;
+    jumpToPage(bm.pageId);
+  }
+
+  /// 1-based page ordinal for labels ("Page 3"), or null if not found.
+  int? pageOrdinalOf(String pageId) {
+    for (var i = 0; i < layout.pages.length; i++) {
+      if (layout.pages[i].pageId == pageId) return i + 1;
+    }
+    return null;
+  }
+
   // ── Over-scroll page adding (Samsung-Notes-style) ──────────────────────
 
   double overscrollRight = 0;
@@ -2046,6 +2162,9 @@ class CanvasController extends ChangeNotifier {
     canvas.attachments
       ..clear()
       ..addAll(fresh.attachments);
+    canvas.bookmarks
+      ..clear()
+      ..addAll(fresh.bookmarks);
 
     // Keep live in-memory pages (they may be ahead of disk); read only the
     // ones we don't have yet, and drop ones no row references anymore.
@@ -2066,6 +2185,10 @@ class CanvasController extends ChangeNotifier {
 
   @override
   void dispose() {
+    // Remember where this canvas was left (device-local, not synced).
+    if (_viewportInitialized) {
+      SettingsService().saveCanvasViewport(canvas.id, zoom, pan.dx, pan.dy);
+    }
     SyncService().unregisterCanvasListener(canvas.id);
     _scrollTicker?.dispose();
     _saveTimer?.cancel();

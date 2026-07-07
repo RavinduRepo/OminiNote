@@ -4,8 +4,10 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:pasteboard/pasteboard.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
@@ -64,6 +66,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   _TextEditSession? _textEdit;
 
+  /// Captures the rendered canvas so "copy selection" can put pixels on the
+  /// OS clipboard.
+  final GlobalKey _canvasBoundaryKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
@@ -74,8 +80,151 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final pages = await _service.loadPages(widget.canvas);
     if (!mounted) return;
     setState(() {
-      _controller = CanvasController(canvas: widget.canvas, pages: pages);
+      _controller = CanvasController(canvas: widget.canvas, pages: pages)
+        ..systemCopyHook = _copySelectionToSystemClipboard
+        ..systemPasteFallback = _pasteFromSystemClipboard;
     });
+  }
+
+  // ── OS clipboard bridging ─────────────────────────────────────────────
+
+  /// Mirrors the just-copied selection to the OS clipboard: text-only
+  /// selections as plain text, anything else as a PNG of the selection's
+  /// on-screen pixels.
+  Future<void> _copySelectionToSystemClipboard() async {
+    final c = _controller;
+    if (c == null || c.selection.isEmpty) return;
+
+    if (c.selection.every((e) => e is TextElement)) {
+      final text = c.selection
+          .whereType<TextElement>()
+          .map((t) => t.text)
+          .join('\n');
+      if (text.trim().isNotEmpty) {
+        await Clipboard.setData(ClipboardData(text: text));
+      }
+      return;
+    }
+
+    // A single image: put the ORIGINAL file bytes on the clipboard
+    // (lossless), not a screen-resolution re-render. Assets are stored as
+    // PNG/JPEG; both paste fine elsewhere.
+    if (c.selection.length == 1 && c.selection.single is ImageElement) {
+      try {
+        final el = c.selection.single as ImageElement;
+        final file = _service.assetFile(widget.canvas, el.assetId);
+        if (await file.exists()) {
+          await Pasteboard.writeImage(await file.readAsBytes());
+          return;
+        }
+      } catch (_) {
+        // fall through to the rendered-pixels path
+      }
+    }
+
+    try {
+      final pageId = c.selectionPageId;
+      final bounds = c.selectionBounds;
+      if (pageId == null || bounds == null) return;
+      final boundary = _canvasBoundaryKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) return;
+
+      const ratio = 2.0; // crisp enough for re-paste anywhere
+      final full = await boundary.toImage(pixelRatio: ratio);
+      final screenRect = c
+          .pageScreenRect(pageId, bounds.inflate(8))
+          .intersect(Offset.zero & boundary.size);
+      if (screenRect.isEmpty) return;
+
+      // Crop the selection out of the captured frame.
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+      final src = Rect.fromLTWH(
+        screenRect.left * ratio,
+        screenRect.top * ratio,
+        screenRect.width * ratio,
+        screenRect.height * ratio,
+      );
+      final dst = Rect.fromLTWH(0, 0, src.width, src.height);
+      canvas.drawImageRect(full, src, dst, ui.Paint());
+      final cropped = await recorder
+          .endRecording()
+          .toImage(src.width.round(), src.height.round());
+      final png = await cropped.toByteData(format: ui.ImageByteFormat.png);
+      full.dispose();
+      cropped.dispose();
+      if (png == null) return;
+      await Pasteboard.writeImage(png.buffer.asUint8List());
+    } catch (_) {
+      // OS image clipboard unsupported here — the internal clipboard still
+      // has the full-fidelity copy.
+    }
+  }
+
+  /// Paste fallback when the internal clipboard is empty: OS image first,
+  /// then OS text.
+  Future<void> _pasteFromSystemClipboard() async {
+    final c = _controller;
+    if (c == null) return;
+
+    Uint8List? imageBytes;
+    try {
+      imageBytes = await Pasteboard.image;
+    } catch (_) {
+      imageBytes = null; // platform without image clipboard support
+    }
+    if (imageBytes != null && imageBytes.isNotEmpty) {
+      await _insertImageBytes(imageBytes);
+      return;
+    }
+    await _pasteSystemText();
+  }
+
+  /// Decodes [bytes], stores them as an asset, and drops an ImageElement
+  /// centered on the current page (scaled to fit).
+  Future<void> _insertImageBytes(Uint8List bytes) async {
+    final c = _controller!;
+    final target = c.currentPageLayout;
+    if (target == null) return;
+    final page = c.pages[target.pageId]!;
+
+    ui.Image decoded;
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      decoded = (await codec.getNextFrame()).image;
+    } catch (_) {
+      _toast('Clipboard image could not be read');
+      return;
+    }
+    // Always store a real PNG: clipboards can hand over formats (e.g. a
+    // Windows DIB) that Flutter decodes fine but the PDF exporter's
+    // PdfBitmap (PNG/JPEG only) would silently drop from exports.
+    var storeBytes = bytes;
+    try {
+      final png = await decoded.toByteData(format: ui.ImageByteFormat.png);
+      if (png != null) storeBytes = png.buffer.asUint8List();
+    } catch (_) {}
+    final assetId = await _service.putAsset(widget.canvas, storeBytes, 'png');
+    final maxW = page.width * 0.6;
+    final scale = math.min(1.0, maxW / decoded.width);
+    final w = decoded.width * scale, h = decoded.height * scale;
+    decoded.dispose();
+    if (!mounted) return;
+    c.addElement(
+      target.pageId,
+      ImageElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        rect: Rect.fromCenter(
+          center: Offset(page.width / 2, page.height / 2),
+          width: w,
+          height: h,
+        ),
+        assetId: assetId,
+      ),
+    );
+    _toast('Image pasted');
   }
 
   @override
@@ -442,7 +591,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     c.textFontSize = attr.fontSize;
     c.textBold = attr.bold;
     c.textItalic = attr.italic;
-    c.color = attr.color;
+    c.textColor = attr.color; // text's own color slot, whatever tool is active
     _remeasureEditing();
     c.notifyRepaint(); // refresh toolbar highlight
   }
@@ -725,6 +874,11 @@ class _CanvasScreenState extends State<CanvasScreen> {
       c.pasteClipboard();
       return;
     }
+    await _pasteFromSystemClipboard();
+  }
+
+  Future<void> _pasteSystemText() async {
+    final c = _controller!;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text == null || text.trim().isEmpty || !mounted) {
@@ -938,6 +1092,107 @@ class _CanvasScreenState extends State<CanvasScreen> {
             );
           },
         ),
+      ),
+    );
+  }
+
+  Future<void> _showBookmarks() async {
+    final c = _controller!;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListenableBuilder(
+          listenable: c,
+          builder: (context, _) {
+            final items = c.canvas.bookmarks;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                const _SheetLabel('Bookmarks'),
+                ListTile(
+                  leading: const Icon(Icons.bookmark_add_outlined),
+                  title: const Text('Bookmark this page'),
+                  onTap: () async {
+                    final ordinal =
+                        c.pageOrdinalOf(c.currentPageLayout?.pageId ?? '');
+                    final name = await _promptText(
+                      title: 'New bookmark',
+                      initial: ordinal != null ? 'Page $ordinal' : 'Bookmark',
+                      cta: 'Add',
+                    );
+                    if (name == null || name.isEmpty) return;
+                    c.addBookmarkHere(name);
+                  },
+                ),
+                const Divider(height: 1),
+                if (items.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('No bookmarks yet'),
+                  )
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: items.length,
+                      itemBuilder: (context, i) {
+                        final bm = items[i];
+                        final ordinal = c.pageOrdinalOf(bm.pageId);
+                        return ListTile(
+                          leading: const Icon(Icons.bookmark_outline),
+                          title: Text(bm.name),
+                          subtitle:
+                              ordinal != null ? Text('Page $ordinal') : null,
+                          onTap: () {
+                            Navigator.pop(context);
+                            c.jumpToBookmark(bm);
+                          },
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, size: 20),
+                            tooltip: 'Remove bookmark',
+                            onPressed: () => c.removeBookmark(bm),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 8),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Small shared one-line text prompt.
+  Future<String?> _promptText({
+    required String title,
+    String initial = '',
+    String cta = 'OK',
+  }) {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+          onSubmitted: (v) => Navigator.pop(context, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: Text(cta),
+          ),
+        ],
       ),
     );
   }
@@ -1225,6 +1480,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
                   _exportPdf();
                 case 'navigator':
                   _showNavigator();
+                case 'bookmarks':
+                  _showBookmarks();
                 case 'attachments':
                   _showAttachments();
                 case 'page_settings':
@@ -1235,6 +1492,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
               PopupMenuItem(value: 'rename', child: Text('Rename')),
               PopupMenuItem(value: 'export', child: Text('Export PDF')),
               PopupMenuItem(value: 'navigator', child: Text('Pages')),
+              PopupMenuItem(value: 'bookmarks', child: Text('Bookmarks')),
               PopupMenuItem(value: 'attachments', child: Text('Attachments')),
               PopupMenuItem(
                 value: 'page_settings',
@@ -1307,12 +1565,17 @@ class _CanvasScreenState extends State<CanvasScreen> {
               child: Stack(
                 children: [
                   SizedBox.expand(
-                    child: CustomPaint(
-                      painter: CanvasPainter(
-                        controller: c,
-                        pageBorderColor: palette.border,
-                        accentColor: palette.accent,
-                        canvasTextColor: palette.textDim,
+                    // Boundary lets "copy selection" capture the rendered
+                    // pixels for the OS clipboard.
+                    child: RepaintBoundary(
+                      key: _canvasBoundaryKey,
+                      child: CustomPaint(
+                        painter: CanvasPainter(
+                          controller: c,
+                          pageBorderColor: palette.border,
+                          accentColor: palette.accent,
+                          canvasTextColor: palette.textDim,
+                        ),
                       ),
                     ),
                   ),
@@ -1532,11 +1795,8 @@ Widget? _buildToolContextRow(
         palette: palette,
       );
     case CanvasTool.lasso:
-      return _HintRow(
-        icon: Icons.gesture,
-        text: 'Draw around items to select them',
-        palette: palette,
-      );
+      // Hint + Paste (the row handles the empty-selection state itself).
+      return _buildLassoActionRow(context, c, palette);
     case CanvasTool.text:
       return _buildTextStyleRow(context, c, palette);
   }
@@ -1612,12 +1872,13 @@ Widget _buildLassoActionRow(
             palette: palette,
           ),
         ),
-        if (CanvasController.clipboardHasContent)
-          TextButton.icon(
-            onPressed: c.pasteClipboard,
-            icon: const Icon(Icons.content_paste, size: 16),
-            label: const Text('Paste'),
-          ),
+        // Always available: internal clipboard first, else the OS clipboard
+        // (image, then text).
+        TextButton.icon(
+          onPressed: c.pasteClipboard,
+          icon: const Icon(Icons.content_paste, size: 16),
+          label: const Text('Paste'),
+        ),
       ],
     );
   }
@@ -1675,28 +1936,52 @@ Widget _buildTextStyleRow(
     color: palette.border,
   );
 
-  return SingleChildScrollView(
+  // TextFieldTapRegion: taps on these controls count as "inside" the text
+  // editor, so they no longer unfocus the TextField / fire onTapOutside —
+  // which used to commit the edit and collapse the selection the instant any
+  // style button was tapped ("selecting a style deselects and does nothing").
+  return TextFieldTapRegion(
+    child: SingleChildScrollView(
     scrollDirection: Axis.horizontal,
     child: Row(
       children: [
-        SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(value: 'sans', label: Text('Aa')),
-            ButtonSegment(
+        PopupMenuButton<String>(
+          tooltip: 'Font',
+          initialValue: c.textFontFamily,
+          onSelected: c.setTextFontFamily,
+          itemBuilder: (context) => const [
+            PopupMenuItem(value: 'sans', child: Text('Sans')),
+            PopupMenuItem(
               value: 'serif',
-              label: Text('Aa', style: TextStyle(fontFamily: 'Georgia')),
+              child: Text('Serif', style: TextStyle(fontFamily: 'Georgia')),
             ),
-            ButtonSegment(
+            PopupMenuItem(
               value: 'mono',
-              label: Text('Aa', style: TextStyle(fontFamily: 'Courier New')),
+              child:
+                  Text('Mono', style: TextStyle(fontFamily: 'Courier New')),
             ),
           ],
-          selected: {c.textFontFamily},
-          showSelectedIcon: false,
-          style: const ButtonStyle(visualDensity: VisualDensity.compact),
-          onSelectionChanged: (s) => c.setTextFontFamily(s.first),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Aa',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontFamily: switch (c.textFontFamily) {
+                      'serif' => 'Georgia',
+                      'mono' => 'Courier New',
+                      _ => null,
+                    },
+                  ),
+                ),
+                Icon(Icons.arrow_drop_down, size: 18, color: palette.textDim),
+              ],
+            ),
+          ),
         ),
-        const SizedBox(width: 8),
         IconButton(
           visualDensity: VisualDensity.compact,
           tooltip: 'Smaller',
@@ -1745,7 +2030,7 @@ Widget _buildTextStyleRow(
             padding: const EdgeInsets.symmetric(horizontal: 3),
             child: _ColorDot(
               color: preset,
-              selected: preset.toARGB32() == c.color.toARGB32(),
+              selected: preset.toARGB32() == c.textColor.toARGB32(),
               ringColor: palette.accent,
               borderColor: palette.border,
               onTap: () => c.setTextColor(preset),
@@ -1766,6 +2051,7 @@ Widget _buildTextStyleRow(
         ],
       ],
     ),
+  ),
   );
 }
 

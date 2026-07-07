@@ -162,8 +162,8 @@ class SyncfusionPdfExporter implements PdfExporter {
       _drawPattern(g, page, xOffset);
     }
 
-    // Elements in z-order.
-    for (final el in [...page.strokes, ...page.objects]) {
+    // Elements in z-order (same combined ordering as the on-screen painter).
+    for (final el in zOrderedElements(page)) {
       switch (el) {
         case StrokeElement():
           _drawStroke(g, el, xOffset);

@@ -5,6 +5,20 @@ import 'element.dart';
 const double kDefaultPageWidth = 595;
 const double kDefaultPageHeight = 842;
 
+/// Combined paint order for a page: strokes + objects stable-sorted by
+/// [CanvasElement.zIndex] (ties keep list order, i.e. strokes under objects).
+/// Used by both the on-screen painter and the PDF exporter so "send to back"
+/// can put an image behind ink — the two lists alone couldn't express that.
+List<CanvasElement> zOrderedElements(CanvasPage page) {
+  final all = <CanvasElement>[...page.strokes, ...page.objects];
+  final indexed = List.generate(all.length, (i) => (i, all[i]))
+    ..sort((a, b) {
+      final z = a.$2.zIndex.compareTo(b.$2.zIndex);
+      return z != 0 ? z : a.$1.compareTo(b.$1);
+    });
+  return [for (final e in indexed) e.$2];
+}
+
 enum BgPattern { blank, ruled, grid, dotted }
 
 /// A page's background: a solid color plus an optional pattern.

@@ -200,6 +200,64 @@ void main() {
       expect(decoded.strokes.single, isA<StrokeElement>());
     });
 
+    test('zIndex round-trips and survives deepCopy (cross-list layering)', () {
+      final el = ImageElement(
+        id: 'img1',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(0, 0, 100, 100),
+        assetId: 'a.png',
+      )..zIndex = -2;
+      final decoded = CanvasElement.fromJson(
+        jsonDecode(jsonEncode(el.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded.zIndex, -2);
+      expect(el.deepCopy().zIndex, -2);
+
+      // zOrderedElements: a negative-z image paints under a default-z stroke.
+      final stroke = StrokeElement(
+        id: 's1',
+        deviceId: 'test_device',
+        z: '0|a0:',
+        tool: StrokeTool.pen,
+        color: const Color(0xFF000000),
+        size: 3,
+        points: [StrokePoint(0, 0, 0.5)],
+      );
+      final page = CanvasPage(
+        id: 'p1',
+        deviceId: 'test_device',
+        strokes: [stroke],
+        objects: [el],
+      );
+      final ordered = zOrderedElements(page);
+      expect(ordered.first.id, 'img1',
+          reason: 'sent-to-back image must paint before (under) ink');
+      expect(ordered.last.id, 's1');
+    });
+
+    test('Bookmarks ride canvas.json (round-trip)', () {
+      final canvas = Canvas(
+        id: 'c1',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'B',
+        createdAt: DateTime(2026, 7, 7),
+        bookmarks: [
+          Bookmark(
+            id: 'bm1',
+            name: 'Chapter 2',
+            pageId: 'p9',
+            createdAt: DateTime(2026, 7, 7),
+          ),
+        ],
+      );
+      final decoded = Canvas.fromJson(
+        jsonDecode(jsonEncode(canvas.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded.bookmarks.single.name, 'Chapter 2');
+      expect(decoded.bookmarks.single.pageId, 'p9');
+    });
+
     test('AttachmentElement round-trips rect, assetId, name, mime', () {
       final el = AttachmentElement(
         id: 'att_1',

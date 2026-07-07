@@ -640,6 +640,7 @@ class NotebookService {
             defaultBackground: c.defaultBackground,
             rows: c.rows,
             attachments: c.attachments,
+            bookmarks: c.bookmarks,
           ).toJson(),
         ),
       );
@@ -770,6 +771,7 @@ class NotebookService {
           defaultBackground: c.defaultBackground,
           rows: c.rows,
           attachments: c.attachments,
+          bookmarks: c.bookmarks,
         ).toJson(),
       ),
     );
@@ -924,9 +926,164 @@ class NotebookService {
     return out;
   }
 
-  // ── Garbage collection (v3 §4: purge tombstones older than 90 days) ─────
+  // ── Recycle bin (tombstoned items, restorable for 30 days) ──────────────
 
-  static const Duration _kGcMaxAge = Duration(days: 90);
+  /// Everything currently soft-deleted (notebooks/sections/canvases), for the
+  /// bin screen. Reads tombstoned files directly — the normal getters filter
+  /// them out on purpose.
+  Future<List<BinItem>> listDeletedItems() async {
+    final out = <BinItem>[];
+    final index = await _readIndex();
+    final notebookNames = <String, String>{};
+    final deletedNotebookIds = <String>{};
+
+    for (final entry in index.entries) {
+      final json = entry.value as Map<String, dynamic>;
+      notebookNames[entry.key] = json['name'] as String? ?? 'Notebook';
+      final deletedAt = json['deletedAt'];
+      if (deletedAt is num) {
+        deletedNotebookIds.add(entry.key);
+        out.add(BinItem(
+          type: BinItemType.notebook,
+          name: notebookNames[entry.key]!,
+          deletedAt: DateTime.fromMillisecondsSinceEpoch(deletedAt.toInt()),
+          notebookId: entry.key,
+          parentAlive: true,
+          parentName: '',
+        ));
+      }
+    }
+
+    final nbRoot = Directory('${appDir.path}/notebooks');
+    if (!await nbRoot.exists()) return out;
+    await for (final nbDir in nbRoot.list(followLinks: false)) {
+      if (nbDir is! Directory) continue;
+      final nbId = _basename(nbDir.path);
+      final nbName = notebookNames[nbId] ?? 'Notebook';
+      final nbAlive =
+          notebookNames.containsKey(nbId) && !deletedNotebookIds.contains(nbId);
+      final secRoot = Directory('${nbDir.path}/sections');
+      if (!await secRoot.exists()) continue;
+      await for (final secDir in secRoot.list(followLinks: false)) {
+        if (secDir is! Directory) continue;
+        final secId = _basename(secDir.path);
+        final secJson = await _readJsonFile(File('${secDir.path}/section.json'));
+        final secDeleted = secJson?['deletedAt'];
+        final secName = secJson?['name'] as String? ?? 'Section';
+        if (secDeleted is num) {
+          out.add(BinItem(
+            type: BinItemType.section,
+            name: secName,
+            deletedAt:
+                DateTime.fromMillisecondsSinceEpoch(secDeleted.toInt()),
+            notebookId: nbId,
+            sectionId: secId,
+            parentAlive: nbAlive,
+            parentName: nbName,
+          ));
+        }
+        final cvRoot = Directory('${secDir.path}/canvases');
+        if (!await cvRoot.exists()) continue;
+        await for (final cvDir in cvRoot.list(followLinks: false)) {
+          if (cvDir is! Directory) continue;
+          final cvJson =
+              await _readJsonFile(File('${cvDir.path}/canvas.json'));
+          final cvDeleted = cvJson?['deletedAt'];
+          if (cvDeleted is! num) continue;
+          out.add(BinItem(
+            type: BinItemType.canvas,
+            name: cvJson?['name'] as String? ?? 'Canvas',
+            deletedAt: DateTime.fromMillisecondsSinceEpoch(cvDeleted.toInt()),
+            notebookId: nbId,
+            sectionId: secId,
+            canvasId: _basename(cvDir.path),
+            parentAlive: nbAlive && secDeleted is! num,
+            parentName: secName,
+          ));
+        }
+      }
+    }
+    out.sort((a, b) => b.deletedAt.compareTo(a.deletedAt));
+    return out;
+  }
+
+  Future<Map<String, dynamic>?> _readJsonFile(File f) async {
+    if (!await f.exists()) return null;
+    try {
+      return jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Restores a tombstoned item: clears `deletedAt`, bumps `rev` (so the
+  /// restore beats the tombstone in every device's LWW merge and propagates
+  /// through sync), and re-links the tree leaf its deletion removed.
+  Future<void> restoreBinItem(BinItem item) async {
+    switch (item.type) {
+      case BinItemType.notebook:
+        final data = await _readIndex();
+        final json = data[item.notebookId] as Map<String, dynamic>?;
+        if (json == null) return;
+        final nb = Notebook.fromJson(json);
+        nb.deletedAt = null;
+        nb.bumpRev(SettingsService().deviceId);
+        data[item.notebookId] = nb.toJson();
+        await _writeAtomic(notebooksFile, jsonEncode(data));
+
+      case BinItemType.section:
+        final json = await _readJsonFile(
+            _sectionFile(item.notebookId, item.sectionId!));
+        if (json == null) return;
+        final sec = Section.fromJson(json);
+        sec.deletedAt = null;
+        await saveSection(sec); // bumps rev
+        final nb = await getNotebook(item.notebookId);
+        if (nb != null && !nb.allSectionIds.contains(sec.id)) {
+          nb.nodes.add(LeafNode(sec.id));
+          await saveNotebook(nb);
+        }
+
+      case BinItemType.canvas:
+        final json = await _readJsonFile(File(
+            '${canvasDir(item.notebookId, item.sectionId!, item.canvasId!).path}/canvas.json'));
+        if (json == null) return;
+        final c = Canvas.fromJson(json);
+        c.deletedAt = null;
+        await saveCanvas(c); // bumps rev
+        final sec = await getSection(item.notebookId, item.sectionId!);
+        if (sec != null && !sec.allCanvasIds.contains(c.id)) {
+          sec.nodes.add(LeafNode(c.id));
+          await saveSection(sec);
+        }
+    }
+  }
+
+  /// Immediately, physically deletes a binned item from local disk (Drive
+  /// keeps its tombstoned copy — harmless; see GC notes).
+  Future<void> purgeBinItem(BinItem item) async {
+    switch (item.type) {
+      case BinItemType.notebook:
+        final data = await _readIndex();
+        data.remove(item.notebookId);
+        await _writeAtomic(notebooksFile, jsonEncode(data));
+        final dir = Directory('${appDir.path}/notebooks/${item.notebookId}');
+        if (await dir.exists()) await dir.delete(recursive: true);
+      case BinItemType.section:
+        final dir = sectionDir(item.notebookId, item.sectionId!);
+        if (await dir.exists()) await dir.delete(recursive: true);
+      case BinItemType.canvas:
+        final dir =
+            canvasDir(item.notebookId, item.sectionId!, item.canvasId!);
+        if (await dir.exists()) await dir.delete(recursive: true);
+    }
+  }
+
+  // ── Garbage collection (purge tombstones older than the bin window) ─────
+
+  /// Bin retention: soft-deleted items stay restorable this long, then the
+  /// GC sweep removes them permanently.
+  static const Duration _kGcMaxAge = Duration(days: 30);
 
   /// Physically deletes tombstoned notebooks/sections/canvases/pages whose
   /// `deletedAt` is older than [maxAge], and drops old erase/delete-object
@@ -1058,4 +1215,35 @@ class NotebookService {
       pageJson['_gcCompacted'] = true;
     }
   }
+}
+
+// ── Recycle bin items ─────────────────────────────────────────────────────
+
+enum BinItemType { notebook, section, canvas }
+
+/// One soft-deleted item shown in the recycle bin.
+class BinItem {
+  final BinItemType type;
+  final String name;
+  final DateTime deletedAt;
+  final String notebookId;
+  final String? sectionId;
+  final String? canvasId;
+
+  /// False when the containing notebook/section is itself deleted — restoring
+  /// this item alone would put it nowhere visible, so restore the parent
+  /// first.
+  final bool parentAlive;
+  final String parentName;
+
+  const BinItem({
+    required this.type,
+    required this.name,
+    required this.deletedAt,
+    required this.notebookId,
+    this.sectionId,
+    this.canvasId,
+    required this.parentAlive,
+    required this.parentName,
+  });
 }

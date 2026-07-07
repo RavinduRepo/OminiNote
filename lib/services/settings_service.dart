@@ -48,6 +48,38 @@ class SettingsService {
   /// Timestamp of the last successful sync, or null if never synced.
   DateTime? lastSyncAt;
 
+  /// Per-canvas last viewport (canvasId → {z, x, y}) so a canvas reopens
+  /// where the user left it. Device-local by design — zoom/pan depend on this
+  /// screen, so it lives in settings.json (never synced). Capped so it can't
+  /// grow unboundedly.
+  Map<String, dynamic> _canvasViewports = {};
+  static const int _kMaxViewports = 300;
+
+  ({double zoom, double panX, double panY})? viewportFor(String canvasId) {
+    final v = _canvasViewports[canvasId];
+    if (v is! Map) return null;
+    final z = (v['z'] as num?)?.toDouble();
+    final x = (v['x'] as num?)?.toDouble();
+    final y = (v['y'] as num?)?.toDouble();
+    if (z == null || x == null || y == null) return null;
+    return (zoom: z, panX: x, panY: y);
+  }
+
+  Future<void> saveCanvasViewport(
+    String canvasId,
+    double zoom,
+    double panX,
+    double panY,
+  ) async {
+    // Re-insert to keep LRU-ish ordering; evict oldest past the cap.
+    _canvasViewports.remove(canvasId);
+    _canvasViewports[canvasId] = {'z': zoom, 'x': panX, 'y': panY};
+    while (_canvasViewports.length > _kMaxViewports) {
+      _canvasViewports.remove(_canvasViewports.keys.first);
+    }
+    await _persist();
+  }
+
   Future<void> init() async {
     final appDir = await getApplicationDocumentsDirectory();
     _settingsFile = File('${appDir.path}/settings.json');
@@ -78,6 +110,10 @@ class SettingsService {
     driveChangesToken = (data['driveChangesToken'] as String?) ?? '';
     final lastSyncStr = data['lastSyncAt'] as String?;
     lastSyncAt = lastSyncStr != null ? DateTime.tryParse(lastSyncStr) : null;
+    if (data['canvasViewports'] is Map<String, dynamic>) {
+      _canvasViewports =
+          Map<String, dynamic>.from(data['canvasViewports'] as Map);
+    }
 
     // Persist device ID if it was just generated.
     if (data['deviceId'] == null) await _persist();
@@ -120,6 +156,7 @@ class SettingsService {
         'deviceId': deviceId,
         'driveChangesToken': driveChangesToken,
         'lastSyncAt': lastSyncAt?.toIso8601String(),
+        'canvasViewports': _canvasViewports,
       }),
     );
   }
