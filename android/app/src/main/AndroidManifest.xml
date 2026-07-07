@@ -32,6 +32,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- super_clipboard: exposes copied images to other apps (clipboard
+             writes on Android hand out content:// URIs, not raw bytes). -->
+        <provider
+            android:name="com.superlist.super_native_extensions.DataProvider"
+            android:authorities="com.example.omininote.SuperClipboardDataProvider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
-import 'package:pasteboard/pasteboard.dart';
+import '../utils/clipboard_images.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
@@ -70,6 +70,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// OS clipboard.
   final GlobalKey _canvasBoundaryKey = GlobalKey();
 
+  /// Keyboard focus for canvas shortcuts (Ctrl+C/V/X/Z/Y/D, Delete, Esc).
+  final FocusNode _canvasFocus = FocusNode(debugLabel: 'canvas-shortcuts');
+
   @override
   void initState() {
     super.initState();
@@ -114,7 +117,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
         final el = c.selection.single as ImageElement;
         final file = _service.assetFile(widget.canvas, el.assetId);
         if (await file.exists()) {
-          await Pasteboard.writeImage(await file.readAsBytes());
+          await ClipboardImages.write(await file.readAsBytes());
           return;
         }
       } catch (_) {
@@ -155,7 +158,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       full.dispose();
       cropped.dispose();
       if (png == null) return;
-      await Pasteboard.writeImage(png.buffer.asUint8List());
+      await ClipboardImages.write(png.buffer.asUint8List());
     } catch (_) {
       // OS image clipboard unsupported here — the internal clipboard still
       // has the full-fidelity copy.
@@ -170,7 +173,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     Uint8List? imageBytes;
     try {
-      imageBytes = await Pasteboard.image;
+      imageBytes = await ClipboardImages.read();
     } catch (_) {
       imageBytes = null; // platform without image clipboard support
     }
@@ -229,6 +232,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   @override
   void dispose() {
+    _canvasFocus.dispose();
     _controller?.dispose(); // flushes pending saves
     super.dispose();
   }
@@ -247,6 +251,11 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   void _onPointerDown(PointerDownEvent e) {
     final c = _controller!;
+    // Clicking the canvas claims keyboard focus for the shortcut handler
+    // (unless a text edit is active — the TextField keeps it then).
+    if (_textEdit == null && !_canvasFocus.hasFocus) {
+      _canvasFocus.requestFocus();
+    }
 
     // A tool's options panel (colors/size, selection actions, text style) or
     // the full-screen tool picker is open: the first tap outside it just
@@ -1523,12 +1532,63 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// painted content, and the text-edit overlay. Shared by the normal layout
   /// (below the app bar + toolbar) and full screen (filling the whole
   /// Scaffold behind the floating controls).
+  /// Desktop keyboard shortcuts. Only while NOT editing text — the editing
+  /// TextField owns its own keys (incl. Ctrl+C/V inside the box).
+  KeyEventResult _onCanvasKey(FocusNode node, KeyEvent event) {
+    final c = _controller;
+    if (c == null || _textEdit != null) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final ctrl = HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed; // Cmd on macOS
+    final key = event.logicalKey;
+
+    if (ctrl) {
+      switch (key) {
+        case LogicalKeyboardKey.keyV:
+          c.pasteClipboard(); // internal → OS image → OS text
+          return KeyEventResult.handled;
+        case LogicalKeyboardKey.keyC:
+          if (c.selection.isNotEmpty) c.copySelection();
+          return KeyEventResult.handled;
+        case LogicalKeyboardKey.keyX:
+          if (c.selection.isNotEmpty) c.cutSelection();
+          return KeyEventResult.handled;
+        case LogicalKeyboardKey.keyD:
+          if (c.selection.isNotEmpty) c.duplicateSelection();
+          return KeyEventResult.handled;
+        case LogicalKeyboardKey.keyZ:
+          HardwareKeyboard.instance.isShiftPressed ? c.redo() : c.undo();
+          return KeyEventResult.handled;
+        case LogicalKeyboardKey.keyY:
+          c.redo();
+          return KeyEventResult.handled;
+      }
+    } else if (key == LogicalKeyboardKey.delete ||
+        key == LogicalKeyboardKey.backspace) {
+      if (c.selection.isNotEmpty) {
+        c.deleteSelection();
+        return KeyEventResult.handled;
+      }
+    } else if (key == LogicalKeyboardKey.escape) {
+      if (c.selection.isNotEmpty) {
+        c.clearSelection();
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
+
   Widget _buildCanvasArea(CanvasController c, AppPalette palette) {
     return ClipRect(
       child: LayoutBuilder(
         builder: (context, constraints) {
           c.setScreenSize(constraints.biggest);
-          return Listener(
+          return Focus(
+            focusNode: _canvasFocus,
+            onKeyEvent: _onCanvasKey,
+            child: Listener(
             onPointerDown: _onPointerDown,
             onPointerMove: _onPointerMove,
             onPointerUp: _onPointerUp,
@@ -1583,6 +1643,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 ],
               ),
             ),
+          ),
           );
         },
       ),
@@ -2024,6 +2085,32 @@ Widget _buildTextStyleRow(
           ),
           onPressed: c.cycleTextAlign,
         ),
+        if (c.isEditingText) ...[
+          divider(),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Bullet list',
+            icon: const Icon(Icons.format_list_bulleted, size: 18),
+            onPressed: () =>
+                c.toggleTextListPrefix(RichTextController.bulletPrefix),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Star list',
+            icon: const Icon(Icons.star_outline, size: 18),
+            onPressed: () =>
+                c.toggleTextListPrefix(RichTextController.starPrefix),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Checkbox (tap again to check)',
+            icon: const Icon(Icons.check_box_outlined, size: 18),
+            onPressed: () => c.toggleTextListPrefix(
+              RichTextController.uncheckedPrefix,
+              cycle: true,
+            ),
+          ),
+        ],
         divider(),
         for (final preset in _presetColors)
           Padding(

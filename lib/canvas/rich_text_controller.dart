@@ -56,12 +56,126 @@ class RichTextController extends TextEditingController {
 
   List<CharAttr> get attrs => _attrs;
 
+  /// Line-list prefixes (plain Unicode glyphs, so the painter, PDF export and
+  /// sync need zero special handling): bullet, star, unchecked/checked box.
+  static const String bulletPrefix = '• ';
+  static const String starPrefix = '★ ';
+  static const String uncheckedPrefix = '☐ ';
+  static const String checkedPrefix = '☑ ';
+  static const List<String> _linePrefixes = [
+    bulletPrefix,
+    starPrefix,
+    uncheckedPrefix,
+    checkedPrefix,
+  ];
+
   @override
   set value(TextEditingValue newValue) {
-    if (newValue.text != text) {
-      _attrs = _reconcile(text, _attrs, newValue.text);
+    var next = newValue;
+    if (next.text != text) {
+      // OneNote-style list continuation: pressing Enter on a list line
+      // carries the prefix onto the new line; Enter on an *empty* list item
+      // removes the prefix (exits the list).
+      next = _maybeContinueList(value, next);
+      _attrs = _reconcile(text, _attrs, next.text);
     }
-    super.value = newValue;
+    super.value = next;
+  }
+
+  TextEditingValue _maybeContinueList(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final oldText = oldValue.text, newText = newValue.text;
+    // Only react to a plain single-'\n' insertion at the caret.
+    if (newText.length != oldText.length + 1) return newValue;
+    final caret = newValue.selection.baseOffset;
+    if (caret < 1 || newText[caret - 1] != '\n') return newValue;
+    if (newText.substring(0, caret - 1) != oldText.substring(0, caret - 1) ||
+        newText.substring(caret) != oldText.substring(caret - 1)) {
+      return newValue;
+    }
+
+    final lineStart = newText.lastIndexOf('\n', caret - 2) + 1;
+    final prevLine = newText.substring(lineStart, caret - 1);
+    for (final prefix in _linePrefixes) {
+      if (!prevLine.startsWith(prefix)) continue;
+      if (prevLine.length == prefix.length) {
+        // Empty item + Enter → exit the list: drop both the prefix and the
+        // just-typed newline, leaving a plain empty line.
+        return TextEditingValue(
+          text: newText.substring(0, lineStart) + newText.substring(caret),
+          selection: TextSelection.collapsed(offset: lineStart),
+        );
+      }
+      // Continue the list on the new line (a fresh unchecked box for ☑).
+      final cont = prefix == checkedPrefix ? uncheckedPrefix : prefix;
+      return TextEditingValue(
+        text: newText.substring(0, caret) + cont + newText.substring(caret),
+        selection: TextSelection.collapsed(offset: caret + cont.length),
+      );
+    }
+    return newValue;
+  }
+
+  /// Toggles a list prefix on every line the selection touches. Behavior per
+  /// line: has [prefix] → remove it; has another list prefix → replace; plain
+  /// → add. For the checkbox button pass [cycle]=true: none → ☐ → ☑ → none.
+  void toggleLinePrefix(String prefix, {bool cycle = false}) {
+    final sel = selection;
+    final start = sel.isValid ? sel.start : text.length;
+    final end = sel.isValid ? sel.end : text.length;
+
+    final lineStarts = <int>[];
+    var ls = text.lastIndexOf('\n', (start - 1).clamp(0, text.length)) + 1;
+    if (start == 0) ls = 0;
+    lineStarts.add(ls);
+    for (var i = ls; i < end && i < text.length; i++) {
+      if (text[i] == '\n' && i + 1 <= text.length) lineStarts.add(i + 1);
+    }
+
+    var newText = text;
+    var delta = 0; // total length change before the selection end
+    var firstDelta = 0; // change on the first line (affects sel.start)
+    for (final lineStartRaw in lineStarts) {
+      final lineStart = lineStartRaw + delta;
+      final current = _prefixAt(newText, lineStart);
+      String? replacement;
+      if (cycle) {
+        replacement = switch (current) {
+          null => uncheckedPrefix, // plain → ☐
+          uncheckedPrefix => checkedPrefix, // ☐ → ☑
+          checkedPrefix => null, // ☑ → plain
+          _ => uncheckedPrefix, // bullet/star → ☐
+        };
+      } else {
+        replacement = current == prefix ? null : prefix;
+      }
+      final removed = current?.length ?? 0;
+      final added = replacement?.length ?? 0;
+      newText = newText.substring(0, lineStart) +
+          (replacement ?? '') +
+          newText.substring(lineStart + removed);
+      if (lineStartRaw == lineStarts.first) firstDelta = added - removed;
+      delta += added - removed;
+    }
+
+    final newStart = (start + firstDelta).clamp(0, newText.length);
+    final newEnd = (end + delta).clamp(newStart, newText.length);
+    value = TextEditingValue(
+      text: newText,
+      selection: sel.isValid
+          ? TextSelection(baseOffset: newStart, extentOffset: newEnd)
+          : TextSelection.collapsed(offset: newText.length),
+    );
+    onStyleChanged?.call();
+  }
+
+  static String? _prefixAt(String s, int lineStart) {
+    for (final p in _linePrefixes) {
+      if (s.startsWith(p, lineStart)) return p;
+    }
+    return null;
   }
 
   /// Keeps the per-char style array aligned with an arbitrary text edit by

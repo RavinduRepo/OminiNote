@@ -511,6 +511,13 @@ class CanvasController extends ChangeNotifier {
     );
   }
 
+  /// Toggles a list glyph (bullet/star, or the checkbox cycle) on the lines
+  /// the in-box selection touches. Only meaningful while editing — the
+  /// prefixes are plain characters in the text itself.
+  void toggleTextListPrefix(String prefix, {bool cycle = false}) {
+    _richController?.toggleLinePrefix(prefix, cycle: cycle);
+  }
+
   /// Alignment is paragraph-level (whole box), not per-run.
   void cycleTextAlign() {
     textAlign = TextAlignOption

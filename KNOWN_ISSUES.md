@@ -32,7 +32,8 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Clipboard / platform
 
-- **OS image clipboard support varies by platform** (`pasteboard` plugin): image paste-in and PNG copy-out work on Windows/macOS (Linux needs `xclip`/`wl-clipboard` installed); Android image paste depends on the source app exposing an image URI on the clipboard. Everywhere the OS path is unsupported, copy/paste silently falls back to the app's internal clipboard (full fidelity within the app) and OS text.
+- **Benign `EPIPE (Broken pipe)` warnings on Samsung when copying an image** — logged by `super_native_extensions`'s `DataProvider$PipeDataWriter` (observed live on an SM X510, 07/07/26). One UI's clipboard manager opens the offered image stream repeatedly to build its preview thumbnail and closes the pipe early each time; the plugin catches it and the actual paste target re-requests and receives the full data. Warning noise only — do not chase it as a copy failure.
+- **Image clipboard now uses `super_clipboard`** (07/07/26; replaced `pasteboard`) — copy *and* paste of images works on Android, Windows, Linux, macOS, and iOS (the latter two are future targets but already covered). Remaining caveats: on Android both directions depend on the other app using the standard clipboard image contract (all mainstream apps do); Linux still needs a clipboard manager present on very bare setups. Where unsupported, copy/paste falls back to the app-internal clipboard (full fidelity in-app) and OS text. Note `minSdk` is now 23 and first build after `flutter clean` downloads the plugin's precompiled native core (slow once, not broken).
 
 ### Robustness
 
