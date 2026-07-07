@@ -33,9 +33,27 @@ class StrokePoint {
 /// during a drag, and the undo system snapshots deep copies around each
 /// operation instead of requiring immutability.
 sealed class CanvasElement {
+  final int schemaVersion;
   String id;
+  int rev;
+  DateTime updatedAt;
+  String deviceId;
+  DateTime? deletedAt;
 
-  CanvasElement({required this.id});
+  CanvasElement({
+    this.schemaVersion = 1,
+    required this.id,
+    this.rev = 1,
+    DateTime? updatedAt,
+    required this.deviceId,
+    this.deletedAt,
+  }) : updatedAt = updatedAt ?? DateTime.now();
+
+  void bumpRev(String newDeviceId) {
+    rev += 1;
+    updatedAt = DateTime.now();
+    deviceId = newDeviceId;
+  }
 
   /// Axis-aligned bounds in page-local points (rotation ignored — used for
   /// selection bboxes and culling, where approximate is fine).
@@ -63,6 +81,8 @@ sealed class CanvasElement {
         return TextElement.fromJson(json);
       case 'image':
         return ImageElement.fromJson(json);
+      case 'attachment':
+        return AttachmentElement.fromJson(json);
       default:
         throw FormatException('Unknown element type: ${json['type']}');
     }
@@ -79,16 +99,32 @@ class StrokeElement extends CanvasElement {
   double size;
   List<StrokePoint> points;
 
+  final DateTime createdAt;
+  String z; // fractional index for draw order
+
   /// Cached rendered outline; invalidated whenever geometry changes.
   Path? cachedOutline;
 
   StrokeElement({
+    int schemaVersion = 1,
     required super.id,
+    int rev = 1,
+    DateTime? updatedAt,
+    required super.deviceId,
+    DateTime? deletedAt,
+    DateTime? createdAt,
+    required this.z,
     required this.tool,
     required this.color,
     required this.size,
     required this.points,
-  });
+  })  : createdAt = createdAt ?? DateTime.now(),
+        super(
+          schemaVersion: schemaVersion,
+          rev: rev,
+          updatedAt: updatedAt,
+          deletedAt: deletedAt,
+        );
 
   void invalidateCache() => cachedOutline = null;
 
@@ -109,12 +145,19 @@ class StrokeElement extends CanvasElement {
 
   @override
   StrokeElement deepCopy({bool withNewId = false}) => StrokeElement(
-    id: withNewId ? newModelId('el') : id,
-    tool: tool,
-    color: color,
-    size: size,
-    points: points.map((p) => StrokePoint(p.x, p.y, p.p)).toList(),
-  );
+        schemaVersion: schemaVersion,
+        id: withNewId ? newModelId('el') : id,
+        rev: rev,
+        updatedAt: updatedAt,
+        deviceId: deviceId,
+        deletedAt: deletedAt,
+        createdAt: createdAt,
+        z: z,
+        tool: tool,
+        color: color,
+        size: size,
+        points: points.map((p) => StrokePoint(p.x, p.y, p.p)).toList(),
+      );
 
   @override
   void translate(double dx, double dy) {
@@ -148,26 +191,46 @@ class StrokeElement extends CanvasElement {
 
   @override
   Map<String, dynamic> toJson() => {
-    'type': 'stroke',
-    'id': id,
-    'tool': tool.name,
-    'color': color.toARGB32(),
-    'size': size,
-    'points': points.map((p) => p.toJson()).toList(),
-  };
+        'schemaVersion': schemaVersion,
+        'type': 'stroke',
+        'id': id,
+        'rev': rev,
+        'updatedAt': updatedAt.millisecondsSinceEpoch,
+        'deviceId': deviceId,
+        'deletedAt': deletedAt?.millisecondsSinceEpoch,
+        'createdAt': createdAt.millisecondsSinceEpoch,
+        'z': z,
+        'tool': tool.name,
+        'color': color.toARGB32(),
+        'size': size,
+        'points': points.map((p) => p.toJson()).toList(),
+      };
 
   factory StrokeElement.fromJson(Map<String, dynamic> json) => StrokeElement(
-    id: json['id'] ?? newModelId('el'),
-    tool: StrokeTool.values.firstWhere(
-      (t) => t.name == json['tool'],
-      orElse: () => StrokeTool.pen,
-    ),
-    color: Color(json['color'] ?? 0xFF000000),
-    size: (json['size'] as num?)?.toDouble() ?? 4.0,
-    points: List<Map<String, dynamic>>.from(
-      json['points'] ?? [],
-    ).map(StrokePoint.fromJson).toList(),
-  );
+        schemaVersion: json['schemaVersion'] ?? 1,
+        id: json['id'] ?? newModelId('el'),
+        rev: json['rev'] ?? 1,
+        updatedAt: json['updatedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+            : null,
+        deviceId: json['deviceId'] ?? 'unknown',
+        deletedAt: json['deletedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+            : null,
+        createdAt: json['createdAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['createdAt'])
+            : DateTime.now(),
+        z: json['z'] ?? '0|a0:',
+        tool: StrokeTool.values.firstWhere(
+          (t) => t.name == json['tool'],
+          orElse: () => StrokeTool.pen,
+        ),
+        color: Color(json['color'] ?? 0xFF000000),
+        size: (json['size'] as num?)?.toDouble() ?? 4.0,
+        points: List<Map<String, dynamic>>.from(
+          json['points'] ?? [],
+        ).map(StrokePoint.fromJson).toList(),
+      );
 }
 
 enum TextAlignOption { left, center, right }
@@ -243,7 +306,12 @@ class TextElement extends CanvasElement {
   bool italic;
 
   TextElement({
+    int schemaVersion = 1,
     required super.id,
+    int rev = 1,
+    DateTime? updatedAt,
+    required super.deviceId,
+    DateTime? deletedAt,
     required this.rect,
     this.rotation = 0,
     String text = '',
@@ -267,7 +335,13 @@ class TextElement extends CanvasElement {
                      color: color,
                      fontFamily: fontFamily,
                    ),
-                 ]);
+                 ]),
+       super(
+         schemaVersion: schemaVersion,
+         rev: rev,
+         updatedAt: updatedAt,
+         deletedAt: deletedAt,
+       );
 
   /// The plain concatenated text of all runs.
   String get text => runs.map((r) => r.text).join();
@@ -277,7 +351,12 @@ class TextElement extends CanvasElement {
 
   @override
   TextElement deepCopy({bool withNewId = false}) => TextElement(
+    schemaVersion: schemaVersion,
     id: withNewId ? newModelId('el') : id,
+    rev: rev,
+    updatedAt: updatedAt,
+    deviceId: deviceId,
+    deletedAt: deletedAt,
     rect: rect,
     rotation: rotation,
     runs: [for (final r in runs) r.clone()],
@@ -321,8 +400,13 @@ class TextElement extends CanvasElement {
 
   @override
   Map<String, dynamic> toJson() => {
+    'schemaVersion': schemaVersion,
     'type': 'text',
     'id': id,
+    'rev': rev,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+    'deviceId': deviceId,
+    'deletedAt': deletedAt?.millisecondsSinceEpoch,
     'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
     'rotation': rotation,
     'runs': [for (final r in runs) r.toJson()],
@@ -339,7 +423,12 @@ class TextElement extends CanvasElement {
     final r = json['rect'] as Map<String, dynamic>? ?? {};
     final runsJson = json['runs'] as List?;
     return TextElement(
+      schemaVersion: json['schemaVersion'] ?? 1,
       id: json['id'] ?? newModelId('el'),
+      rev: json['rev'] ?? 1,
+      updatedAt: json['updatedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']) : null,
+      deviceId: json['deviceId'] ?? 'unknown',
+      deletedAt: json['deletedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt']) : null,
       rect: Rect.fromLTWH(
         (r['x'] as num?)?.toDouble() ?? 0,
         (r['y'] as num?)?.toDouble() ?? 0,
@@ -378,18 +467,33 @@ class ImageElement extends CanvasElement {
   String assetId;
 
   ImageElement({
+    int schemaVersion = 1,
     required super.id,
+    int rev = 1,
+    DateTime? updatedAt,
+    required super.deviceId,
+    DateTime? deletedAt,
     required this.rect,
     this.rotation = 0,
     required this.assetId,
-  });
+  }) : super(
+         schemaVersion: schemaVersion,
+         rev: rev,
+         updatedAt: updatedAt,
+         deletedAt: deletedAt,
+       );
 
   @override
   Rect get bounds => rect;
 
   @override
   ImageElement deepCopy({bool withNewId = false}) => ImageElement(
+    schemaVersion: schemaVersion,
     id: withNewId ? newModelId('el') : id,
+    rev: rev,
+    updatedAt: updatedAt,
+    deviceId: deviceId,
+    deletedAt: deletedAt,
     rect: rect,
     rotation: rotation,
     assetId: assetId,
@@ -423,8 +527,13 @@ class ImageElement extends CanvasElement {
 
   @override
   Map<String, dynamic> toJson() => {
+    'schemaVersion': schemaVersion,
     'type': 'image',
     'id': id,
+    'rev': rev,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+    'deviceId': deviceId,
+    'deletedAt': deletedAt?.millisecondsSinceEpoch,
     'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
     'rotation': rotation,
     'assetId': assetId,
@@ -433,7 +542,12 @@ class ImageElement extends CanvasElement {
   factory ImageElement.fromJson(Map<String, dynamic> json) {
     final r = json['rect'] as Map<String, dynamic>? ?? {};
     return ImageElement(
+      schemaVersion: json['schemaVersion'] ?? 1,
       id: json['id'] ?? newModelId('el'),
+      rev: json['rev'] ?? 1,
+      updatedAt: json['updatedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']) : null,
+      deviceId: json['deviceId'] ?? 'unknown',
+      deletedAt: json['deletedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt']) : null,
       rect: Rect.fromLTWH(
         (r['x'] as num?)?.toDouble() ?? 0,
         (r['y'] as num?)?.toDouble() ?? 0,
@@ -442,6 +556,126 @@ class ImageElement extends CanvasElement {
       ),
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0,
       assetId: json['assetId'] ?? '',
+    );
+  }
+}
+
+/// A visible "attached file" chip on the page: an icon + file name linking to
+/// a stored asset (typically a PDF added "as attachment"). Tapping it in the
+/// app opens the file; on export the chip is drawn and the file is embedded
+/// in the output PDF as a document attachment.
+class AttachmentElement extends CanvasElement {
+  Rect rect;
+
+  /// Radians, about the rect center.
+  double rotation;
+
+  /// Content-addressed asset reference (file in the canvas's assets dir).
+  String assetId;
+
+  /// Display name (original file name).
+  String name;
+
+  String mime;
+
+  AttachmentElement({
+    int schemaVersion = 1,
+    required super.id,
+    int rev = 1,
+    DateTime? updatedAt,
+    required super.deviceId,
+    DateTime? deletedAt,
+    required this.rect,
+    this.rotation = 0,
+    required this.assetId,
+    required this.name,
+    this.mime = 'application/pdf',
+  }) : super(
+         schemaVersion: schemaVersion,
+         rev: rev,
+         updatedAt: updatedAt,
+         deletedAt: deletedAt,
+       );
+
+  @override
+  Rect get bounds => rect;
+
+  @override
+  AttachmentElement deepCopy({bool withNewId = false}) => AttachmentElement(
+    schemaVersion: schemaVersion,
+    id: withNewId ? newModelId('el') : id,
+    rev: rev,
+    updatedAt: updatedAt,
+    deviceId: deviceId,
+    deletedAt: deletedAt,
+    rect: rect,
+    rotation: rotation,
+    assetId: assetId,
+    name: name,
+    mime: mime,
+  );
+
+  @override
+  void translate(double dx, double dy) => rect = rect.shift(Offset(dx, dy));
+
+  @override
+  void scaleBy(double factor, Offset anchor) {
+    rect = Rect.fromLTWH(
+      anchor.dx + (rect.left - anchor.dx) * factor,
+      anchor.dy + (rect.top - anchor.dy) * factor,
+      rect.width * factor,
+      rect.height * factor,
+    );
+  }
+
+  @override
+  void rotateBy(double angle, Offset pivot) {
+    rotation += angle;
+    final c = rect.center;
+    final dx = c.dx - pivot.dx, dy = c.dy - pivot.dy;
+    final cosA = math.cos(angle), sinA = math.sin(angle);
+    final nc = Offset(
+      pivot.dx + dx * cosA - dy * sinA,
+      pivot.dy + dx * sinA + dy * cosA,
+    );
+    rect = Rect.fromCenter(center: nc, width: rect.width, height: rect.height);
+  }
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'schemaVersion': schemaVersion,
+    'type': 'attachment',
+    'id': id,
+    'rev': rev,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+    'deviceId': deviceId,
+    'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
+    'rotation': rotation,
+    'assetId': assetId,
+    'name': name,
+    'mime': mime,
+  };
+
+  factory AttachmentElement.fromJson(Map<String, dynamic> json) {
+    final r = json['rect'] as Map<String, dynamic>? ?? {};
+    return AttachmentElement(
+      schemaVersion: json['schemaVersion'] ?? 1,
+      id: json['id'] ?? newModelId('el'),
+      rev: json['rev'] ?? 1,
+      updatedAt: json['updatedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']) : null,
+      deviceId: json['deviceId'] ?? 'unknown',
+      deletedAt: json['deletedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt']) : null,
+      rect: Rect.fromLTWH(
+        (r['x'] as num?)?.toDouble() ?? 0,
+        (r['y'] as num?)?.toDouble() ?? 0,
+        (r['w'] as num?)?.toDouble() ?? 180,
+        (r['h'] as num?)?.toDouble() ?? 44,
+      ),
+      rotation: (json['rotation'] as num?)?.toDouble() ?? 0,
+      assetId: json['assetId'] ?? '',
+      name: json['name'] ?? 'attachment.pdf',
+      mime: json['mime'] ?? 'application/pdf',
     );
   }
 }

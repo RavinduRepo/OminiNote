@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import '../models/canvas_page.dart';
+import '../services/auth_service.dart';
 import '../services/settings_service.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/sync_status_icon.dart';
 
 /// Mobile (single-pane) vs desktop (split-view sidebar) shell, or auto-detect
 /// from window width.
@@ -63,7 +66,10 @@ class SettingsScreen extends StatelessWidget {
     final settings = SettingsService();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(
+        title: const Text('Settings'),
+        actions: const [SyncStatusIcon(), SizedBox(width: 12)],
+      ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
         children: [
@@ -110,6 +116,288 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 }
+
+// ── Account Section ──────────────────────────────────────────────────────────
+
+class _AccountSection extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder(
+      valueListenable: AuthService().account,
+      builder: (context, account, _) {
+        if (account == null) {
+          return _SignedOutRow();
+        }
+        return _SignedInRow(account: account);
+      },
+    );
+  }
+}
+
+class _SignedOutRow extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: palette.accentSoft,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.person_outline, color: palette.accent),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Not signed in',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Sign in to sync notebooks across devices',
+                  style: TextStyle(fontSize: 12.5, color: palette.textDim),
+                ),
+              ],
+            ),
+          ),
+          ValueListenableBuilder<bool>(
+            valueListenable: AuthService().signingIn,
+            builder: (context, busy, _) => busy
+                ? const SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : OutlinedButton.icon(
+                    onPressed: () async {
+                      final acct = await AuthService().signIn();
+                      if (acct == null && context.mounted) {
+                        final err =
+                            AuthService().lastError.value ?? 'Sign-in failed';
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(err), behavior: SnackBarBehavior.floating),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.login, size: 18),
+                    label: const Text('Sign in'),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SignedInRow extends StatelessWidget {
+  final dynamic account; // GoogleSignInAccount
+  const _SignedInRow({required this.account});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final photoUrl = account.photoUrl as String?;
+    final displayName = account.displayName as String? ?? '';
+    final email = account.email as String? ?? '';
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 20,
+            backgroundImage: photoUrl != null ? NetworkImage(photoUrl) : null,
+            backgroundColor: palette.accentSoft,
+            child: photoUrl == null
+                ? Text(
+                    displayName.isNotEmpty ? displayName[0].toUpperCase() : '?',
+                    style: TextStyle(
+                      color: palette.accent,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  )
+                : null,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  displayName.isNotEmpty ? displayName : email,
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                if (displayName.isNotEmpty)
+                  Text(
+                    email,
+                    style: TextStyle(fontSize: 12.5, color: palette.textDim),
+                  ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () async {
+              await AuthService().signOut();
+            },
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Storage Section ──────────────────────────────────────────────────────────
+
+class _StorageSection extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder(
+      valueListenable: AuthService().account,
+      builder: (context, account, _) {
+        final connected = account != null;
+        return Column(
+          children: [
+            _StorageTile(
+              icon: Icons.folder_outlined,
+              title: 'This device',
+              subtitle: 'Notebooks stored locally',
+              selected: true,
+              onTap: null,
+            ),
+            const Divider(height: 1),
+            _StorageTile(
+              icon: Icons.cloud_outlined,
+              title: 'Google Drive',
+              subtitle: connected
+                  ? _syncSubtitle()
+                  : 'Sign in above to enable sync',
+              selected: connected,
+              trailing: connected ? _SyncStatusChip() : null,
+              onTap: connected
+                  ? () => SyncService().syncNow()
+                  : null,
+            ),
+            if (connected) ...[
+              const Divider(height: 1),
+              _StorageTile(
+                icon: Icons.sync_problem_outlined,
+                title: 'Repair sync',
+                subtitle: 'Re-download and reconcile everything from Drive',
+                selected: false,
+                onTap: () {
+                  SyncService().repair();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Repairing sync…'),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  String _syncSubtitle() {
+    final t = SettingsService().lastSyncAt;
+    if (t == null) return 'Tap to sync now';
+    final diff = DateTime.now().difference(t);
+    if (diff.inSeconds < 60) return 'Synced just now — tap to sync again';
+    if (diff.inMinutes < 60) return 'Synced ${diff.inMinutes}m ago — tap to sync';
+    return 'Synced ${diff.inHours}h ago — tap to sync';
+  }
+}
+
+class _SyncStatusChip extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return ValueListenableBuilder<SyncStatus>(
+      valueListenable: SyncService().status,
+      builder: (context, status, _) {
+        final (label, color) = switch (status) {
+          SyncStatus.syncing => ('Syncing…', palette.accent),
+          SyncStatus.error => ('Error', Colors.redAccent),
+          SyncStatus.offline => ('Offline', palette.textDim),
+          SyncStatus.idle => ('Synced', Colors.green.shade600),
+        };
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: color.withAlpha(30),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _StorageTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+
+  const _StorageTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    this.trailing,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = theme.extension<AppPalette>()!;
+
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      leading: Icon(icon, color: selected ? palette.accent : palette.textDim),
+      title: Text(
+        title,
+        style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: TextStyle(fontSize: 12.5, color: palette.textDim),
+      ),
+      trailing:
+          trailing ??
+          (selected
+              ? Icon(Icons.check_circle, color: palette.accent, size: 20)
+              : null),
+      onTap: onTap,
+    );
+  }
+}
+
+// ── Default page section ─────────────────────────────────────────────────────
 
 /// App-wide default page color + pattern for new sections/pages.
 class _DefaultPageSection extends StatelessWidget {
@@ -202,121 +490,7 @@ class _DefaultPageSection extends StatelessWidget {
   }
 }
 
-class _AccountSection extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final palette = theme.extension<AppPalette>()!;
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: palette.accentSoft,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.person_outline, color: palette.accent),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Not signed in',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'Sign in to sync notebooks',
-                  style: TextStyle(fontSize: 12.5, color: palette.textDim),
-                ),
-              ],
-            ),
-          ),
-          OutlinedButton.icon(
-            onPressed: () => _showComingSoon(context, 'Google sign-in'),
-            icon: const Icon(Icons.login, size: 18),
-            label: const Text('Sign in'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StorageSection extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _StorageTile(
-          icon: Icons.folder_outlined,
-          title: 'This device',
-          subtitle: 'Notebooks are stored locally',
-          selected: true,
-          onTap: null,
-        ),
-        const Divider(height: 1),
-        _StorageTile(
-          icon: Icons.cloud_outlined,
-          title: 'Google Drive',
-          subtitle: 'Back up and sync across devices',
-          selected: false,
-          trailing: const _SoonChip(),
-          onTap: () => _showComingSoon(context, 'Google Drive sync'),
-        ),
-      ],
-    );
-  }
-}
-
-class _StorageTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool selected;
-  final Widget? trailing;
-  final VoidCallback? onTap;
-
-  const _StorageTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.selected,
-    this.trailing,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final palette = theme.extension<AppPalette>()!;
-
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      leading: Icon(icon, color: selected ? palette.accent : palette.textDim),
-      title: Text(
-        title,
-        style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
-      ),
-      subtitle: Text(
-        subtitle,
-        style: TextStyle(fontSize: 12.5, color: palette.textDim),
-      ),
-      trailing:
-          trailing ??
-          (selected
-              ? Icon(Icons.check_circle, color: palette.accent, size: 20)
-              : null),
-      onTap: onTap,
-    );
-  }
-}
+// ── Theme section ────────────────────────────────────────────────────────────
 
 class _ThemeSection extends StatelessWidget {
   final ThemeMode current;
@@ -356,6 +530,8 @@ class _ThemeSection extends StatelessWidget {
     );
   }
 }
+
+// ── Shared widgets ────────────────────────────────────────────────────────────
 
 class _Card extends StatelessWidget {
   final Widget child;
@@ -398,37 +574,4 @@ class _SectionLabel extends StatelessWidget {
       ),
     );
   }
-}
-
-class _SoonChip extends StatelessWidget {
-  const _SoonChip();
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<AppPalette>()!;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: palette.accentSoft,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        'Soon',
-        style: TextStyle(
-          fontSize: 10.5,
-          fontWeight: FontWeight.w600,
-          color: palette.accent,
-        ),
-      ),
-    );
-  }
-}
-
-void _showComingSoon(BuildContext context, String feature) {
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text('$feature is coming soon'),
-      behavior: SnackBarBehavior.floating,
-    ),
-  );
 }

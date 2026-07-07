@@ -4,7 +4,9 @@ import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/sync_status_icon.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
@@ -45,6 +47,17 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   void initState() {
     super.initState();
     _loadAll();
+    SyncService().dataVersion.addListener(_onSyncData);
+  }
+
+  @override
+  void dispose() {
+    SyncService().dataVersion.removeListener(_onSyncData);
+    super.dispose();
+  }
+
+  void _onSyncData() {
+    if (mounted) _loadAll();
   }
 
   Future<void> _loadAll() async {
@@ -747,6 +760,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             tooltip: 'New notebook',
             onPressed: _createNotebook,
           ),
+          const SyncStatusIcon(),
           IconButton(
             icon: const Icon(Icons.settings_outlined, size: 20),
             tooltip: 'Settings',

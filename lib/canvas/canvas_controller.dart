@@ -8,6 +8,9 @@ import '../models/element.dart';
 import '../models/canvas.dart';
 import '../services/notebook_service.dart';
 import '../services/render_cache.dart';
+import '../services/settings_service.dart';
+import '../services/sync/merge_engine.dart';
+import '../services/sync_service.dart';
 import 'canvas_layout.dart';
 import 'rich_text_controller.dart';
 import 'text_measure.dart';
@@ -49,6 +52,15 @@ class CanvasController extends ChangeNotifier {
     : _service = NotebookService() {
     renderCache = RenderCache(onUpdated: notifyListeners);
     _relayout();
+    // Live merge: pulled remote changes to this canvas land here directly
+    // instead of only on disk (where the next autosave would clobber them).
+    SyncService().registerCanvasListener(
+      canvas.id,
+      CanvasSyncListener(
+        onPage: applyRemotePage,
+        onStructure: () => unawaited(applyRemoteStructure()),
+      ),
+    );
   }
 
   final Canvas canvas;
@@ -498,6 +510,7 @@ class CanvasController extends ChangeNotifier {
         _remeasureText(el, pageId);
       }
     }
+    _stamp(selection.whereType<TextElement>());
     final after = [for (final el in selection) el.deepCopy()];
     var applied = true;
     _doOp(
@@ -660,6 +673,8 @@ class CanvasController extends ChangeNotifier {
         activeStrokePageId = page.id;
         activeStroke = StrokeElement(
           id: newModelId('el'),
+          deviceId: SettingsService().deviceId,
+          z: '0|a0:',
           tool: effectiveTool == CanvasTool.highlighter
               ? StrokeTool.highlighter
               : StrokeTool.pen,
@@ -779,10 +794,10 @@ class CanvasController extends ChangeNotifier {
     final local = canvasPos - pageLayout.rect.topLeft;
 
     var removedAny = false;
-    for (var i = page.elements.length - 1; i >= 0; i--) {
-      final el = page.elements[i];
-      if (el is StrokeElement && _strokeHit(el, local)) {
-        page.elements.removeAt(i);
+    for (var i = page.strokes.length - 1; i >= 0; i--) {
+      final el = page.strokes[i];
+      if (_strokeHit(el, local)) {
+        page.strokes.removeAt(i);
         _eraseAccum.putIfAbsent(page.id, () => []).add((i, el));
         removedAny = true;
       }
@@ -795,23 +810,29 @@ class CanvasController extends ChangeNotifier {
     _eraseAccum.clear();
     if (accum.isEmpty) return;
 
-    // Removal already happened live; build an op whose first `apply` is a
-    // no-op replay guard, so redo works after an undo.
-    var applied = true;
+    // The live gesture (_eraseAt) already removed the strokes from the
+    // array, but tombstones MUST be written on this first apply too — the
+    // array removal alone syncs as "stroke missing, no tombstone", which the
+    // other device's union merge treats as "I still have it" and resurrects.
+    // removeWhere on already-removed ids is a no-op, so apply is safely
+    // idempotent for both the first run and redo.
     _doOp(
       _CanvasOp(
         label: 'Erase',
         dirtyPageIds: accum.keys.toSet(),
         apply: () {
-          if (applied) {
-            applied = false; // first apply: erase already done live
-            return;
-          }
           for (final entry in accum.entries) {
             final page = pages[entry.key];
             if (page == null) continue;
             final ids = entry.value.map((r) => r.$2.id).toSet();
-            page.elements.removeWhere((e) => ids.contains(e.id));
+            for (final el in entry.value) {
+              page.erased.add(EraseTombstone(
+                strokeId: el.$2.id,
+                erasedAt: DateTime.now(),
+                deviceId: SettingsService().deviceId,
+              ));
+            }
+            page.strokes.removeWhere((e) => ids.contains(e.id));
           }
         },
         revert: () {
@@ -821,10 +842,12 @@ class CanvasController extends ChangeNotifier {
             // Re-insert in ascending index order to restore z-positions.
             final sorted = [...entry.value]
               ..sort((a, b) => a.$1.compareTo(b.$1));
+            final ids = entry.value.map((r) => r.$2.id).toSet();
+            page.erased.removeWhere((e) => ids.contains(e.strokeId));
             for (final (index, el) in sorted) {
-              page.elements.insert(
-                math.min(index, page.elements.length),
-                el,
+              page.strokes.insert(
+                math.min(index, page.strokes.length),
+                el as StrokeElement,
               );
             }
           }
@@ -892,7 +915,7 @@ class CanvasController extends ChangeNotifier {
     }
     final page = pages[pageId]!;
     final hit = <CanvasElement>[];
-    for (final el in page.elements) {
+    for (final el in [...page.strokes, ...page.objects]) {
       if (_lassoHits(pts, el)) hit.add(el);
     }
     if (hit.isEmpty) {
@@ -921,6 +944,7 @@ class CanvasController extends ChangeNotifier {
         return false;
       case TextElement(:final rect):
       case ImageElement(:final rect):
+      case AttachmentElement(:final rect):
         for (final corner in [
           rect.topLeft,
           rect.topRight,
@@ -1056,6 +1080,17 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Marks mutated elements as "edited now" for sync LWW. Without this every
+  /// element kept rev 1 / its creation timestamp forever, so two devices'
+  /// copies always tied in the (rev, updatedAt, deviceId) comparison and each
+  /// kept its own version — moved/edited elements never converged.
+  void _stamp(Iterable<CanvasElement> els) {
+    final dev = SettingsService().deviceId;
+    for (final el in els) {
+      el.bumpRev(dev);
+    }
+  }
+
   void _endSelectionDrag() {
     _dragMode = SelectionHit.none;
     final pageId = selectionPageId;
@@ -1075,6 +1110,7 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
+    _stamp(selection);
     final after = [for (final el in selection) el.deepCopy()];
     var applied = true;
     _doOp(
@@ -1127,23 +1163,28 @@ class CanvasController extends ChangeNotifier {
 
     // Pre-drag snapshots (moving elements restored to their start positions).
     final beforeById = {for (final b in movingBeforeDrag) b.id: b};
+    final sourceElements = [...source.strokes, ...source.objects];
+    final targetElements = [...target.strokes, ...target.objects];
     final sourceBefore = [
-      for (final e in source.elements)
+      for (final e in sourceElements)
         (beforeById[e.id] ?? e).deepCopy(),
     ];
-    final targetBefore = [for (final e in target.elements) e.deepCopy()];
+    final targetBefore = [for (final e in targetElements) e.deepCopy()];
 
     // After: moving elements leave the source, land on the target shifted.
     final sourceAfter = [
-      for (final e in source.elements)
+      for (final e in sourceElements)
         if (!movedIds.contains(e.id)) e.deepCopy(),
     ];
     final movingAfter = [
-      for (final e in source.elements)
+      for (final e in sourceElements)
         if (movedIds.contains(e.id)) e.deepCopy()..translate(shift.dx, shift.dy),
     ];
+    // Moved elements are edits for sync LWW — the copy that landed on the
+    // target must beat any stale remote copy of them.
+    _stamp(movingAfter);
     final targetAfter = [
-      for (final e in target.elements) e.deepCopy(),
+      for (final e in targetElements) e.deepCopy(),
       ...movingAfter,
     ];
 
@@ -1155,17 +1196,38 @@ class CanvasController extends ChangeNotifier {
         apply: () {
           _setPageElements(sourceId, sourceAfter);
           _setPageElements(targetId, targetAfter);
+          // The moved ids vanished from the source page — tombstone them
+          // there, or a stale remote copy of the source page resurrects them
+          // on merge (→ duplicates, since they're also live on the target).
+          // On the target they're live: clear any old tombstones for them.
+          final dev = SettingsService().deviceId;
+          final now = DateTime.now();
+          for (final el in movingAfter) {
+            final t = EraseTombstone(
+                strokeId: el.id, erasedAt: now, deviceId: dev);
+            if (el is StrokeElement) {
+              source.erased.add(t);
+              target.erased.removeWhere((e) => e.strokeId == el.id);
+            } else {
+              source.deletedObjects.add(t);
+              target.deletedObjects.removeWhere((e) => e.strokeId == el.id);
+            }
+          }
         },
         revert: () {
           _setPageElements(sourceId, sourceBefore);
           _setPageElements(targetId, targetBefore);
+          for (final id in movedIds) {
+            source.erased.removeWhere((e) => e.strokeId == id);
+            source.deletedObjects.removeWhere((e) => e.strokeId == id);
+          }
         },
       ),
     );
 
     // Reselect the moved elements on the target page.
     selectionPageId = targetId;
-    selection = target.elements.where((e) => movedIds.contains(e.id)).toList();
+    selection = [...target.strokes, ...target.objects].where((e) => movedIds.contains(e.id)).toList();
     _recomputeSelectionBounds();
     notifyListeners();
   }
@@ -1173,22 +1235,31 @@ class CanvasController extends ChangeNotifier {
   void _setPageElements(String pageId, List<CanvasElement> copies) {
     final page = pages[pageId];
     if (page == null) return;
-    page.elements
-      ..clear()
-      ..addAll([for (final c in copies) c.deepCopy()]);
+    page.strokes.clear();
+    page.objects.clear();
+    for (final c in copies) {
+      final copy = c.deepCopy();
+      if (copy is StrokeElement) page.strokes.add(copy);
+      else page.objects.add(copy);
+    }
   }
 
   void _replaceElements(String pageId, List<CanvasElement> copies) {
     final page = pages[pageId];
     if (page == null) return;
     for (final copy in copies) {
-      final i = page.elements.indexWhere((e) => e.id == copy.id);
-      if (i >= 0) page.elements[i] = copy.deepCopy();
+      if (copy is StrokeElement) {
+        final i = page.strokes.indexWhere((e) => e.id == copy.id);
+        if (i >= 0) page.strokes[i] = copy.deepCopy() as StrokeElement;
+      } else {
+        final i = page.objects.indexWhere((e) => e.id == copy.id);
+        if (i >= 0) page.objects[i] = copy.deepCopy();
+      }
     }
     // Selection may hold stale refs after replacement.
     if (selectionPageId == pageId && selection.isNotEmpty) {
       final ids = selection.map((e) => e.id).toSet();
-      selection = page.elements.where((e) => ids.contains(e.id)).toList();
+      selection = [...page.strokes, ...page.objects].where((e) => ids.contains(e.id)).toList();
       _recomputeSelectionBounds();
     }
   }
@@ -1202,10 +1273,16 @@ class CanvasController extends ChangeNotifier {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
     final page = pages[pageId]!;
-    final removed = <(int, CanvasElement)>[];
+    final removedStrokes = <(int, StrokeElement)>[];
+    final removedObjects = <(int, CanvasElement)>[];
     for (final el in selection) {
-      final i = page.elements.indexOf(el);
-      if (i >= 0) removed.add((i, el));
+      if (el is StrokeElement) {
+        final i = page.strokes.indexOf(el);
+        if (i >= 0) removedStrokes.add((i, el));
+      } else {
+        final i = page.objects.indexOf(el);
+        if (i >= 0) removedObjects.add((i, el));
+      }
     }
     clearSelection(notify: false);
     _doOp(
@@ -1213,13 +1290,31 @@ class CanvasController extends ChangeNotifier {
         label: 'Delete',
         dirtyPageIds: {pageId},
         apply: () {
-          final ids = removed.map((r) => r.$2.id).toSet();
-          page.elements.removeWhere((e) => ids.contains(e.id));
+          final dev = SettingsService().deviceId;
+          final now = DateTime.now();
+          final strokeIds = removedStrokes.map((r) => r.$2.id).toSet();
+          final objectIds = removedObjects.map((r) => r.$2.id).toSet();
+          for (final id in strokeIds) {
+            page.erased.add(EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev));
+          }
+          for (final id in objectIds) {
+            page.deletedObjects.add(EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev));
+          }
+          page.strokes.removeWhere((e) => strokeIds.contains(e.id));
+          page.objects.removeWhere((e) => objectIds.contains(e.id));
         },
         revert: () {
-          final sorted = [...removed]..sort((a, b) => a.$1.compareTo(b.$1));
-          for (final (index, el) in sorted) {
-            page.elements.insert(math.min(index, page.elements.length), el);
+          final strokeIds = removedStrokes.map((r) => r.$2.id).toSet();
+          final objectIds = removedObjects.map((r) => r.$2.id).toSet();
+          page.erased.removeWhere((e) => strokeIds.contains(e.strokeId));
+          page.deletedObjects.removeWhere((e) => objectIds.contains(e.strokeId));
+          final sortedStrokes = [...removedStrokes]..sort((a, b) => a.$1.compareTo(b.$1));
+          for (final (index, el) in sortedStrokes) {
+            page.strokes.insert(math.min(index, page.strokes.length), el);
+          }
+          final sortedObjects = [...removedObjects]..sort((a, b) => a.$1.compareTo(b.$1));
+          for (final (index, el) in sortedObjects) {
+            page.objects.insert(math.min(index, page.objects.length), el);
           }
         },
       ),
@@ -1244,7 +1339,7 @@ class CanvasController extends ChangeNotifier {
     ];
     _doOp(_addElementsOp('Duplicate', pageId, copies));
     final page = pages[pageId]!;
-    selection = page.elements.where((e) => copies.any((c) => c.id == e.id)).toList();
+    selection = [...page.strokes, ...page.objects].where((e) => copies.any((c) => c.id == e.id)).toList();
     _recomputeSelectionBounds();
     notifyListeners();
   }
@@ -1269,7 +1364,7 @@ class CanvasController extends ChangeNotifier {
 
     _doOp(_addElementsOp('Paste', target.pageId, copies));
     selectionPageId = target.pageId;
-    selection = page.elements.where((e) => copies.any((c) => c.id == e.id)).toList();
+    selection = [...page.strokes, ...page.objects].where((e) => copies.any((c) => c.id == e.id)).toList();
     _recomputeSelectionBounds();
     tool = CanvasTool.lasso;
     toolOptionsOpen = false;
@@ -1283,21 +1378,29 @@ class CanvasController extends ChangeNotifier {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
     final page = pages[pageId]!;
-    final before = List.of(page.elements);
-    final selected = List.of(selection);
-    final rest = page.elements.where((e) => !selected.contains(e)).toList();
-    final after = front ? [...rest, ...selected] : [...selected, ...rest];
+    final beforeStrokes = List.of(page.strokes);
+    final beforeObjects = List.of(page.objects);
+    final selectedStrokes = selection.whereType<StrokeElement>().toList();
+    final selectedObjects = selection.where((e) => e is! StrokeElement).toList();
+    
+    final restStrokes = page.strokes.where((e) => !selectedStrokes.contains(e)).toList();
+    final restObjects = page.objects.where((e) => !selectedObjects.contains(e)).toList();
+    
+    final afterStrokes = front ? [...restStrokes, ...selectedStrokes] : [...selectedStrokes, ...restStrokes];
+    final afterObjects = front ? [...restObjects, ...selectedObjects] : [...selectedObjects, ...restObjects];
 
     _doOp(
       _CanvasOp(
         label: front ? 'Bring to front' : 'Send to back',
         dirtyPageIds: {pageId},
-        apply: () => page.elements
-          ..clear()
-          ..addAll(after),
-        revert: () => page.elements
-          ..clear()
-          ..addAll(before),
+        apply: () {
+          page.strokes..clear()..addAll(afterStrokes);
+          page.objects..clear()..addAll(afterObjects);
+        },
+        revert: () {
+          page.strokes..clear()..addAll(beforeStrokes);
+          page.objects..clear()..addAll(beforeObjects);
+        },
       ),
     );
   }
@@ -1315,9 +1418,11 @@ class CanvasController extends ChangeNotifier {
         case TextElement():
           el.color = color;
         case ImageElement():
+        case AttachmentElement():
           break;
       }
     }
+    _stamp(selection.where((e) => e is StrokeElement || e is TextElement));
     final after = [for (final el in selection) el.deepCopy()];
     var applied = true;
     _doOp(
@@ -1338,6 +1443,12 @@ class CanvasController extends ChangeNotifier {
 
   // ── Element insertion (text / image / generic) ─────────────────────────
 
+  /// Inserts [elements] (apply = do/redo, revert = undo the insert).
+  ///
+  /// Once an element could have synced, undoing its insert must still record
+  /// a tombstone alongside the physical removal — a stale remote copy would
+  /// otherwise resurrect it on the next merge. `apply` (redo) clears the
+  /// tombstone and re-adds if missing.
   _CanvasOp _addElementsOp(
     String label,
     String pageId,
@@ -1348,13 +1459,29 @@ class CanvasController extends ChangeNotifier {
       label: label,
       dirtyPageIds: {pageId},
       apply: () {
-        final ids = elements.map((e) => e.id).toSet();
-        page.elements.removeWhere((e) => ids.contains(e.id));
-        page.elements.addAll(elements);
+        for (final el in elements) {
+          if (el is StrokeElement) {
+            page.erased.removeWhere((e) => e.strokeId == el.id);
+            if (!page.strokes.any((e) => e.id == el.id)) page.strokes.add(el);
+          } else {
+            page.deletedObjects.removeWhere((e) => e.strokeId == el.id);
+            if (!page.objects.any((e) => e.id == el.id)) page.objects.add(el);
+          }
+        }
       },
       revert: () {
+        final dev = SettingsService().deviceId;
+        final now = DateTime.now();
         final ids = elements.map((e) => e.id).toSet();
-        page.elements.removeWhere((e) => ids.contains(e.id));
+        for (final el in elements) {
+          if (el is StrokeElement) {
+            page.erased.add(EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev));
+          } else {
+            page.deletedObjects.add(EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev));
+          }
+        }
+        page.strokes.removeWhere((e) => ids.contains(e.id));
+        page.objects.removeWhere((e) => ids.contains(e.id));
       },
     );
   }
@@ -1363,11 +1490,39 @@ class CanvasController extends ChangeNotifier {
     _doOp(_addElementsOp('Insert', pageId, [element]));
   }
 
+  /// Drops an attachment chip near the top of the current page (stacking
+  /// downward if others already sit there).
+  void addAttachmentChip(String assetId, String name, String mime) {
+    final target = currentPageLayout;
+    if (target == null) return;
+    final page = pages[target.pageId]!;
+    const w = 180.0, h = 44.0, gap = 10.0;
+    var top = 24.0;
+    final left = (page.width - w) / 2;
+    // Avoid stacking exactly on an existing chip.
+    while (page.objects.any((e) =>
+        e is AttachmentElement && (e.rect.top - top).abs() < h / 2)) {
+      top += h + gap;
+    }
+    addElement(
+      target.pageId,
+      AttachmentElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        rect: Rect.fromLTWH(left, top, w, h),
+        assetId: assetId,
+        name: name,
+        mime: mime,
+      ),
+    );
+  }
+
   void updateTextElement(
     String pageId,
     TextElement before,
     TextElement after,
   ) {
+    _stamp([after]);
     final beforeCopy = before.deepCopy();
     final afterCopy = after.deepCopy();
     _doOp(
@@ -1383,18 +1538,44 @@ class CanvasController extends ChangeNotifier {
   void removeElement(String pageId, CanvasElement element) {
     final page = pages[pageId];
     if (page == null) return;
-    final index = page.elements.indexWhere((e) => e.id == element.id);
-    if (index < 0) return;
-    final el = page.elements[index];
-    _doOp(
-      _CanvasOp(
-        label: 'Remove',
-        dirtyPageIds: {pageId},
-        apply: () => page.elements.removeWhere((e) => e.id == el.id),
-        revert: () =>
-            page.elements.insert(math.min(index, page.elements.length), el),
-      ),
-    );
+    final dev = SettingsService().deviceId;
+    if (element is StrokeElement) {
+      final index = page.strokes.indexWhere((e) => e.id == element.id);
+      if (index < 0) return;
+      final el = page.strokes[index];
+      _doOp(
+        _CanvasOp(
+          label: 'Remove',
+          dirtyPageIds: {pageId},
+          apply: () {
+            page.erased.add(EraseTombstone(strokeId: el.id, erasedAt: DateTime.now(), deviceId: dev));
+            page.strokes.removeWhere((e) => e.id == el.id);
+          },
+          revert: () {
+            page.erased.removeWhere((e) => e.strokeId == el.id);
+            page.strokes.insert(math.min(index, page.strokes.length), el);
+          },
+        ),
+      );
+    } else {
+      final index = page.objects.indexWhere((e) => e.id == element.id);
+      if (index < 0) return;
+      final el = page.objects[index];
+      _doOp(
+        _CanvasOp(
+          label: 'Remove',
+          dirtyPageIds: {pageId},
+          apply: () {
+            page.deletedObjects.add(EraseTombstone(strokeId: el.id, erasedAt: DateTime.now(), deviceId: dev));
+            page.objects.removeWhere((e) => e.id == el.id);
+          },
+          revert: () {
+            page.deletedObjects.removeWhere((e) => e.strokeId == el.id);
+            page.objects.insert(math.min(index, page.objects.length), el);
+          },
+        ),
+      );
+    }
   }
 
   // ── Page / row structure ───────────────────────────────────────────────
@@ -1417,7 +1598,8 @@ class CanvasController extends ChangeNotifier {
   void addBlankPage(InsertPosition position) {
     final rowIndex = _rowInsertIndexFor(position);
     final page = CanvasPage(
-      id: _service.newId(),
+      id: newModelId('pg'),
+      deviceId: SettingsService().deviceId,
       width: canvas.defaultPageWidth,
       height: canvas.defaultPageHeight,
       background: canvas.defaultBackground,
@@ -1451,10 +1633,8 @@ class CanvasController extends ChangeNotifier {
     final row = canvas.rows[rowIndex];
     final origin = pages[row.pageIds.first];
     final page = CanvasPage(
-      id: _service.newId(),
-      // Match the origin's size so the row aligns/merges cleanly, but always
-      // use the canvas's default background (a side page next to a PDF should
-      // take the user's chosen page color/pattern, not the PDF's blank white).
+      id: newModelId('pg'),
+      deviceId: SettingsService().deviceId,
       width: origin?.width ?? canvas.defaultPageWidth,
       height: origin?.height ?? canvas.defaultPageHeight,
       background: canvas.defaultBackground,
@@ -1493,7 +1673,8 @@ class CanvasController extends ChangeNotifier {
       final src = pageSizes[i];
       final scale = src.width > 0 ? targetWidth / src.width : 1.0;
       final page = CanvasPage(
-        id: _service.newId(),
+        id: newModelId('pg'),
+        deviceId: SettingsService().deviceId,
         width: targetWidth,
         height: src.height * scale,
         background: const PageBackground(),
@@ -1545,11 +1726,20 @@ class CanvasController extends ChangeNotifier {
         label: 'Delete page',
         structural: true,
         apply: () {
+          // The page leaves `pages` here, so the normal dirty-flush (which
+          // looks the id up in `pages`) would never persist this. Tombstone
+          // + save explicitly so the deletion actually reaches Drive instead
+          // of silently staying live in the last-saved copy on disk.
+          page.deletedAt = DateTime.now();
+          page.bumpRev(SettingsService().deviceId);
+          unawaited(_service.savePage(canvas, page));
           row.pageIds.remove(pageId);
           pages.remove(pageId);
           if (rowBecomesEmpty) canvas.rows.remove(row);
         },
         revert: () {
+          page.deletedAt = null;
+          page.bumpRev(SettingsService().deviceId);
           pages[pageId] = page;
           if (rowBecomesEmpty) {
             canvas.rows.insert(
@@ -1563,7 +1753,10 @@ class CanvasController extends ChangeNotifier {
               pageId,
             );
           }
+          // Restored to `pages` — the normal dirty-flush will persist it
+          // (dirtyPageIds below covers this).
         },
+        dirtyPageIds: {pageId},
       ),
     );
     return true;
@@ -1575,13 +1768,21 @@ class CanvasController extends ChangeNotifier {
     final src = pages[pageId];
     if (l == null || src == null) return;
     final copy = CanvasPage(
-      id: _service.newId(),
+      id: newModelId('pg'),
+      deviceId: SettingsService().deviceId,
       width: src.width,
       height: src.height,
       background: src.background,
       source: src.source,
-      elements: [
-        for (final el in src.elements) el.deepCopy(withNewId: true),
+      strokes: [
+        for (final el in src.strokes) el.deepCopy(withNewId: true),
+      ],
+      objects: [
+        for (final el in src.objects) el.deepCopy(withNewId: true),
+      ],
+      erased: [
+        for (final el in src.erased)
+          EraseTombstone(strokeId: el.strokeId, erasedAt: el.erasedAt, deviceId: el.deviceId, rev: el.rev)
       ],
     );
     final row = PageRow(id: _service.newId(), pageIds: [copy.id]);
@@ -1740,8 +1941,132 @@ class CanvasController extends ChangeNotifier {
     return false;
   }
 
+  // ── Live merge of pulled remote changes (open-canvas sync) ─────────────
+
+  /// Merges a pulled remote [remote] page into the live in-memory page.
+  ///
+  /// Without this, a canvas open during a pull kept stale in-memory state and
+  /// its next 500 ms autosave overwrote the merged file on disk *without* the
+  /// remote device's tombstones — resurrecting deleted strokes forever
+  /// (each device kept re-pushing what the other kept deleting).
+  void applyRemotePage(CanvasPage remote) {
+    final local = pages[remote.id];
+    if (local == null) return; // structure listener brings in new pages
+
+    if (remote.deletedAt != null) {
+      _removePageDeletedRemotely(remote.id);
+      return;
+    }
+
+    final merged = MergeEngine.mergePage(local, remote);
+    final mergedSig = MergeEngine.pageSignature(merged);
+    final localChanged = mergedSig != MergeEngine.pageSignature(local);
+    final contributed = mergedSig != MergeEngine.pageSignature(remote);
+
+    if (localChanged) {
+      // Mutate the existing instance in place — undo ops and the painter hold
+      // references to it. Elements keep local identity where local won.
+      final sizeChanged =
+          local.width != merged.width || local.height != merged.height;
+      local
+        ..rev = merged.rev
+        ..updatedAt = merged.updatedAt
+        ..deviceId = merged.deviceId
+        ..deletedAt = merged.deletedAt
+        ..width = merged.width
+        ..height = merged.height
+        ..background = merged.background
+        ..source = merged.source;
+      local.strokes
+        ..clear()
+        ..addAll(merged.strokes);
+      local.erased
+        ..clear()
+        ..addAll(merged.erased);
+      local.objects
+        ..clear()
+        ..addAll(merged.objects);
+      local.deletedObjects
+        ..clear()
+        ..addAll(merged.deletedObjects);
+
+      // Selection/drag may reference instances the merge replaced.
+      if (selectionPageId == remote.id) {
+        clearSelection(notify: false);
+        _dragMode = SelectionHit.none;
+      }
+      if (sizeChanged) _relayout();
+      notifyListeners();
+    }
+
+    // Only push when the union holds something Drive lacks — pushing a
+    // merged==remote page would just echo revisions back and forth.
+    if (contributed) {
+      _markDirty({remote.id});
+    }
+  }
+
+  /// A page tombstoned on another device: drop it from the open canvas (no
+  /// undo op — deletion already happened elsewhere; disk merge kept it).
+  void _removePageDeletedRemotely(String pageId) {
+    if (!pages.containsKey(pageId)) return;
+    if (layout.pages.length <= 1) return; // never leave a canvas empty
+    for (final row in List.of(canvas.rows)) {
+      row.pageIds.remove(pageId);
+      if (row.pageIds.isEmpty) canvas.rows.remove(row);
+    }
+    pages.remove(pageId);
+    if (selectionPageId == pageId) clearSelection(notify: false);
+    _relayout();
+    notifyListeners();
+  }
+
+  /// canvas.json changed on disk from a pull — refresh structure (rows,
+  /// defaults, attachments) and load any newly-referenced pages from disk.
+  /// Skipped while local structural edits are still waiting to flush; LWW on
+  /// the next round trip reconciles that case.
+  Future<void> applyRemoteStructure() async {
+    if (_dirtyStructure) return;
+    final fresh =
+        await _service.getCanvas(canvas.notebookId, canvas.sectionId, canvas.id);
+    if (fresh == null) return; // canvas deleted remotely — shell reload handles
+
+    canvas
+      ..name = fresh.name
+      ..color = fresh.color
+      ..rev = fresh.rev
+      ..updatedAt = fresh.updatedAt
+      ..deviceId = fresh.deviceId
+      ..defaultPageWidth = fresh.defaultPageWidth
+      ..defaultPageHeight = fresh.defaultPageHeight
+      ..defaultBackground = fresh.defaultBackground;
+    canvas.rows
+      ..clear()
+      ..addAll(fresh.rows);
+    canvas.attachments
+      ..clear()
+      ..addAll(fresh.attachments);
+
+    // Keep live in-memory pages (they may be ahead of disk); read only the
+    // ones we don't have yet, and drop ones no row references anymore.
+    final referenced = <String>{
+      for (final row in canvas.rows) ...row.pageIds,
+    };
+    final fromDisk = await _service.loadPages(canvas);
+    for (final entry in fromDisk.entries) {
+      pages.putIfAbsent(entry.key, () => entry.value);
+    }
+    pages.removeWhere((id, _) => !referenced.contains(id));
+    if (selectionPageId != null && !pages.containsKey(selectionPageId)) {
+      clearSelection(notify: false);
+    }
+    _relayout();
+    notifyListeners();
+  }
+
   @override
   void dispose() {
+    SyncService().unregisterCanvasListener(canvas.id);
     _scrollTicker?.dispose();
     _saveTimer?.cancel();
     flushSaves();

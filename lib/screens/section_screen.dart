@@ -3,10 +3,12 @@ import '../models/canvas.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
+import '../widgets/refreshable_empty.dart';
 import 'canvas_screen.dart';
 
 /// Mobile screen 3: a section's tree of **canvases** + nested super-sections.
@@ -252,39 +254,44 @@ class _SectionScreenState extends State<SectionScreen> {
       ),
       body: section == null
           ? const Center(child: CircularProgressIndicator())
-          : section.nodes.isEmpty
-          ? _EmptyState(onAdd: _addCanvas)
-          : SingleChildScrollView(
-              padding: const EdgeInsets.only(top: 4, bottom: 96),
-              child: ItemTreeView<Canvas>(
-                containerId: section.id,
-                nodes: section.nodes,
-                items: _canvases,
-                nameOf: (c) => c.name,
-                colorOf: (c) => c.color,
-                idOf: (c) => c.id,
-                leafIcon: Icons.crop_portrait,
-                selectedId: null,
-                onOpen: _openCanvas,
-                onRenameLeaf: _renameCanvas,
-                onColorLeaf: _colorCanvas,
-                onDeleteLeaf: _deleteCanvas,
-                onRenameFolder: _renameFolder,
-                onColorFolder: _colorFolder,
-                onAddLeafToFolder: (f) => _addCanvas(folderId: f.id),
-                onAddFolderToFolder: (f) => _addFolder(folderId: f.id),
-                onUngroup: _ungroup,
-                onDeleteFolder: _deleteFolder,
-                onRelocate: _relocate,
-                onTreeChanged: () => _service.saveSection(section),
-              ),
+          : RefreshIndicator(
+              onRefresh: _refresh,
+              child: section.nodes.isEmpty
+                  ? RefreshableEmpty(child: _EmptyState(onAdd: _addCanvas))
+                  : SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.only(top: 4, bottom: 24),
+                      child: ItemTreeView<Canvas>(
+                        containerId: section.id,
+                        nodes: section.nodes,
+                        items: _canvases,
+                        nameOf: (c) => c.name,
+                        colorOf: (c) => c.color,
+                        idOf: (c) => c.id,
+                        leafIcon: Icons.crop_portrait,
+                        selectedId: null,
+                        onOpen: _openCanvas,
+                        onRenameLeaf: _renameCanvas,
+                        onColorLeaf: _colorCanvas,
+                        onDeleteLeaf: _deleteCanvas,
+                        onRenameFolder: _renameFolder,
+                        onColorFolder: _colorFolder,
+                        onAddLeafToFolder: (f) => _addCanvas(folderId: f.id),
+                        onAddFolderToFolder: (f) => _addFolder(folderId: f.id),
+                        onUngroup: _ungroup,
+                        onDeleteFolder: _deleteFolder,
+                        onRelocate: _relocate,
+                        onTreeChanged: () => _service.saveSection(section),
+                      ),
+                    ),
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _addCanvas,
-        tooltip: 'New canvas',
-        child: const Icon(Icons.add),
-      ),
     );
+  }
+
+  /// Pull-to-refresh: run a sync round trip, then reload the tree.
+  Future<void> _refresh() async {
+    await SyncService().syncNow();
+    await _reload();
   }
 }
 

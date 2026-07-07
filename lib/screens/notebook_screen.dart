@@ -3,10 +3,12 @@ import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
+import '../widgets/refreshable_empty.dart';
 import 'section_screen.dart';
 
 /// Mobile screen 2: a notebook's tree of **sections** + nested super-sections.
@@ -235,11 +237,14 @@ class _NotebookScreenState extends State<NotebookScreen> {
       ),
       body: notebook == null
           ? const Center(child: CircularProgressIndicator())
-          : notebook.nodes.isEmpty
-          ? _EmptyState(onAdd: _addSection)
-          : SingleChildScrollView(
-              padding: const EdgeInsets.only(top: 4, bottom: 96),
-              child: ItemTreeView<Section>(
+          : RefreshIndicator(
+              onRefresh: _refresh,
+              child: notebook.nodes.isEmpty
+                  ? RefreshableEmpty(child: _EmptyState(onAdd: _addSection))
+                  : SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.only(top: 4, bottom: 24),
+                      child: ItemTreeView<Section>(
                 containerId: notebook.id,
                 nodes: notebook.nodes,
                 items: _sections,
@@ -256,18 +261,20 @@ class _NotebookScreenState extends State<NotebookScreen> {
                 onColorFolder: _colorFolder,
                 onAddLeafToFolder: (f) => _addSection(folderId: f.id),
                 onAddFolderToFolder: (f) => _addFolder(folderId: f.id),
-                onUngroup: _ungroup,
-                onDeleteFolder: _deleteFolder,
-                onRelocate: _relocate,
-                onTreeChanged: () => _service.saveNotebook(notebook),
-              ),
+                        onUngroup: _ungroup,
+                        onDeleteFolder: _deleteFolder,
+                        onRelocate: _relocate,
+                        onTreeChanged: () => _service.saveNotebook(notebook),
+                      ),
+                    ),
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _addSection,
-        tooltip: 'New section',
-        child: const Icon(Icons.add),
-      ),
     );
+  }
+
+  /// Pull-to-refresh: run a sync round trip, then reload the tree.
+  Future<void> _refresh() async {
+    await SyncService().syncNow();
+    await _reload();
   }
 }
 

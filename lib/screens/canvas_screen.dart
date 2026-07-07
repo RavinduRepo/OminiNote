@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:open_filex/open_filex.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
@@ -14,7 +15,9 @@ import '../models/element.dart';
 import '../models/canvas.dart';
 import '../services/notebook_service.dart';
 import '../services/pdf_exporter.dart';
+import '../services/settings_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/sync_status_icon.dart';
 
 /// The Canvas: a freely pannable/zoomable surface of pages (blank or
 /// PDF-backed) with ink, text, and images. The app owns the viewport;
@@ -209,8 +212,15 @@ class _CanvasScreenState extends State<CanvasScreen> {
         return;
       }
 
-      // Lasso mode: a tap on a text box edits it (a drag draws the lasso).
+      // Lasso mode: a tap on an attachment chip opens it; a tap on a text
+      // box edits it (a drag draws the lasso).
       if (c.tool == CanvasTool.lasso && !moved) {
+        final att = _attachmentAt(e.localPosition);
+        if (att != null && c.selection.isEmpty) {
+          c.cancelToolGesture();
+          _openAttachment(att);
+          return;
+        }
         final hit = _textAt(e.localPosition);
         if (hit != null) {
           c.cancelToolGesture();
@@ -226,8 +236,18 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // Taps that didn't start a gesture.
     if (!moved && e.kind != PointerDeviceKind.trackpad) {
       if (c.tool == CanvasTool.text) {
+        final att = _attachmentAt(e.localPosition);
+        if (att != null) {
+          _openAttachment(att);
+          return;
+        }
         _handleTextTap(e.localPosition); // empty area → new text box
       } else if (c.tool == CanvasTool.lasso) {
+        final att = _attachmentAt(e.localPosition);
+        if (att != null && c.selection.isEmpty) {
+          _openAttachment(att);
+          return;
+        }
         final hit = _textAt(e.localPosition);
         if (hit != null) _startTextEdit(hit.$1, hit.$2, isNew: false);
       }
@@ -256,12 +276,42 @@ class _CanvasScreenState extends State<CanvasScreen> {
     if (pageLayout == null) return null;
     final page = c.pages[pageLayout.pageId]!;
     final local = canvasPos - pageLayout.rect.topLeft;
-    for (final el in page.elements.reversed) {
+    for (final el in [...page.strokes, ...page.objects].reversed) {
       if (el is TextElement && el.rect.inflate(6).contains(local)) {
         return (pageLayout.pageId, el);
       }
     }
     return null;
+  }
+
+  /// Topmost attachment chip under a screen position.
+  AttachmentElement? _attachmentAt(Offset screenPos) {
+    final c = _controller!;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return null;
+    final page = c.pages[pageLayout.pageId]!;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    for (final el in page.objects.reversed) {
+      if (el is AttachmentElement && el.rect.inflate(4).contains(local)) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  /// Opens an attachment chip's file with the platform's default handler.
+  Future<void> _openAttachment(AttachmentElement el) async {
+    final file = _service.assetFile(widget.canvas, el.assetId);
+    if (!await file.exists()) {
+      _toast('"${el.name}" is missing on this device — sync may still be '
+          'downloading it');
+      return;
+    }
+    final result = await OpenFilex.open(file.path, type: el.mime);
+    if (result.type != ResultType.done && mounted) {
+      _toast('Could not open "${el.name}": ${result.message}');
+    }
   }
 
   void _onPointerSignal(PointerSignalEvent e) {
@@ -329,7 +379,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final local = canvasPos - pageLayout.rect.topLeft;
 
     // Tap an existing text element → edit it.
-    for (final el in page.elements.reversed) {
+    for (final el in [...page.strokes, ...page.objects].reversed) {
       if (el is TextElement && el.rect.inflate(4).contains(local)) {
         _startTextEdit(page.id, el, isNew: false);
         return;
@@ -339,6 +389,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // Otherwise drop a new (auto-sizing) text box at the tap point.
     final el = TextElement(
       id: newModelId('el'),
+      deviceId: SettingsService().deviceId,
       rect: Rect.fromLTWH(
         local.dx.clamp(0.0, page.width - 40),
         local.dy.clamp(0.0, page.height - 24),
@@ -449,8 +500,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final action = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: 8),
             const _SheetLabel('Pages'),
@@ -492,6 +544,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
             ),
             const SizedBox(height: 8),
           ],
+        ),
         ),
       ),
     );
@@ -612,7 +665,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
           addedAt: DateTime.now(),
         ),
       );
-      _toast('Added "$name" as an attachment');
+      // Visible, tappable chip on the page linking to the file.
+      c.addAttachmentChip(assetId, name, 'application/pdf');
+      _toast('Added "$name" — tap the chip to open it');
       return;
     }
 
@@ -653,6 +708,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       target.pageId,
       ImageElement(
         id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
         rect: Rect.fromCenter(
           center: Offset(page.width / 2, page.height / 2),
           width: w,
@@ -681,6 +737,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final width = math.min(page.width * 0.7, 320.0);
     final el = TextElement(
       id: newModelId('el'),
+      deviceId: SettingsService().deviceId,
       rect: Rect.fromCenter(
         center: Offset(page.width / 2, page.height / 2),
         width: width,
@@ -921,7 +978,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
                           title: Text(att.name),
                           trailing: PopupMenuButton<String>(
                             onSelected: (action) async {
-                              if (action == 'insert' && isPdf) {
+                              if (action == 'open') {
+                                final f = _service.assetFile(
+                                    widget.canvas, att.assetId);
+                                if (await f.exists()) {
+                                  OpenFilex.open(f.path, type: att.mime);
+                                }
+                              } else if (action == 'insert' && isPdf) {
                                 Navigator.pop(context);
                                 final sizes = await c.renderCache.pdfPageSizes(
                                   _service
@@ -938,6 +1001,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
                               }
                             },
                             itemBuilder: (context) => [
+                              const PopupMenuItem(
+                                value: 'open',
+                                child: Text('Open'),
+                              ),
                               if (isPdf)
                                 const PopupMenuItem(
                                   value: 'insert',
@@ -1116,6 +1183,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       appBar: AppBar(
         title: Text(widget.canvas.name),
         actions: [
+          const SyncStatusIcon(),
           ListenableBuilder(
             listenable: c,
             builder: (context, _) => Row(

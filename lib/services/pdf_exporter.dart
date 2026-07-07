@@ -38,6 +38,9 @@ class SyncfusionPdfExporter implements PdfExporter {
     out.pageSettings.margins.all = 0;
     _assetBytesRef = assetBytes;
     _bitmapCache.clear();
+    _referencedAttachments.clear();
+    _embedNameByAsset.clear();
+    _usedEmbedNames.clear();
 
     // Source PDFs opened once per asset; templates per (asset, pageIndex).
     final srcDocs = <String, sf.PdfDocument>{};
@@ -91,8 +94,27 @@ class SyncfusionPdfExporter implements PdfExporter {
 
         var xOffset = 0.0;
         for (final p in rowPages) {
-          await _drawPage(g, p, xOffset, templateFor);
+          await _drawPage(page, g, p, xOffset, templateFor);
           xOffset += p.width;
+        }
+      }
+
+      // Embed each referenced attachment file into the output document under
+      // the exact name the chip's click action targets (readers also list
+      // embedded files in the attachments panel).
+      final embedded = <String>{};
+      for (final att in _referencedAttachments) {
+        if (!embedded.add(att.assetId)) continue;
+        try {
+          out.attachments.add(sf.PdfAttachment(
+            _embedNameFor(att),
+            await assetBytes(att.assetId),
+            description: 'Omininote attachment',
+            mimeType: att.mime,
+          ));
+        } catch (_) {
+          // Missing/unreadable asset: chip still exports, file just isn't
+          // embedded.
         }
       }
 
@@ -101,6 +123,7 @@ class SyncfusionPdfExporter implements PdfExporter {
     } finally {
       _assetBytesRef = null;
       _bitmapCache.clear();
+      _referencedAttachments.clear();
       out.dispose();
       for (final doc in srcDocs.values) {
         doc.dispose();
@@ -109,6 +132,7 @@ class SyncfusionPdfExporter implements PdfExporter {
   }
 
   Future<void> _drawPage(
+    sf.PdfPage pdfPage,
     sf.PdfGraphics g,
     CanvasPage page,
     double xOffset,
@@ -139,7 +163,7 @@ class SyncfusionPdfExporter implements PdfExporter {
     }
 
     // Elements in z-order.
-    for (final el in page.elements) {
+    for (final el in [...page.strokes, ...page.objects]) {
       switch (el) {
         case StrokeElement():
           _drawStroke(g, el, xOffset);
@@ -147,7 +171,127 @@ class SyncfusionPdfExporter implements PdfExporter {
           _drawText(g, el, xOffset);
         case ImageElement():
           await _drawImage(g, el, xOffset);
+        case AttachmentElement():
+          _drawAttachmentChip(g, el, xOffset);
+          _addChipClickAction(pdfPage, el, xOffset);
+          _referencedAttachments.add(el);
       }
+    }
+  }
+
+  /// Attachment chips seen while drawing pages; their files are embedded into
+  /// the output document after the page loop (PDF "attachments" panel — the
+  /// Flutter Syncfusion API has no in-page file annotation, so the chip is
+  /// the visual pointer and the embedded file is the actual payload).
+  final List<AttachmentElement> _referencedAttachments = [];
+
+  /// Embedded-attachment name per assetId — must be unique inside the PDF and
+  /// identical between the chip's click action and the embedded file, since
+  /// `exportDataObject` looks the attachment up by name.
+  final Map<String, String> _embedNameByAsset = {};
+  final Set<String> _usedEmbedNames = {};
+
+  String _embedNameFor(AttachmentElement el) {
+    final existing = _embedNameByAsset[el.assetId];
+    if (existing != null) return existing;
+    var name = el.name;
+    var n = 1;
+    while (!_usedEmbedNames.add(name)) {
+      name = '${++n}_${el.name}';
+    }
+    _embedNameByAsset[el.assetId] = name;
+    return name;
+  }
+
+  /// Makes the chip clickable in the exported PDF: an invisible action
+  /// annotation over its bounds runs Acrobat JavaScript that saves-and-opens
+  /// the embedded attachment (`exportDataObject`, nLaunch:2). This is the
+  /// closest thing to an embedded-file hyperlink the PDF spec offers without
+  /// GoToE (which Syncfusion Flutter doesn't expose); works in Acrobat/Foxit
+  /// class readers — simpler viewers still reach the file via the reader's
+  /// attachments (paperclip) panel.
+  void _addChipClickAction(
+    sf.PdfPage pdfPage,
+    AttachmentElement el,
+    double xOffset,
+  ) {
+    final name = _embedNameFor(el)
+        .replaceAll('\\', r'\\')
+        .replaceAll('"', r'\"');
+    final annotation = sf.PdfActionAnnotation(
+      Rect.fromLTWH(
+        el.rect.left + xOffset,
+        el.rect.top,
+        el.rect.width,
+        el.rect.height,
+      ),
+      sf.PdfJavaScriptAction(
+        'this.exportDataObject({cName:"$name", nLaunch:2});',
+      ),
+    );
+    annotation.border = sf.PdfAnnotationBorder(0, 0, 0); // no visible frame
+    pdfPage.annotations.add(annotation);
+  }
+
+  /// Mirrors CanvasPainter._paintAttachment: rounded chip, red document glyph
+  /// with folded corner, ellipsized file name.
+  void _drawAttachmentChip(
+    sf.PdfGraphics g,
+    AttachmentElement el,
+    double xOffset,
+  ) {
+    final r = Rect.fromLTWH(
+      el.rect.left + xOffset,
+      el.rect.top,
+      el.rect.width,
+      el.rect.height,
+    );
+
+    g.drawRectangle(
+      brush: sf.PdfSolidBrush(sf.PdfColor(0xF4, 0xF1, 0xEA)),
+      pen: sf.PdfPen(sf.PdfColor(0xB9, 0xB2, 0xA4), width: 1),
+      bounds: r,
+    );
+
+    final gh = r.height * 0.62;
+    final gw = gh * 0.78;
+    final gx = r.left + r.height * 0.22;
+    final gy = r.center.dy - gh / 2;
+    const fold = 0.32;
+    final doc = sf.PdfPath()
+      ..addPolygon([
+        Offset(gx, gy),
+        Offset(gx + gw * (1 - fold), gy),
+        Offset(gx + gw, gy + gh * fold),
+        Offset(gx + gw, gy + gh),
+        Offset(gx, gy + gh),
+      ]);
+    g.drawPath(doc, brush: sf.PdfSolidBrush(sf.PdfColor(0xD9, 0x53, 0x4F)));
+    final foldPath = sf.PdfPath()
+      ..addPolygon([
+        Offset(gx + gw * (1 - fold), gy),
+        Offset(gx + gw * (1 - fold), gy + gh * fold),
+        Offset(gx + gw, gy + gh * fold),
+      ]);
+    g.drawPath(foldPath,
+        brush: sf.PdfSolidBrush(sf.PdfColor(0xB2, 0x3C, 0x38)));
+
+    final textLeft = gx + gw + r.height * 0.2;
+    final maxW = r.right - textLeft - 8;
+    if (maxW > 12) {
+      final fontSize = (r.height * 0.32).clamp(9.0, 14.0);
+      g.drawString(
+        el.name,
+        sf.PdfStandardFont(sf.PdfFontFamily.helvetica, fontSize,
+            style: sf.PdfFontStyle.bold),
+        brush: sf.PdfSolidBrush(sf.PdfColor(0x2B, 0x2B, 0x2B)),
+        bounds: Rect.fromLTWH(
+            textLeft, r.top, maxW, r.height),
+        format: sf.PdfStringFormat(
+          alignment: sf.PdfTextAlignment.left,
+          lineAlignment: sf.PdfVerticalAlignment.middle,
+        ),
+      );
     }
   }
 

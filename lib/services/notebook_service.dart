@@ -8,6 +8,7 @@ import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
 import 'settings_service.dart';
+import 'sync_service.dart';
 
 /// File-based persistence for the **Notebook → Section → Canvas** model.
 ///
@@ -75,6 +76,27 @@ class NotebookService {
     await tmp.writeAsString(content, flush: true);
     if (await file.exists()) await file.delete();
     await tmp.rename(file.path);
+    // Notify sync service about the write (no-op if not signed in).
+    SyncService().onLocalFileSaved(file.path, content);
+  }
+
+  /// Public shim used by [SyncService] to write remote content locally
+  /// without triggering another upload loop.
+  Future<void> writeAtomicPublic(File file, String content) async {
+    await file.parent.create(recursive: true);
+    final tmp = File('${file.path}.tmp');
+    await tmp.writeAsString(content, flush: true);
+    if (await file.exists()) await file.delete();
+    await tmp.rename(file.path);
+  }
+
+  /// Binary counterpart of [writeAtomicPublic] — for pulled asset blobs.
+  Future<void> writeAtomicBytesPublic(File file, List<int> bytes) async {
+    await file.parent.create(recursive: true);
+    final tmp = File('${file.path}.tmp');
+    await tmp.writeAsBytes(bytes, flush: true);
+    if (await file.exists()) await file.delete();
+    await tmp.rename(file.path);
   }
 
   static String _basename(String path) =>
@@ -95,24 +117,33 @@ class NotebookService {
 
   // ── Notebooks ──────────────────────────────────────────────────────────
 
-  Future<Map<String, dynamic>> _readIndex() async =>
-      jsonDecode(await notebooksFile.readAsString()) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> _readIndex() async {
+    try {
+      return jsonDecode(await notebooksFile.readAsString()) as Map<String, dynamic>;
+    } catch (_) {
+      // If the file is corrupted or empty, return an empty map to allow recovery.
+      return {};
+    }
+  }
 
   Future<List<Notebook>> getNotebooks() async {
     final data = await _readIndex();
     return data.values
         .map((json) => Notebook.fromJson(json as Map<String, dynamic>))
+        .where((nb) => nb.deletedAt == null)
         .toList();
   }
 
   Future<Notebook?> getNotebook(String notebookId) async {
     final data = await _readIndex();
     final json = data[notebookId] as Map<String, dynamic>?;
-    return json == null ? null : Notebook.fromJson(json);
+    if (json == null) return null;
+    final nb = Notebook.fromJson(json);
+    return nb.deletedAt == null ? nb : null;
   }
 
   Future<Notebook> createNotebook(String name) async {
-    final notebook = Notebook(id: newId(), name: name, createdAt: DateTime.now());
+    final notebook = Notebook(id: newId(), deviceId: SettingsService().deviceId, name: name, createdAt: DateTime.now());
     final data = await _readIndex();
     data[notebook.id] = notebook.toJson();
     await _writeAtomic(notebooksFile, jsonEncode(data));
@@ -122,6 +153,7 @@ class NotebookService {
   /// Persists a notebook's full metadata (name, color, section tree). The
   /// in-memory [Notebook] is the source of truth — mutate then call this.
   Future<void> saveNotebook(Notebook notebook) async {
+    notebook.bumpRev(SettingsService().deviceId);
     final data = await _readIndex();
     data[notebook.id] = notebook.toJson();
     await _writeAtomic(notebooksFile, jsonEncode(data));
@@ -153,12 +185,21 @@ class NotebookService {
     await _writeAtomic(notebooksFile, jsonEncode(reordered));
   }
 
+  /// Soft-delete: tombstone the entry (never remove it from the map). A
+  /// removed map entry has no envelope left to compare, so another device
+  /// that still has the notebook would win the union merge and bring it
+  /// back — the classic "delete doesn't stick" bug. Physical cleanup happens
+  /// later via [runGarbageCollection], once the tombstone is old enough that
+  /// every device has had a chance to observe it.
   Future<void> deleteNotebook(String notebookId) async {
     final data = await _readIndex();
-    data.remove(notebookId);
+    final json = data[notebookId] as Map<String, dynamic>?;
+    if (json == null) return;
+    final nb = Notebook.fromJson(json);
+    nb.deletedAt = DateTime.now();
+    nb.bumpRev(SettingsService().deviceId);
+    data[notebookId] = nb.toJson();
     await _writeAtomic(notebooksFile, jsonEncode(data));
-    final dir = Directory('${appDir.path}/notebooks/$notebookId');
-    if (await dir.exists()) await dir.delete(recursive: true);
   }
 
   // ── Sections (containers of canvases) ──────────────────────────────────
@@ -173,9 +214,10 @@ class NotebookService {
     final file = _sectionFile(notebookId, sectionId);
     if (!await file.exists()) return null;
     try {
-      return Section.fromJson(
+      final s = Section.fromJson(
         jsonDecode(await file.readAsString()) as Map<String, dynamic>,
       );
+      return s.deletedAt == null ? s : null;
     } catch (_) {
       return null;
     }
@@ -193,6 +235,7 @@ class NotebookService {
   }
 
   Future<void> saveSection(Section section) async {
+    section.bumpRev(SettingsService().deviceId);
     await _writeAtomic(
       _sectionFile(section.notebookId, section.id),
       jsonEncode(section.toJson()),
@@ -208,6 +251,7 @@ class NotebookService {
   }) async {
     final section = Section(
       id: newId(),
+      deviceId: SettingsService().deviceId,
       notebookId: notebookId,
       name: name,
       createdAt: DateTime.now(),
@@ -239,9 +283,16 @@ class NotebookService {
     await saveSection(section);
   }
 
+  /// Soft-delete: tombstone the section (keep section.json + its canvases on
+  /// disk for GC later), and drop the tree leaf locally for immediate UI
+  /// cleanliness. The tombstone — not tree membership — is what makes the
+  /// deletion durable across devices (see [deleteNotebook]).
   Future<void> deleteSection(String notebookId, String sectionId) async {
-    final dir = sectionDir(notebookId, sectionId);
-    if (await dir.exists()) await dir.delete(recursive: true);
+    final sec = await getSection(notebookId, sectionId);
+    if (sec != null) {
+      sec.deletedAt = DateTime.now();
+      await saveSection(sec);
+    }
     final nb = await getNotebook(notebookId);
     if (nb != null) {
       TreeOps.removeLeaf(nb.nodes, sectionId);
@@ -276,6 +327,7 @@ class NotebookService {
   Future<void> _writeCanvasWithDefaultPage(Canvas canvas) async {
     final page = CanvasPage(
       id: newId(),
+      deviceId: SettingsService().deviceId,
       width: canvas.defaultPageWidth,
       height: canvas.defaultPageHeight,
       background: canvas.defaultBackground,
@@ -295,9 +347,10 @@ class NotebookService {
     );
     if (!await file.exists()) return null;
     try {
-      return Canvas.fromJson(
+      final c = Canvas.fromJson(
         jsonDecode(await file.readAsString()) as Map<String, dynamic>,
       );
+      return c.deletedAt == null ? c : null;
     } catch (_) {
       return null;
     }
@@ -313,6 +366,7 @@ class NotebookService {
   }
 
   Future<void> saveCanvas(Canvas canvas) async {
+    canvas.bumpRev(SettingsService().deviceId);
     await _writeAtomic(_canvasFile(canvas), jsonEncode(canvas.toJson()));
   }
 
@@ -342,9 +396,16 @@ class NotebookService {
     await saveCanvas(canvas);
   }
 
+  /// Soft-delete: tombstone the canvas (keep canvas.json + its pages/assets
+  /// on disk for GC later), and drop the tree leaf locally. See
+  /// [deleteNotebook] for why tombstoning (not tree removal) is what makes a
+  /// delete durable.
   Future<void> deleteCanvas(Section section, String canvasId) async {
-    final dir = canvasDir(section.notebookId, section.id, canvasId);
-    if (await dir.exists()) await dir.delete(recursive: true);
+    final c = await getCanvas(section.notebookId, section.id, canvasId);
+    if (c != null) {
+      c.deletedAt = DateTime.now();
+      await saveCanvas(c);
+    }
     TreeOps.removeLeaf(section.nodes, canvasId);
     await saveSection(section);
   }
@@ -549,6 +610,7 @@ class NotebookService {
       jsonEncode(
         Section(
           id: effectiveSectionId,
+          deviceId: SettingsService().deviceId,
           notebookId: newNotebookId,
           name: sec.name,
           createdAt: sec.createdAt,
@@ -567,6 +629,7 @@ class NotebookService {
         jsonEncode(
           Canvas(
             id: c.id,
+            deviceId: SettingsService().deviceId,
             notebookId: newNotebookId,
             sectionId: effectiveSectionId,
             name: c.name,
@@ -696,6 +759,7 @@ class NotebookService {
       jsonEncode(
         Canvas(
           id: newCanvasId ?? c.id,
+          deviceId: SettingsService().deviceId,
           notebookId: newNbId,
           sectionId: newSecId,
           name: c.name,
@@ -713,31 +777,75 @@ class NotebookService {
 
   // ── Pages (canvas-scoped) ──────────────────────────────────────────────
 
+  /// Loads every page referenced by [canvas.rows]. A page whose file carries
+  /// a tombstone (`deletedAt` set — soft-deleted on this or another device) is
+  /// dropped from the result *and* pruned out of `canvas.rows`, so a
+  /// structural row-list that lost a race against the deletion (whole-doc LWW
+  /// on canvas.json) self-heals instead of resurrecting a dead page. If
+  /// pruning would leave zero pages, a fresh blank page is inserted — a
+  /// canvas is never allowed to end up empty.
   Future<Map<String, CanvasPage>> loadPages(Canvas canvas) async {
     final pages = <String, CanvasPage>{};
-    for (final row in canvas.rows) {
+    var pruned = false;
+
+    for (final row in List.of(canvas.rows)) {
+      final keep = <String>[];
       for (final pageId in row.pageIds) {
         final file = _pageFile(canvas, pageId);
+        CanvasPage? loaded;
         if (await file.exists()) {
           try {
-            pages[pageId] = CanvasPage.fromJson(
+            loaded = CanvasPage.fromJson(
               jsonDecode(await file.readAsString()) as Map<String, dynamic>,
             );
-            continue;
           } catch (_) {}
+        }
+        if (loaded != null) {
+          if (loaded.deletedAt != null) {
+            pruned = true; // tombstoned elsewhere — drop the dead reference
+            continue;
+          }
+          pages[pageId] = loaded;
+          keep.add(pageId);
+          continue;
         }
         pages[pageId] = CanvasPage(
           id: pageId,
+          deviceId: SettingsService().deviceId,
           width: canvas.defaultPageWidth,
           height: canvas.defaultPageHeight,
           background: canvas.defaultBackground,
         );
+        keep.add(pageId);
+      }
+      if (keep.length != row.pageIds.length) {
+        row.pageIds
+          ..clear()
+          ..addAll(keep);
       }
     }
+    canvas.rows.removeWhere((r) => r.pageIds.isEmpty);
+
+    if (canvas.rows.isEmpty) {
+      final page = CanvasPage(
+        id: newId(),
+        deviceId: SettingsService().deviceId,
+        width: canvas.defaultPageWidth,
+        height: canvas.defaultPageHeight,
+        background: canvas.defaultBackground,
+      );
+      canvas.rows.add(PageRow(id: newId(), pageIds: [page.id]));
+      pages[page.id] = page;
+      await savePage(canvas, page);
+      pruned = true;
+    }
+
+    if (pruned) await saveCanvas(canvas);
     return pages;
   }
 
   Future<void> savePage(Canvas canvas, CanvasPage page) async {
+    page.bumpRev(SettingsService().deviceId);
     await _writeAtomic(_pageFile(canvas, page.id), jsonEncode(page.toJson()));
   }
 
@@ -761,6 +869,8 @@ class NotebookService {
       final tmp = File('${file.path}.tmp');
       await tmp.writeAsBytes(bytes, flush: true);
       await tmp.rename(file.path);
+      // Notify sync service about the new asset.
+      SyncService().onLocalAssetSaved(file.path, bytes);
     }
     return assetId;
   }
@@ -772,4 +882,180 @@ class NotebookService {
   static int _idSeq = 0;
   String newId() =>
       '${DateTime.now().millisecondsSinceEpoch}${(_idSeq++ % 1000).toString().padLeft(3, '0')}';
+
+  // ── Sync helpers ───────────────────────────────────────────────────────
+
+  /// True if [rel] (a forward-slash path relative to [appDir]) is a file that
+  /// should be mirrored to Drive. Excludes temp/local-only bookkeeping files.
+  static bool isSyncedRelPath(String rel) {
+    if (rel.endsWith('.tmp')) return false;
+    if (rel == 'notebooks.json') return true;
+    if (!rel.startsWith('notebooks/')) return false;
+    // Only structural JSON, page JSON, and asset blobs are synced.
+    return true;
+  }
+
+  /// Relative (forward-slash) path of an absolute local path, or null if it is
+  /// outside [appDir] or not a synced file.
+  String? relPathOf(String absolutePath) {
+    final base = appDir.path.replaceAll('\\', '/');
+    final p = absolutePath.replaceAll('\\', '/');
+    if (!p.startsWith(base)) return null;
+    var rel = p.substring(base.length);
+    if (rel.startsWith('/')) rel = rel.substring(1);
+    return isSyncedRelPath(rel) ? rel : null;
+  }
+
+  File fileForRelPath(String rel) => File('${appDir.path}/$rel');
+
+  /// Every synced file currently on disk, as forward-slash relative paths.
+  Future<Set<String>> listSyncedRelPaths() async {
+    final out = <String>{};
+    final nb = notebooksFile;
+    if (await nb.exists()) out.add('notebooks.json');
+    final dir = Directory('${appDir.path}/notebooks');
+    if (await dir.exists()) {
+      await for (final e in dir.list(recursive: true, followLinks: false)) {
+        if (e is! File) continue;
+        final rel = relPathOf(e.path);
+        if (rel != null) out.add(rel);
+      }
+    }
+    return out;
+  }
+
+  // ── Garbage collection (v3 §4: purge tombstones older than 90 days) ─────
+
+  static const Duration _kGcMaxAge = Duration(days: 90);
+
+  /// Physically deletes tombstoned notebooks/sections/canvases/pages whose
+  /// `deletedAt` is older than [maxAge], and drops old erase/delete-object
+  /// tombstone *entries* from otherwise-live pages (the content they mark is
+  /// long gone either way; only the tiny bookkeeping record is dropped).
+  ///
+  /// Local-disk only — does not delete the Drive-side copy (Drive's folder
+  /// API isn't relPath-indexed the way files are, so a safe remote purge is a
+  /// separate concern; see KNOWN_ISSUES). Purging only locally is harmless:
+  /// at worst a later full resync re-downloads a tombstone file that was
+  /// purged early, which wastes a little disk, not correctness.
+  Future<void> runGarbageCollection({Duration maxAge = _kGcMaxAge}) async {
+    final cutoff = DateTime.now().subtract(maxAge);
+    final data = await _readIndex();
+    var indexChanged = false;
+    final purgeNotebookIds = <String>[];
+
+    for (final entry in data.entries) {
+      final json = entry.value as Map<String, dynamic>;
+      if (_tombstoneExpired(json['deletedAt'], cutoff)) {
+        purgeNotebookIds.add(entry.key);
+        continue;
+      }
+      await _gcSectionsUnder(entry.key, cutoff);
+    }
+    for (final id in purgeNotebookIds) {
+      data.remove(id);
+      indexChanged = true;
+      final dir = Directory('${appDir.path}/notebooks/$id');
+      if (await dir.exists()) await dir.delete(recursive: true);
+    }
+    if (indexChanged) await _writeAtomic(notebooksFile, jsonEncode(data));
+  }
+
+  bool _tombstoneExpired(dynamic deletedAtField, DateTime cutoff) {
+    if (deletedAtField is! num) return false;
+    return DateTime.fromMillisecondsSinceEpoch(deletedAtField.toInt())
+        .isBefore(cutoff);
+  }
+
+  Future<void> _gcSectionsUnder(String notebookId, DateTime cutoff) async {
+    final dir = Directory('${appDir.path}/notebooks/$notebookId/sections');
+    if (!await dir.exists()) return;
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! Directory) continue;
+      final sectionId = _basename(entity.path);
+      final file = File('${entity.path}/section.json');
+      if (!await file.exists()) continue;
+      Map<String, dynamic> json;
+      try {
+        json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      } catch (_) {
+        continue;
+      }
+      if (_tombstoneExpired(json['deletedAt'], cutoff)) {
+        await entity.delete(recursive: true);
+        continue;
+      }
+      await _gcCanvasesUnder(notebookId, sectionId, cutoff);
+    }
+  }
+
+  Future<void> _gcCanvasesUnder(
+    String notebookId,
+    String sectionId,
+    DateTime cutoff,
+  ) async {
+    final dir = Directory(
+      '${sectionDir(notebookId, sectionId).path}/canvases',
+    );
+    if (!await dir.exists()) return;
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! Directory) continue;
+      final file = File('${entity.path}/canvas.json');
+      if (!await file.exists()) continue;
+      Map<String, dynamic> json;
+      try {
+        json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      } catch (_) {
+        continue;
+      }
+      if (_tombstoneExpired(json['deletedAt'], cutoff)) {
+        await entity.delete(recursive: true);
+        continue;
+      }
+      await _gcPagesUnder(entity.path, cutoff);
+    }
+  }
+
+  Future<void> _gcPagesUnder(String canvasDirPath, DateTime cutoff) async {
+    final dir = Directory('$canvasDirPath/pages');
+    if (!await dir.exists()) return;
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File || !entity.path.endsWith('.json')) continue;
+      Map<String, dynamic> json;
+      try {
+        json = jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
+      } catch (_) {
+        continue;
+      }
+      if (_tombstoneExpired(json['deletedAt'], cutoff)) {
+        await entity.delete();
+        continue;
+      }
+      _compactTombstoneList(json, 'erased', cutoff);
+      _compactTombstoneList(json, 'deletedObjects', cutoff);
+      if (json['_gcCompacted'] == true) {
+        json.remove('_gcCompacted');
+        // Atomic like every other write here, but deliberately bypasses
+        // SyncService.onLocalFileSaved — this is a local-only trim, not an
+        // edit that needs pushing (see class doc above).
+        final tmp = File('${entity.path}.tmp');
+        await tmp.writeAsString(jsonEncode(json), flush: true);
+        await entity.delete();
+        await tmp.rename(entity.path);
+      }
+    }
+  }
+
+  void _compactTombstoneList(
+    Map<String, dynamic> pageJson,
+    String key,
+    DateTime cutoff,
+  ) {
+    final list = List<Map<String, dynamic>>.from(pageJson[key] ?? []);
+    final kept = list.where((e) => !_tombstoneExpired(e['erasedAt'], cutoff));
+    if (kept.length != list.length) {
+      pageJson[key] = kept.toList();
+      pageJson['_gcCompacted'] = true;
+    }
+  }
 }

@@ -13,6 +13,8 @@ void main() {
     test('StrokeElement keeps points, pressure, tool, color, size', () {
       final stroke = StrokeElement(
         id: 'el_1',
+        deviceId: 'test_device',
+        z: '0|a0:',
         tool: StrokeTool.highlighter,
         color: const Color(0xFFD9553B),
         size: 6.5,
@@ -38,6 +40,7 @@ void main() {
     test('TextElement keeps rect, style, alignment, rotation', () {
       final text = TextElement(
         id: 'el_2',
+        deviceId: 'test_device',
         rect: const Rect.fromLTWH(10, 20, 200, 48),
         rotation: 0.5,
         text: 'hello world',
@@ -67,6 +70,7 @@ void main() {
     test('TextElement preserves per-run styling', () {
       final text = TextElement(
         id: 'el_runs',
+        deviceId: 'test_device',
         rect: const Rect.fromLTWH(0, 0, 200, 40),
         color: const Color(0xFF000000),
         runs: [
@@ -124,6 +128,7 @@ void main() {
     test('ImageElement keeps rect, rotation, assetId', () {
       final image = ImageElement(
         id: 'el_3',
+        deviceId: 'test_device',
         rect: const Rect.fromLTWH(5, 6, 120, 80),
         rotation: -0.25,
         assetId: 'abc123.png',
@@ -161,6 +166,7 @@ void main() {
     test('PDF-backed page keeps source, size, background, elements', () {
       final page = CanvasPage(
         id: 'pg_1',
+        deviceId: 'test_device',
         width: 612,
         height: 792,
         background: const PageBackground(
@@ -168,9 +174,11 @@ void main() {
           pattern: BgPattern.grid,
         ),
         source: const PdfSource(assetId: 'deadbeef.pdf', pageIndex: 3),
-        elements: [
+        strokes: [
           StrokeElement(
             id: 'el_1',
+            deviceId: 'test_device',
+            z: '0|a0:',
             tool: StrokeTool.pen,
             color: const Color(0xFF000000),
             size: 4,
@@ -189,7 +197,50 @@ void main() {
       expect(decoded.source?.pageIndex, 3);
       expect(decoded.background.pattern, BgPattern.grid);
       expect(decoded.background.color.toARGB32(), 0xFFF8F1E3);
-      expect(decoded.elements.single, isA<StrokeElement>());
+      expect(decoded.strokes.single, isA<StrokeElement>());
+    });
+
+    test('AttachmentElement round-trips rect, assetId, name, mime', () {
+      final el = AttachmentElement(
+        id: 'att_1',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(20, 30, 180, 44),
+        assetId: 'deadbeef.pdf',
+        name: 'paper.pdf',
+        mime: 'application/pdf',
+      );
+      final decoded = CanvasElement.fromJson(
+        jsonDecode(jsonEncode(el.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded, isA<AttachmentElement>());
+      final a = decoded as AttachmentElement;
+      expect(a.rect, const Rect.fromLTWH(20, 30, 180, 44));
+      expect(a.assetId, 'deadbeef.pdf');
+      expect(a.name, 'paper.pdf');
+      expect(a.mime, 'application/pdf');
+    });
+
+    test('deletedAt (page tombstone) and deletedObjects survive', () {
+      final page = CanvasPage(
+        id: 'pg_1',
+        deviceId: 'test_device',
+        rev: 4,
+        deletedAt: DateTime(2026, 7, 7),
+        deletedObjects: [
+          EraseTombstone(
+            strokeId: 'el_deleted',
+            erasedAt: DateTime(2026, 7, 7),
+            deviceId: 'test_device',
+          ),
+        ],
+      );
+
+      final decoded = CanvasPage.fromJson(
+        jsonDecode(jsonEncode(page.toJson())) as Map<String, dynamic>,
+      );
+
+      expect(decoded.deletedAt, DateTime(2026, 7, 7));
+      expect(decoded.deletedObjects.single.strokeId, 'el_deleted');
     });
   });
 
@@ -237,6 +288,7 @@ void main() {
     test('a flat leaf list survives + color (notebook of sections)', () {
       final nb = Notebook(
         id: 'n1',
+        deviceId: 'test_device',
         name: 'School',
         createdAt: DateTime(2026, 1, 2),
         color: 0xFF3B7DD8,
@@ -255,6 +307,7 @@ void main() {
       // Notebook's section tree.
       final section = Section(
         id: 's2',
+        deviceId: 'test_device',
         notebookId: 'n2',
         name: 'Work',
         createdAt: DateTime(2026, 1, 2),
@@ -308,6 +361,8 @@ void main() {
     test('translate moves stroke points and invalidates cache', () {
       final stroke = StrokeElement(
         id: 'el',
+        deviceId: 'test_device',
+        z: '0|a0:',
         tool: StrokeTool.pen,
         color: const Color(0xFF000000),
         size: 4,
@@ -321,6 +376,8 @@ void main() {
     test('stroke scale about an anchor scales geometry and stroke width', () {
       final stroke = StrokeElement(
         id: 'el',
+        deviceId: 'test_device',
+        z: '0|a0:',
         tool: StrokeTool.pen,
         color: const Color(0xFF000000),
         size: 4,
@@ -335,6 +392,7 @@ void main() {
       // Text boxes auto-size to content; resizing must not rescale font/box.
       final text = TextElement(
         id: 'el2',
+        deviceId: 'test_device',
         rect: const Rect.fromLTWH(10, 10, 100, 40),
         text: 'x',
         color: const Color(0xFF000000),

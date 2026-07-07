@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import '../models/notebook.dart';
 import '../services/notebook_service.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
 import '../widgets/color_swatch_picker.dart';
+import '../widgets/refreshable_empty.dart';
 import 'notebook_screen.dart';
 import 'settings_screen.dart';
 
@@ -22,6 +24,17 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadNotebooks();
+    SyncService().dataVersion.addListener(_onSyncData);
+  }
+
+  @override
+  void dispose() {
+    SyncService().dataVersion.removeListener(_onSyncData);
+    super.dispose();
+  }
+
+  void _onSyncData() {
+    if (mounted) _loadNotebooks();
   }
 
   Future<void> _loadNotebooks() async {
@@ -113,6 +126,13 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('Notebooks'),
         actions: [
+          // Single, consistent add entry point across all list screens: the
+          // app-bar "+" (the old FAB overlapped the last row's ⋮ menu).
+          IconButton(
+            icon: const Icon(Icons.add),
+            tooltip: 'New notebook',
+            onPressed: _createNotebook,
+          ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Settings',
@@ -126,41 +146,50 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: notebooks == null
           ? const Center(child: CircularProgressIndicator())
-          : notebooks.isEmpty
-          ? _EmptyState(onCreate: _createNotebook)
-          : ReorderableListView.builder(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
-              itemCount: notebooks.length,
-              onReorder: _reorderNotebooks,
-              proxyDecorator: (child, index, animation) =>
-                  Material(color: Colors.transparent, child: child),
-              itemBuilder: (context, index) {
-                final notebook = notebooks[index];
-                return Padding(
-                  key: ValueKey(notebook.id),
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: _NotebookRow(
-                    notebook: notebook,
-                    index: index,
-                    onTap: () {
-                      Navigator.push(
-                        context,
-                        fadeThroughRoute(NotebookScreen(notebook: notebook)),
-                      ).then((_) => _loadNotebooks());
-                    },
-                    onRename: () => _renameNotebook(notebook),
-                    onColor: () => _colorNotebook(notebook),
-                    onDelete: () => _deleteNotebook(notebook),
-                  ),
-                );
-              },
+          : RefreshIndicator(
+              onRefresh: _refresh,
+              child: notebooks.isEmpty
+                  ? RefreshableEmpty(
+                      child: _EmptyState(onCreate: _createNotebook),
+                    )
+                  : ReorderableListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                      itemCount: notebooks.length,
+                      onReorder: _reorderNotebooks,
+                      proxyDecorator: (child, index, animation) =>
+                          Material(color: Colors.transparent, child: child),
+                      itemBuilder: (context, index) {
+                        final notebook = notebooks[index];
+                        return Padding(
+                          key: ValueKey(notebook.id),
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: _NotebookRow(
+                            notebook: notebook,
+                            index: index,
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                fadeThroughRoute(
+                                  NotebookScreen(notebook: notebook),
+                                ),
+                              ).then((_) => _loadNotebooks());
+                            },
+                            onRename: () => _renameNotebook(notebook),
+                            onColor: () => _colorNotebook(notebook),
+                            onDelete: () => _deleteNotebook(notebook),
+                          ),
+                        );
+                      },
+                    ),
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _createNotebook,
-        tooltip: 'New notebook',
-        child: const Icon(Icons.add),
-      ),
     );
+  }
+
+  /// Pull-to-refresh: run a sync round trip, then reload the list.
+  Future<void> _refresh() async {
+    await SyncService().syncNow();
+    await _loadNotebooks();
   }
 }
 

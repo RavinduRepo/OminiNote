@@ -96,7 +96,7 @@ class CanvasPainter extends CustomPainter {
     canvas.clipRect(rect);
     canvas.translate(rect.left, rect.top);
 
-    for (final el in page.elements) {
+    for (final el in [...page.strokes, ...page.objects]) {
       if (el.id == controller.editingElementId) continue; // text overlay open
       _paintElement(canvas, el);
     }
@@ -138,7 +138,73 @@ class CanvasPainter extends CustomPainter {
         _paintText(canvas, el);
       case ImageElement():
         _paintImage(canvas, el);
+      case AttachmentElement():
+        _paintAttachment(canvas, el);
     }
+  }
+
+  /// The attachment chip: rounded rect, a small "document" glyph with a
+  /// folded corner, and the file name. Tap-to-open is handled by the screen.
+  void _paintAttachment(Canvas canvas, AttachmentElement el) {
+    final r = el.rect;
+    canvas.save();
+    if (el.rotation != 0) {
+      canvas.translate(r.center.dx, r.center.dy);
+      canvas.rotate(el.rotation);
+      canvas.translate(-r.center.dx, -r.center.dy);
+    }
+
+    final rrect = RRect.fromRectAndRadius(r, const Radius.circular(6));
+    canvas.drawRRect(rrect, Paint()..color = const Color(0xFFF4F1EA));
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = const Color(0xFFB9B2A4),
+    );
+
+    // Document glyph with folded corner, sized to the chip height.
+    final gh = r.height * 0.62;
+    final gw = gh * 0.78;
+    final gx = r.left + r.height * 0.22;
+    final gy = r.center.dy - gh / 2;
+    const fold = 0.32;
+    final doc = Path()
+      ..moveTo(gx, gy)
+      ..lineTo(gx + gw * (1 - fold), gy)
+      ..lineTo(gx + gw, gy + gh * fold)
+      ..lineTo(gx + gw, gy + gh)
+      ..lineTo(gx, gy + gh)
+      ..close();
+    canvas.drawPath(doc, Paint()..color = const Color(0xFFD9534F));
+    final foldPath = Path()
+      ..moveTo(gx + gw * (1 - fold), gy)
+      ..lineTo(gx + gw * (1 - fold), gy + gh * fold)
+      ..lineTo(gx + gw, gy + gh * fold)
+      ..close();
+    canvas.drawPath(foldPath, Paint()..color = const Color(0xFFB23C38));
+
+    // File name, ellipsized to the remaining width.
+    final textLeft = gx + gw + r.height * 0.2;
+    final maxW = r.right - textLeft - 8;
+    if (maxW > 12) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: el.name,
+          style: TextStyle(
+            color: const Color(0xFF2B2B2B),
+            fontSize: (r.height * 0.32).clamp(9.0, 14.0),
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: maxW);
+      tp.paint(canvas, Offset(textLeft, r.center.dy - tp.height / 2));
+    }
+    canvas.restore();
   }
 
   void _paintStroke(Canvas canvas, StrokeElement stroke) {

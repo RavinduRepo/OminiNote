@@ -55,51 +55,162 @@ class PdfSource {
   );
 }
 
-/// One sheet inside a Canvas. Size in PDF points; elements in page-local
-/// coordinates; z-order = list order. Mutable (see CanvasElement note).
+class EraseTombstone {
+  final String strokeId;
+  final DateTime erasedAt;
+  final int rev;
+  final String deviceId;
+
+  EraseTombstone({
+    required this.strokeId,
+    required this.erasedAt,
+    this.rev = 1,
+    required this.deviceId,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'strokeId': strokeId,
+        'erasedAt': erasedAt.millisecondsSinceEpoch,
+        'rev': rev,
+        'deviceId': deviceId,
+      };
+
+  factory EraseTombstone.fromJson(Map<String, dynamic> json) =>
+      EraseTombstone(
+        strokeId: json['strokeId'],
+        erasedAt: DateTime.fromMillisecondsSinceEpoch(json['erasedAt']),
+        rev: json['rev'] ?? 1,
+        deviceId: json['deviceId'] ?? 'unknown',
+      );
+}
+
+/// One sheet inside a Canvas. Size in PDF points.
 class CanvasPage {
+  final int schemaVersion;
   final String id;
+  int rev;
+  DateTime updatedAt;
+  String deviceId;
+  DateTime? deletedAt;
+
   double width;
   double height;
   PageBackground background;
 
   /// Non-null when this page renders an imported PDF page as its background.
   PdfSource? source;
-  final List<CanvasElement> elements;
+
+  final List<StrokeElement> strokes;
+  final List<EraseTombstone> erased;
+  final List<CanvasElement> objects;
+
+  /// Tombstones for deleted text/image objects — same idea as [erased] for
+  /// strokes. An object is never spliced out of [objects] on delete (that
+  /// would let a stale remote copy of it resurrect on merge); instead its id
+  /// lands here and merge filters it out. Reuses [EraseTombstone]'s shape
+  /// (its `strokeId` field just holds the deleted object's id here).
+  final List<EraseTombstone> deletedObjects;
 
   CanvasPage({
+    this.schemaVersion = 1,
     required this.id,
+    this.rev = 1,
+    DateTime? updatedAt,
+    required this.deviceId,
+    this.deletedAt,
     this.width = kDefaultPageWidth,
     this.height = kDefaultPageHeight,
     this.background = const PageBackground(),
     this.source,
-    List<CanvasElement>? elements,
-  }) : elements = elements ?? [];
+    List<StrokeElement>? strokes,
+    List<EraseTombstone>? erased,
+    List<CanvasElement>? objects,
+    List<EraseTombstone>? deletedObjects,
+  })  : updatedAt = updatedAt ?? DateTime.now(),
+        strokes = strokes ?? [],
+        erased = erased ?? [],
+        objects = objects ?? [],
+        deletedObjects = deletedObjects ?? [];
 
   Size get size => Size(width, height);
   Rect get localRect => Rect.fromLTWH(0, 0, width, height);
 
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'w': width,
-    'h': height,
-    'background': background.toJson(),
-    'source': source?.toJson(),
-    'elements': elements.map((e) => e.toJson()).toList(),
-  };
+  void bumpRev(String newDeviceId) {
+    rev += 1;
+    updatedAt = DateTime.now();
+    deviceId = newDeviceId;
+  }
 
-  factory CanvasPage.fromJson(Map<String, dynamic> json) => CanvasPage(
-    id: json['id'] ?? newModelId('pg'),
-    width: (json['w'] as num?)?.toDouble() ?? kDefaultPageWidth,
-    height: (json['h'] as num?)?.toDouble() ?? kDefaultPageHeight,
-    background: PageBackground.fromJson(
-      json['background'] as Map<String, dynamic>?,
-    ),
-    source: json['source'] == null
-        ? null
-        : PdfSource.fromJson(json['source'] as Map<String, dynamic>),
-    elements: List<Map<String, dynamic>>.from(
-      json['elements'] ?? [],
-    ).map(CanvasElement.fromJson).toList(),
-  );
+  Map<String, dynamic> toJson() => {
+        'schemaVersion': schemaVersion,
+        'id': id,
+        'rev': rev,
+        'updatedAt': updatedAt.millisecondsSinceEpoch,
+        'deviceId': deviceId,
+        'deletedAt': deletedAt?.millisecondsSinceEpoch,
+        'w': width,
+        'h': height,
+        'background': background.toJson(),
+        'source': source?.toJson(),
+        'strokes': strokes.map((s) => s.toJson()).toList(),
+        'erased': erased.map((e) => e.toJson()).toList(),
+        'objects': objects.map((e) => e.toJson()).toList(),
+        'deletedObjects': deletedObjects.map((e) => e.toJson()).toList(),
+      };
+
+  factory CanvasPage.fromJson(Map<String, dynamic> json) {
+    // Backwards compatibility for v1
+    final elements = List<Map<String, dynamic>>.from(json['elements'] ?? []);
+    final List<StrokeElement> legacyStrokes = [];
+    final List<CanvasElement> legacyObjects = [];
+
+    for (final e in elements) {
+      if (e['type'] == 'stroke') {
+        legacyStrokes.add(StrokeElement.fromJson(e));
+      } else {
+        legacyObjects.add(CanvasElement.fromJson(e));
+      }
+    }
+
+    return CanvasPage(
+      schemaVersion: json['schemaVersion'] ?? 1,
+      id: json['id'] ?? newModelId('pg'),
+      rev: json['rev'] ?? 1,
+      updatedAt: json['updatedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+          : null,
+      deviceId: json['deviceId'] ?? 'unknown',
+      deletedAt: json['deletedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+          : null,
+      width: (json['w'] as num?)?.toDouble() ?? kDefaultPageWidth,
+      height: (json['h'] as num?)?.toDouble() ?? kDefaultPageHeight,
+      background: PageBackground.fromJson(
+        json['background'] as Map<String, dynamic>?,
+      ),
+      source: json['source'] == null
+          ? null
+          : PdfSource.fromJson(json['source'] as Map<String, dynamic>),
+      strokes: json['strokes'] != null
+          ? List<Map<String, dynamic>>.from(json['strokes'])
+              .map(StrokeElement.fromJson)
+              .toList()
+          : legacyStrokes,
+      erased: json['erased'] != null
+          ? List<Map<String, dynamic>>.from(json['erased'])
+              .map(EraseTombstone.fromJson)
+              .toList()
+          : [],
+      objects: json['objects'] != null
+          ? List<Map<String, dynamic>>.from(json['objects'])
+              .map(CanvasElement.fromJson)
+              .toList()
+          : legacyObjects,
+      deletedObjects: json['deletedObjects'] != null
+          ? List<Map<String, dynamic>>.from(json['deletedObjects'])
+              .map(EraseTombstone.fromJson)
+              .toList()
+          : [],
+    );
+  }
 }

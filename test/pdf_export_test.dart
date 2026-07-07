@@ -61,9 +61,9 @@ void main() {
       'a horizontally-merged (wide) row and a plain portrait row each export '
       'at their exact intended size',
       () async {
-        final wideLeft = CanvasPage(id: 'p1', width: 595, height: 842);
-        final wideRight = CanvasPage(id: 'p2', width: 595, height: 842);
-        final portrait = CanvasPage(id: 'p3', width: 595, height: 842);
+        final wideLeft = CanvasPage(id: 'p1', deviceId: 'test_device', width: 595, height: 842);
+        final wideRight = CanvasPage(id: 'p2', deviceId: 'test_device', width: 595, height: 842);
+        final portrait = CanvasPage(id: 'p3', deviceId: 'test_device', width: 595, height: 842);
 
         final section = Canvas(
           id: 's1',
@@ -100,6 +100,7 @@ void main() {
         Future<Uint8List> exportSinglePage(BgPattern pattern) {
           final page = CanvasPage(
             id: 'p1',
+            deviceId: 'test_device',
             width: 595,
             height: 842,
             background: PageBackground(

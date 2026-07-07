@@ -3,8 +3,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:omininote/canvas/canvas_controller.dart';
 import 'package:omininote/models/canvas_page.dart';
 import 'package:omininote/models/canvas.dart';
+import 'package:omininote/models/element.dart';
+import 'package:omininote/services/settings_service.dart';
+
+StrokeElement _stroke(String id, {String device = 'dev'}) => StrokeElement(
+      id: id,
+      deviceId: device,
+      z: '0|a0:',
+      tool: StrokeTool.pen,
+      color: const Color(0xFF000000),
+      size: 3,
+      points: [StrokePoint(0, 0, 0.5), StrokePoint(10, 10, 0.5)],
+    );
 
 void main() {
+  // Tombstone paths stamp the local device id.
+  SettingsService().deviceId = 'test_device';
   group('CanvasController.setPageBackground', () {
     test(
       'ticking "apply to all pages" changes every existing page and the '
@@ -12,6 +26,7 @@ void main() {
       () {
         final pageA = CanvasPage(
           id: 'a',
+          deviceId: 'test_device',
           background: const PageBackground(
             color: Color(0xFFFFFFFF),
             pattern: BgPattern.blank,
@@ -19,6 +34,7 @@ void main() {
         );
         final pageB = CanvasPage(
           id: 'b',
+          deviceId: 'test_device',
           background: const PageBackground(
             color: Color(0xFFF8F1E3),
             pattern: BgPattern.ruled,
@@ -61,8 +77,8 @@ void main() {
     );
 
     test('without the tick, only the targeted page changes', () {
-      final pageA = CanvasPage(id: 'a');
-      final pageB = CanvasPage(id: 'b');
+      final pageA = CanvasPage(id: 'a', deviceId: 'test_device');
+      final pageB = CanvasPage(id: 'b', deviceId: 'test_device');
       final section = Canvas(
         id: 's2',
         notebookId: 'n1',
@@ -91,7 +107,7 @@ void main() {
     late CanvasController controller;
 
     setUp(() {
-      final page = CanvasPage(id: 'a');
+      final page = CanvasPage(id: 'a', deviceId: 'test_device');
       final section = Canvas(
         id: 's4',
         notebookId: 'n1',
@@ -135,6 +151,178 @@ void main() {
       expect(controller.toolOptionsOpen, isFalse);
       controller.closeToolOptions();
       expect(controller.toolOptionsOpen, isFalse);
+    });
+  });
+
+  group('CanvasController delete → tombstones (v3)', () {
+    late CanvasPage page;
+    late CanvasController controller;
+
+    setUp(() {
+      page = CanvasPage(
+        id: 'a',
+        deviceId: 'test_device',
+        strokes: [_stroke('s1'), _stroke('s2')],
+      );
+      final canvas = Canvas(
+        id: 'c-del',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Del test',
+        createdAt: DateTime(2026, 7, 7),
+        rows: [PageRow(id: 'r1', pageIds: ['a'])],
+      );
+      controller = CanvasController(canvas: canvas, pages: {'a': page});
+    });
+
+    test('deleteSelection tombstones strokes; undo clears the tombstones', () {
+      controller.selection = [page.strokes.first];
+      controller.selectionPageId = 'a';
+      controller.deleteSelection();
+
+      expect(page.strokes.map((s) => s.id), ['s2']);
+      expect(page.erased.map((e) => e.strokeId), ['s1'],
+          reason: 'without the tombstone the deleted stroke resurrects on '
+              'the next merge with a stale remote copy');
+
+      controller.undo();
+      expect(page.strokes.map((s) => s.id), containsAll(['s1', 's2']));
+      expect(page.erased, isEmpty);
+    });
+
+    test(
+        'the eraser TOOL writes tombstones on the first apply — not only on '
+        'redo (the resurrection bug)', () {
+      controller.setTool(CanvasTool.eraser);
+      // Strokes run (0,0)→(10,10); a gesture at (5,5) hits them.
+      controller.startToolGesture(const Offset(5, 5), 0.5);
+      controller.endToolGesture();
+
+      expect(page.strokes, isEmpty, reason: 'both strokes pass under (5,5)');
+      expect(page.erased.map((e) => e.strokeId).toSet(), {'s1', 's2'},
+          reason: 'the FIRST commit must write tombstones — the old code '
+              'only wrote them on redo, so a plain erase synced as "stroke '
+              'missing, no tombstone" and the other device restored it');
+
+      controller.undo();
+      expect(page.strokes.length, 2);
+      expect(page.erased, isEmpty);
+
+      controller.redo();
+      expect(page.strokes, isEmpty);
+      expect(page.erased.length, 2);
+    });
+  });
+
+  group('element rev stamping (LWW convergence)', () {
+    test('a selection transform bumps rev/updatedAt on the moved elements',
+        () {
+      final page = CanvasPage(
+        id: 'a',
+        deviceId: 'test_device',
+        strokes: [_stroke('s1')],
+      );
+      final canvas = Canvas(
+        id: 'c-stamp',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Stamp test',
+        createdAt: DateTime(2026, 7, 7),
+        rows: [PageRow(id: 'r1', pageIds: ['a'])],
+      );
+      final controller = CanvasController(canvas: canvas, pages: {'a': page});
+      final el = page.strokes.single;
+      expect(el.rev, 1);
+
+      // Lasso-select then drag the selection (move gesture).
+      controller.setTool(CanvasTool.lasso);
+      controller.selectSingle('a', el);
+      controller.startToolGesture(const Offset(5, 5), 0.5);
+      controller.updateToolGesture(const Offset(25, 25), 0.5);
+      controller.endToolGesture();
+
+      expect(el.rev, greaterThan(1),
+          reason: 'without a rev bump, two devices\' copies of an edited '
+              'element tie in LWW and never converge — "latest wins" '
+              'depends on this');
+    });
+  });
+
+  group('CanvasController.applyRemotePage (live merge of pulled pages)', () {
+    test(
+        'remote erase tombstone removes the live stroke; unsynced local '
+        'stroke and remote-only stroke both survive', () {
+      final page = CanvasPage(
+        id: 'a',
+        deviceId: 'devA',
+        strokes: [_stroke('shared'), _stroke('localOnly', device: 'devA')],
+      );
+      final canvas = Canvas(
+        id: 'c-live',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Live test',
+        createdAt: DateTime(2026, 7, 7),
+        rows: [PageRow(id: 'r1', pageIds: ['a'])],
+      );
+      final controller = CanvasController(canvas: canvas, pages: {'a': page});
+
+      // Remote device erased 'shared' and drew 'remoteOnly'.
+      final remote = CanvasPage(
+        id: 'a',
+        deviceId: 'devB',
+        rev: 3,
+        strokes: [_stroke('remoteOnly', device: 'devB')],
+        erased: [
+          EraseTombstone(
+            strokeId: 'shared',
+            erasedAt: DateTime.now(),
+            deviceId: 'devB',
+          ),
+        ],
+      );
+
+      controller.applyRemotePage(remote);
+
+      final live = controller.pages['a']!;
+      final ids = live.strokes.map((s) => s.id).toSet();
+      expect(ids, {'localOnly', 'remoteOnly'},
+          reason: 'erased stroke gone, both devices\' other ink kept');
+      expect(live.erased.map((e) => e.strokeId), contains('shared'),
+          reason: 'tombstone retained so the erase propagates onward');
+      // The same in-memory instance was updated — the open canvas repaints
+      // it, and the next autosave persists the union instead of clobbering.
+      expect(identical(live, page), isTrue);
+    });
+
+    test('a page tombstoned remotely is dropped from the open canvas', () {
+      final pageA = CanvasPage(id: 'a', deviceId: 'devA');
+      final pageB = CanvasPage(id: 'b', deviceId: 'devA');
+      final canvas = Canvas(
+        id: 'c-live2',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Live test 2',
+        createdAt: DateTime(2026, 7, 7),
+        rows: [
+          PageRow(id: 'r1', pageIds: ['a']),
+          PageRow(id: 'r2', pageIds: ['b']),
+        ],
+      );
+      final controller =
+          CanvasController(canvas: canvas, pages: {'a': pageA, 'b': pageB});
+
+      final remoteTombstone = CanvasPage(
+        id: 'b',
+        deviceId: 'devB',
+        rev: 5,
+        deletedAt: DateTime.now(),
+      );
+      controller.applyRemotePage(remoteTombstone);
+
+      expect(controller.pages.containsKey('b'), isFalse);
+      expect(canvas.rows.length, 1);
+      expect(canvas.rows.single.pageIds, ['a']);
     });
   });
 }

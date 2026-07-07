@@ -58,7 +58,13 @@ class Attachment {
 ///
 /// Path: `notebooks/<nbId>/sections/<secId>/canvases/<id>/canvas.json`.
 class Canvas {
+  final int schemaVersion;
   final String id;
+  int rev;
+  DateTime updatedAt;
+  String deviceId;
+  DateTime? deletedAt;
+
   final String notebookId;
   final String sectionId;
   String name;
@@ -71,7 +77,12 @@ class Canvas {
   final List<Attachment> attachments;
 
   Canvas({
+    this.schemaVersion = 1,
     required this.id,
+    this.rev = 1,
+    DateTime? updatedAt,
+    this.deviceId = 'unknown',
+    this.deletedAt,
     required this.notebookId,
     required this.sectionId,
     required this.name,
@@ -82,13 +93,25 @@ class Canvas {
     this.defaultBackground = const PageBackground(),
     List<PageRow>? rows,
     List<Attachment>? attachments,
-  }) : rows = rows ?? [],
-       attachments = attachments ?? [];
+  })  : updatedAt = updatedAt ?? DateTime.now(),
+        rows = rows ?? [],
+        attachments = attachments ?? [];
 
   int get pageCount => rows.fold(0, (sum, r) => sum + r.pageIds.length);
 
+  void bumpRev(String newDeviceId) {
+    rev += 1;
+    updatedAt = DateTime.now();
+    deviceId = newDeviceId;
+  }
+
   Map<String, dynamic> toJson() => {
+    'schemaVersion': schemaVersion,
     'id': id,
+    'rev': rev,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+    'deviceId': deviceId,
+    'deletedAt': deletedAt?.millisecondsSinceEpoch,
     'notebookId': notebookId,
     'sectionId': sectionId,
     'name': name,
@@ -102,7 +125,16 @@ class Canvas {
   };
 
   factory Canvas.fromJson(Map<String, dynamic> json) => Canvas(
+    schemaVersion: json['schemaVersion'] ?? 1,
     id: json['id'],
+    rev: json['rev'] ?? 1,
+    updatedAt: json['updatedAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+        : (DateTime.tryParse(json['createdAt'] ?? '') ?? DateTime.now()),
+    deviceId: json['deviceId'] ?? 'unknown',
+    deletedAt: json['deletedAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+        : null,
     notebookId: json['notebookId'] ?? '',
     sectionId: json['sectionId'] ?? '',
     name: json['name'] ?? 'Untitled',
