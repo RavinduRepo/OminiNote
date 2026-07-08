@@ -19,7 +19,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.4'
+          flutter-version: '3.44.5'
           channel: stable
 
       - name: Decode release keystore
@@ -73,7 +73,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.4'
+          flutter-version: '3.44.5'
           channel: stable
 
       - run: flutter pub get
@@ -104,7 +104,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.4'
+          flutter-version: '3.44.5'
           channel: stable
 
       - run: flutter pub get
@@ -133,7 +133,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.4'
+          flutter-version: '3.44.5'
           channel: stable
 
       - run: flutter pub get
