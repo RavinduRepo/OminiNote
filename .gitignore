@@ -46,3 +46,13 @@ app.*.map.json
 
 # Google OAuth client secret downloads (never commit)
 client_secret_*.json
+
+# Local credentials (see .env.example / .dart_defines.example.json)
+.env
+.dart_defines.json
+
+# Android release keystore and properties (never commit)
+android/key.properties
+android/app/release.jks
+*.jks
+*.keystore

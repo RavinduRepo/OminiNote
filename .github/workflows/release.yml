@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # ── Android APK ──────────────────────────────────────────────────────────────
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: stable
+
+      - name: Decode release keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.jks
+
+      - name: Write keystore properties
+        run: |
+          cat > android/key.properties <<EOF
+          storeFile=release.jks
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+          --dart-define=GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          --dart-define=GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+          --dart-define=ANDROID_CLIENT_ID=${{ secrets.ANDROID_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
+
+      - name: Build AAB (Play Store)
+        run: flutter build appbundle --release
+          --dart-define=GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          --dart-define=GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+          --dart-define=ANDROID_CLIENT_ID=${{ secrets.ANDROID_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-artifacts
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+
+  # ── Linux ─────────────────────────────────────────────────────────────────────
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ninja-build libgtk-3-dev libsecret-1-dev libjsoncpp-dev libglib2.0-dev
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: stable
+
+      - run: flutter pub get
+
+      - name: Build Linux
+        run: flutter build linux --release
+          --dart-define=GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          --dart-define=GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+          --dart-define=ANDROID_CLIENT_ID=${{ secrets.ANDROID_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
+
+      - name: Package Linux build
+        run: |
+          cd build/linux/x64/release/bundle
+          tar -czf ../../../../../omininote-linux-x64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifact
+          path: omininote-linux-x64.tar.gz
+
+  # ── Windows ───────────────────────────────────────────────────────────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: stable
+
+      - run: flutter pub get
+
+      - name: Build Windows
+        run: flutter build windows --release
+          --dart-define=GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          --dart-define=GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+          --dart-define=ANDROID_CLIENT_ID=${{ secrets.ANDROID_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
+
+      - name: Package Windows build
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath omininote-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifact
+          path: omininote-windows-x64.zip
+
+  # ── macOS ─────────────────────────────────────────────────────────────────────
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.4'
+          channel: stable
+
+      - run: flutter pub get
+
+      - name: Build macOS
+        run: flutter build macos --release
+          --dart-define=GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          --dart-define=GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+          --dart-define=ANDROID_CLIENT_ID=${{ secrets.ANDROID_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
+          --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
+
+      - name: Package macOS build
+        run: |
+          cd build/macos/Build/Products/Release
+          zip -r ../../../../../omininote-macos.zip omininote.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifact
+          path: omininote-macos.zip
+
+  # ── Create GitHub Release ─────────────────────────────────────────────────────
+  release:
+    needs: [android, linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            android-artifacts/app-release.apk
+            android-artifacts/app-release.aab
+            omininote-linux-x64.tar.gz
+            omininote-windows-x64.zip
+            omininote-macos.zip
+          generate_release_notes: true
+          draft: false

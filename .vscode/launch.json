@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "OminiNote (Linux)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "linux",
+      "toolArgs": ["--dart-define-from-file=.dart_defines.json"]
+    },
+    {
+      "name": "OminiNote (Android)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "android",
+      "toolArgs": ["--dart-define-from-file=.dart_defines.json"]
+    },
+    {
+      "name": "OminiNote (Windows)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "windows",
+      "toolArgs": ["--dart-define-from-file=.dart_defines.json"]
+    },
+    {
+      "name": "OminiNote (macOS)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "macos",
+      "toolArgs": ["--dart-define-from-file=.dart_defines.json"]
+    }
+  ]
+}

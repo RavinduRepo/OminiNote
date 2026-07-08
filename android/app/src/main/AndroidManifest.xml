@@ -36,7 +36,7 @@
              writes on Android hand out content:// URIs, not raw bytes). -->
         <provider
             android:name="com.superlist.super_native_extensions.DataProvider"
-            android:authorities="com.example.omininote.SuperClipboardDataProvider"
+            android:authorities="io.github.ravinduRepo.omininote.SuperClipboardDataProvider"
             android:exported="false"
             android:grantUriPermissions="true" />
     </application>
