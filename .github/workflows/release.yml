@@ -53,12 +53,17 @@ jobs:
           --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
           --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
 
+      - name: Rename Android outputs
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk omininote-android.apk
+          cp build/app/outputs/bundle/release/app-release.aab omininote-android.aab
+
       - uses: actions/upload-artifact@v4
         with:
           name: android-artifacts
           path: |
-            build/app/outputs/flutter-apk/app-release.apk
-            build/app/outputs/bundle/release/app-release.aab
+            omininote-android.apk
+            omininote-android.aab
 
   # ── Linux ─────────────────────────────────────────────────────────────────────
   linux:
@@ -171,8 +176,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            android-artifacts/app-release.apk
-            android-artifacts/app-release.aab
+            omininote-android.apk
+            omininote-android.aab
             omininote-linux-x64.tar.gz
             omininote-windows-x64.zip
             omininote-macos.zip
