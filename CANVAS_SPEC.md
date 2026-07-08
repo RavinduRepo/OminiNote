@@ -136,6 +136,7 @@ Today pdfrx owns the pan/zoom camera and ink merely follows it (see `CLAUDE.md` 
 
 ### 7.4 Images (new)
 - Insert from **gallery, camera, file, or clipboard paste**. Place, move, resize, rotate. Stored in `assets/` and referenced.
+- **Layering:** newly inserted/pasted images land **beneath the ink layer** (above the page background/pattern, below strokes) so you can annotate on top of them; `CanvasController.addImageBelowInk` sets the image's `zIndex` just below the lowest stroke z. "Bring to front" / "Send to back" still override this per-selection.
 
 ### 7.5 Copy / paste (new)
 - **Internal clipboard** for element selections (paste at viewport center, offset slightly).
@@ -258,6 +259,19 @@ Chosen fidelity: **keep imported PDF pages as their original vector content and 
 ## 17. Non-goals for v1 (proposed)
 
 Handwriting→text recognition; shape-recognition/snapping; rulers/guides; real-time collaboration; cloud sync (planned separately); partial/pixel eraser; cross-page multi-select; audio/video elements; PDF form-field editing.
+
+### 17.1 Backlog — rich / structured text paste (post-v1, planned)
+
+**Goal:** paste **structured, coloured, formatted text** (from a browser, Word, OneNote, etc.) and keep its styling instead of flattening to plain text — the OneNote behaviour the user called out. Possibly also render **Markdown** entered/pasted as markup.
+
+**Feasibility (investigated 07/08/26):**
+- The data model already supports it. `TextElement` holds a list of styled `TextRun`s (per-range fontFamily/size/color/bold/italic), and painting/measuring already go through `textSpanForElement`. So rich pasted text maps directly onto multiple `TextRun`s — **no model change needed** for the common cases (bold/italic/colour/size runs).
+- The clipboard plumbing is already the right library. `super_clipboard` (used in `lib/utils/clipboard_images.dart`) exposes `Formats.htmlText` and `Formats.plainText`. Today `_pasteSystemText` (in `canvas_screen.dart`) only reads `Clipboard.kTextPlain`; the rich path would read `htmlText` when the source app offers it and fall back to plain.
+- **Missing piece = an HTML→`TextRun[]` converter.** Parse the pasted HTML fragment (e.g. via the `html` package's parser) and walk inline styles (`<b>/<strong>`, `<i>/<em>`, `<span style="color:…;font-size:…">`, `<br>`, block breaks) into runs. Scope carefully: inline text styling only — **not** tables/images/lists-as-HTML/nested block layout (those are a much bigger effort and belong to a later pass).
+
+**Markdown (separate, smaller):** could either (a) render Markdown to `TextRun`s on paste (one-shot, same converter shape as HTML), or (b) a live "Markdown text box" mode. (a) is the cheaper first step and reuses the run model.
+
+**Rough plan when picked up:** (1) HTML→runs converter + unit tests; (2) `_pasteSystemText` reads `htmlText` first, builds a multi-run `TextElement`, plain fallback unchanged; (3) auto-size the box to the multi-run span (`autoTextRect` already re-measures); (4) optional Markdown-on-paste reusing the converter. **Export caveat to clear at the same time:** PDF export currently draws each text box in its *base* style (per-run export is already a known TODO) — rich paste makes per-run export more visible, so do them together.
 
 ---
 

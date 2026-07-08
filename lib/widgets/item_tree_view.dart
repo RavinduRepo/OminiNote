@@ -107,6 +107,24 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
   double get _indent => widget.dense ? 16 : 20;
   double get _fontSize => widget.dense ? 13 : 14.5;
 
+  /// One vertical hairline per ancestor level, so nesting depth reads at a
+  /// glance instead of relying on left padding alone.
+  Widget _indentGuides(AppPalette palette, int depth) {
+    if (depth <= 0) return const SizedBox.shrink();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < depth; i++)
+          Container(
+            width: _indent,
+            alignment: Alignment.centerLeft,
+            padding: EdgeInsets.only(left: widget.dense ? 9 : 12),
+            child: Container(width: 1, color: palette.border),
+          ),
+      ],
+    );
+  }
+
   List<_FlatEntry> _flatten(
     List<TreeNode> nodes,
     int depth,
@@ -166,7 +184,9 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
   }
 
   bool _accepts(_DragData data, List<TreeNode> target) {
-    if (data.containerId != widget.containerId) return widget.onCrossDrop != null;
+    if (data.containerId != widget.containerId) {
+      return widget.onCrossDrop != null;
+    }
     return !_wouldCycle(data.node, target);
   }
 
@@ -333,20 +353,30 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
       color: selected ? palette.accentSoft : Colors.transparent,
       child: InkWell(
         onTap: () => widget.onOpen(item),
-        child: Container(
+        child: SizedBox(
           height: _rowHeight,
-          // A colored left bar reads the row as its own item.
-          decoration: BoxDecoration(
-            border: Border(left: BorderSide(color: color, width: 3)),
-          ),
-          padding: EdgeInsets.only(
-            left: entry.depth * _indent + 13,
-            right: 4,
-          ),
           child: Row(
             children: [
-              Icon(widget.leafIcon, size: 15, color: color),
-              const SizedBox(width: 10),
+              _indentGuides(palette, entry.depth),
+              SizedBox(width: widget.dense ? 12 : 16),
+              // A short colored pill carries the item's identity color and
+              // indents with the tree, keeping leaves visually lighter than
+              // folder and notebook rows.
+              Container(
+                width: 3,
+                height: widget.dense ? 14 : 18,
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(1.5),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Icon(
+                widget.leafIcon,
+                size: 15,
+                color: selected ? palette.accent : palette.textDim,
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   widget.nameOf(item),
@@ -360,6 +390,7 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
                 ),
               ),
               _leafMenu(context, palette, item, node),
+              const SizedBox(width: 4),
             ],
           ),
         ),
@@ -424,19 +455,19 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
       builder: (context, candidate, rejected) {
         final active = candidate.isNotEmpty;
         return Material(
+          // Rows stay neutral (OneNote-style); the folder's color lives in
+          // its icon only.
           color: active
               ? palette.accent.withValues(alpha: 0.14)
               : Colors.transparent,
           child: InkWell(
             onTap: () => _toggleCollapse(folder),
-            child: Container(
+            child: SizedBox(
               height: _rowHeight,
-              decoration: BoxDecoration(
-                border: Border(left: BorderSide(color: color, width: 3)),
-              ),
-              padding: EdgeInsets.only(left: entry.depth * _indent + 5, right: 4),
               child: Row(
                 children: [
+                  _indentGuides(palette, entry.depth),
+                  SizedBox(width: widget.dense ? 3 : 7),
                   AnimatedRotation(
                     turns: folder.collapsed ? 0 : 0.25,
                     duration: const Duration(milliseconds: 150),
@@ -473,6 +504,7 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
                       ),
                     ),
                   _folderMenu(context, palette, folder),
+                  const SizedBox(width: 4),
                 ],
               ),
             ),

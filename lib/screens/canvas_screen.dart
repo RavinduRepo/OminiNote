@@ -129,8 +129,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
       final pageId = c.selectionPageId;
       final bounds = c.selectionBounds;
       if (pageId == null || bounds == null) return;
-      final boundary = _canvasBoundaryKey.currentContext?.findRenderObject()
-          as RenderRepaintBoundary?;
+      final boundary =
+          _canvasBoundaryKey.currentContext?.findRenderObject()
+              as RenderRepaintBoundary?;
       if (boundary == null) return;
 
       const ratio = 2.0; // crisp enough for re-paste anywhere
@@ -151,9 +152,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
       );
       final dst = Rect.fromLTWH(0, 0, src.width, src.height);
       canvas.drawImageRect(full, src, dst, ui.Paint());
-      final cropped = await recorder
-          .endRecording()
-          .toImage(src.width.round(), src.height.round());
+      final cropped = await recorder.endRecording().toImage(
+        src.width.round(),
+        src.height.round(),
+      );
       final png = await cropped.toByteData(format: ui.ImageByteFormat.png);
       full.dispose();
       cropped.dispose();
@@ -214,7 +216,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final w = decoded.width * scale, h = decoded.height * scale;
     decoded.dispose();
     if (!mounted) return;
-    c.addElement(
+    c.addImageBelowInk(
       target.pageId,
       ImageElement(
         id: newModelId('el'),
@@ -462,8 +464,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
   Future<void> _openAttachment(AttachmentElement el) async {
     final file = _service.assetFile(widget.canvas, el.assetId);
     if (!await file.exists()) {
-      _toast('"${el.name}" is missing on this device — sync may still be '
-          'downloading it');
+      _toast(
+        '"${el.name}" is missing on this device — sync may still be '
+        'downloading it',
+      );
       return;
     }
     final result = await OpenFilex.open(file.path, type: el.mime);
@@ -661,48 +665,52 @@ class _CanvasScreenState extends State<CanvasScreen> {
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            const _SheetLabel('Pages'),
-            ListTile(
-              leading: const Icon(Icons.note_add_outlined),
-              title: const Text('Blank page'),
-              subtitle: const Text('Above · below · or at the end'),
-              onTap: () => Navigator.pop(context, 'blank'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.swap_horiz),
-              title: const Text('Horizontal page'),
-              subtitle: const Text('Extend this row to the right'),
-              onTap: () => Navigator.pop(context, 'horizontal'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.picture_as_pdf_outlined),
-              title: const Text('Insert PDF'),
-              subtitle: const Text('As annotatable pages, or as an attachment'),
-              onTap: () => Navigator.pop(context, 'pdf'),
-            ),
-            const Divider(),
-            const _SheetLabel('Content'),
-            ListTile(
-              leading: const Icon(Icons.text_fields),
-              title: const Text('Text box'),
-              subtitle: const Text('Switch to the text tool, then tap the page'),
-              onTap: () => Navigator.pop(context, 'text'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.image_outlined),
-              title: const Text('Image'),
-              onTap: () => Navigator.pop(context, 'image'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.content_paste),
-              title: const Text('Paste'),
-              onTap: () => Navigator.pop(context, 'paste'),
-            ),
-            const SizedBox(height: 8),
-          ],
-        ),
+            children: [
+              const SizedBox(height: 8),
+              const _SheetLabel('Pages'),
+              ListTile(
+                leading: const Icon(Icons.note_add_outlined),
+                title: const Text('Blank page'),
+                subtitle: const Text('Above · below · or at the end'),
+                onTap: () => Navigator.pop(context, 'blank'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.swap_horiz),
+                title: const Text('Horizontal page'),
+                subtitle: const Text('Extend this row to the right'),
+                onTap: () => Navigator.pop(context, 'horizontal'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.picture_as_pdf_outlined),
+                title: const Text('Insert PDF'),
+                subtitle: const Text(
+                  'As annotatable pages, or as an attachment',
+                ),
+                onTap: () => Navigator.pop(context, 'pdf'),
+              ),
+              const Divider(),
+              const _SheetLabel('Content'),
+              ListTile(
+                leading: const Icon(Icons.text_fields),
+                title: const Text('Text box'),
+                subtitle: const Text(
+                  'Switch to the text tool, then tap the page',
+                ),
+                onTap: () => Navigator.pop(context, 'text'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.image_outlined),
+                title: const Text('Image'),
+                onTap: () => Navigator.pop(context, 'image'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.content_paste),
+                title: const Text('Paste'),
+                onTap: () => Navigator.pop(context, 'paste'),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
         ),
       ),
     );
@@ -710,9 +718,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     switch (action) {
       case 'blank':
-        final pos = await _pickInsertPosition(
-      includeTop: false,
-        );
+        final pos = await _pickInsertPosition(includeTop: false);
         if (pos != null) c.addBlankPage(pos);
       case 'horizontal':
         final current = c.currentPageLayout;
@@ -862,7 +868,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     );
     final w = imgW * scale, h = imgH * scale;
 
-    c.addElement(
+    c.addImageBelowInk(
       target.pageId,
       ImageElement(
         id: newModelId('el'),
@@ -915,12 +921,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       text: TextSpan(text: text, style: textStyleForElement(el)),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: width);
-    el.rect = Rect.fromLTWH(
-      el.rect.left,
-      el.rect.top,
-      width,
-      tp.height + 8,
-    );
+    el.rect = Rect.fromLTWH(el.rect.left, el.rect.top, width, tp.height + 8);
     c.addElement(target.pageId, el);
   }
 
@@ -985,14 +986,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 const SizedBox(height: 8),
                 SegmentedButton<BgPattern>(
                   segments: const [
-                    ButtonSegment(
-                      value: BgPattern.blank,
-                      label: Text('Blank'),
-                    ),
-                    ButtonSegment(
-                      value: BgPattern.ruled,
-                      label: Text('Ruled'),
-                    ),
+                    ButtonSegment(value: BgPattern.blank, label: Text('Blank')),
+                    ButtonSegment(value: BgPattern.ruled, label: Text('Ruled')),
                     ButtonSegment(value: BgPattern.grid, label: Text('Grid')),
                     ButtonSegment(
                       value: BgPattern.dotted,
@@ -1012,8 +1007,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
                     'Changes every page in this canvas now, and becomes the default for new pages',
                   ),
                   value: asDefault,
-                  onChanged: (v) =>
-                      setSheetState(() => asDefault = v ?? false),
+                  onChanged: (v) => setSheetState(() => asDefault = v ?? false),
                 ),
                 const SizedBox(height: 8),
                 SizedBox(
@@ -1123,8 +1117,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
                   leading: const Icon(Icons.bookmark_add_outlined),
                   title: const Text('Bookmark this page'),
                   onTap: () async {
-                    final ordinal =
-                        c.pageOrdinalOf(c.currentPageLayout?.pageId ?? '');
+                    final ordinal = c.pageOrdinalOf(
+                      c.currentPageLayout?.pageId ?? '',
+                    );
                     final name = await _promptText(
                       title: 'New bookmark',
                       initial: ordinal != null ? 'Page $ordinal' : 'Bookmark',
@@ -1151,8 +1146,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
                         return ListTile(
                           leading: const Icon(Icons.bookmark_outline),
                           title: Text(bm.name),
-                          subtitle:
-                              ordinal != null ? Text('Page $ordinal') : null,
+                          subtitle: ordinal != null
+                              ? Text('Page $ordinal')
+                              : null,
                           onTap: () {
                             Navigator.pop(context);
                             c.jumpToBookmark(bm);
@@ -1244,7 +1240,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
                             onSelected: (action) async {
                               if (action == 'open') {
                                 final f = _service.assetFile(
-                                    widget.canvas, att.assetId);
+                                  widget.canvas,
+                                  att.assetId,
+                                );
                                 if (await f.exists()) {
                                   OpenFilex.open(f.path, type: att.mime);
                                 }
@@ -1540,7 +1538,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
-    final ctrl = HardwareKeyboard.instance.isControlPressed ||
+    final ctrl =
+        HardwareKeyboard.instance.isControlPressed ||
         HardwareKeyboard.instance.isMetaPressed; // Cmd on macOS
     final key = event.logicalKey;
 
@@ -1589,61 +1588,61 @@ class _CanvasScreenState extends State<CanvasScreen> {
             focusNode: _canvasFocus,
             onKeyEvent: _onCanvasKey,
             child: Listener(
-            onPointerDown: _onPointerDown,
-            onPointerMove: _onPointerMove,
-            onPointerUp: _onPointerUp,
-            onPointerCancel: _onPointerCancel,
-            onPointerSignal: _onPointerSignal,
-            behavior: HitTestBehavior.opaque,
-            child: RawGestureDetector(
-              gestures: {
-                ScaleGestureRecognizer:
-                    GestureRecognizerFactoryWithHandlers<
-                      ScaleGestureRecognizer
-                    >(
-                      () => ScaleGestureRecognizer(
-                        supportedDevices: {
-                          PointerDeviceKind.touch,
-                          PointerDeviceKind.trackpad,
-                        },
+              onPointerDown: _onPointerDown,
+              onPointerMove: _onPointerMove,
+              onPointerUp: _onPointerUp,
+              onPointerCancel: _onPointerCancel,
+              onPointerSignal: _onPointerSignal,
+              behavior: HitTestBehavior.opaque,
+              child: RawGestureDetector(
+                gestures: {
+                  ScaleGestureRecognizer:
+                      GestureRecognizerFactoryWithHandlers<
+                        ScaleGestureRecognizer
+                      >(
+                        () => ScaleGestureRecognizer(
+                          supportedDevices: {
+                            PointerDeviceKind.touch,
+                            PointerDeviceKind.trackpad,
+                          },
+                        ),
+                        (r) => r
+                          ..onStart = _onScaleStart
+                          ..onUpdate = _onScaleUpdate
+                          ..onEnd = _onScaleEnd,
                       ),
-                      (r) => r
-                        ..onStart = _onScaleStart
-                        ..onUpdate = _onScaleUpdate
-                        ..onEnd = _onScaleEnd,
-                    ),
-                DoubleTapGestureRecognizer:
-                    GestureRecognizerFactoryWithHandlers<
-                      DoubleTapGestureRecognizer
-                    >(
-                      () => DoubleTapGestureRecognizer(
-                        supportedDevices: {PointerDeviceKind.touch},
+                  DoubleTapGestureRecognizer:
+                      GestureRecognizerFactoryWithHandlers<
+                        DoubleTapGestureRecognizer
+                      >(
+                        () => DoubleTapGestureRecognizer(
+                          supportedDevices: {PointerDeviceKind.touch},
+                        ),
+                        (r) => r..onDoubleTapDown = _onDoubleTapDown,
                       ),
-                      (r) => r..onDoubleTapDown = _onDoubleTapDown,
-                    ),
-              },
-              child: Stack(
-                children: [
-                  SizedBox.expand(
-                    // Boundary lets "copy selection" capture the rendered
-                    // pixels for the OS clipboard.
-                    child: RepaintBoundary(
-                      key: _canvasBoundaryKey,
-                      child: CustomPaint(
-                        painter: CanvasPainter(
-                          controller: c,
-                          pageBorderColor: palette.border,
-                          accentColor: palette.accent,
-                          canvasTextColor: palette.textDim,
+                },
+                child: Stack(
+                  children: [
+                    SizedBox.expand(
+                      // Boundary lets "copy selection" capture the rendered
+                      // pixels for the OS clipboard.
+                      child: RepaintBoundary(
+                        key: _canvasBoundaryKey,
+                        child: CustomPaint(
+                          painter: CanvasPainter(
+                            controller: c,
+                            pageBorderColor: palette.border,
+                            accentColor: palette.accent,
+                            canvasTextColor: palette.textDim,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  if (_textEdit != null) _buildTextEditOverlay(c),
-                ],
+                    if (_textEdit != null) _buildTextEditOverlay(c),
+                  ],
+                ),
               ),
             ),
-          ),
           );
         },
       ),
@@ -2003,142 +2002,141 @@ Widget _buildTextStyleRow(
   // style button was tapped ("selecting a style deselects and does nothing").
   return TextFieldTapRegion(
     child: SingleChildScrollView(
-    scrollDirection: Axis.horizontal,
-    child: Row(
-      children: [
-        PopupMenuButton<String>(
-          tooltip: 'Font',
-          initialValue: c.textFontFamily,
-          onSelected: c.setTextFontFamily,
-          itemBuilder: (context) => const [
-            PopupMenuItem(value: 'sans', child: Text('Sans')),
-            PopupMenuItem(
-              value: 'serif',
-              child: Text('Serif', style: TextStyle(fontFamily: 'Georgia')),
-            ),
-            PopupMenuItem(
-              value: 'mono',
-              child:
-                  Text('Mono', style: TextStyle(fontFamily: 'Courier New')),
-            ),
-          ],
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Aa',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontFamily: switch (c.textFontFamily) {
-                      'serif' => 'Georgia',
-                      'mono' => 'Courier New',
-                      _ => null,
-                    },
-                  ),
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          PopupMenuButton<String>(
+            tooltip: 'Font',
+            initialValue: c.textFontFamily,
+            onSelected: c.setTextFontFamily,
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'sans', child: Text('Sans')),
+              PopupMenuItem(
+                value: 'serif',
+                child: Text('Serif', style: TextStyle(fontFamily: 'Georgia')),
+              ),
+              PopupMenuItem(
+                value: 'mono',
+                child: Text(
+                  'Mono',
+                  style: TextStyle(fontFamily: 'Courier New'),
                 ),
-                Icon(Icons.arrow_drop_down, size: 18, color: palette.textDim),
-              ],
+              ),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Aa',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontFamily: switch (c.textFontFamily) {
+                        'serif' => 'Georgia',
+                        'mono' => 'Courier New',
+                        _ => null,
+                      },
+                    ),
+                  ),
+                  Icon(Icons.arrow_drop_down, size: 18, color: palette.textDim),
+                ],
+              ),
             ),
           ),
-        ),
-        IconButton(
-          visualDensity: VisualDensity.compact,
-          tooltip: 'Smaller',
-          icon: const Icon(Icons.text_decrease, size: 18),
-          onPressed: () => c.setTextFontSize(c.textFontSize - 2),
-        ),
-        Text(
-          c.textFontSize.toStringAsFixed(0),
-          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-        ),
-        IconButton(
-          visualDensity: VisualDensity.compact,
-          tooltip: 'Larger',
-          icon: const Icon(Icons.text_increase, size: 18),
-          onPressed: () => c.setTextFontSize(c.textFontSize + 2),
-        ),
-        const SizedBox(width: 4),
-        _ToggleChip(
-          label: 'B',
-          bold: true,
-          active: c.textBold,
-          onTap: c.toggleTextBold,
-        ),
-        _ToggleChip(
-          label: 'I',
-          italic: true,
-          active: c.textItalic,
-          onTap: c.toggleTextItalic,
-        ),
-        IconButton(
-          visualDensity: VisualDensity.compact,
-          tooltip: 'Alignment',
-          icon: Icon(
-            switch (c.textAlign) {
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Smaller',
+            icon: const Icon(Icons.text_decrease, size: 18),
+            onPressed: () => c.setTextFontSize(c.textFontSize - 2),
+          ),
+          Text(
+            c.textFontSize.toStringAsFixed(0),
+            style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Larger',
+            icon: const Icon(Icons.text_increase, size: 18),
+            onPressed: () => c.setTextFontSize(c.textFontSize + 2),
+          ),
+          const SizedBox(width: 4),
+          _ToggleChip(
+            label: 'B',
+            bold: true,
+            active: c.textBold,
+            onTap: c.toggleTextBold,
+          ),
+          _ToggleChip(
+            label: 'I',
+            italic: true,
+            active: c.textItalic,
+            onTap: c.toggleTextItalic,
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Alignment',
+            icon: Icon(switch (c.textAlign) {
               TextAlignOption.center => Icons.format_align_center,
               TextAlignOption.right => Icons.format_align_right,
               _ => Icons.format_align_left,
-            },
-            size: 18,
+            }, size: 18),
+            onPressed: c.cycleTextAlign,
           ),
-          onPressed: c.cycleTextAlign,
-        ),
-        if (c.isEditingText) ...[
-          divider(),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Bullet list',
-            icon: const Icon(Icons.format_list_bulleted, size: 18),
-            onPressed: () =>
-                c.toggleTextListPrefix(RichTextController.bulletPrefix),
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Star list',
-            icon: const Icon(Icons.star_outline, size: 18),
-            onPressed: () =>
-                c.toggleTextListPrefix(RichTextController.starPrefix),
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Checkbox (tap again to check)',
-            icon: const Icon(Icons.check_box_outlined, size: 18),
-            onPressed: () => c.toggleTextListPrefix(
-              RichTextController.uncheckedPrefix,
-              cycle: true,
+          if (c.isEditingText) ...[
+            divider(),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Bullet list',
+              icon: const Icon(Icons.format_list_bulleted, size: 18),
+              onPressed: () =>
+                  c.toggleTextListPrefix(RichTextController.bulletPrefix),
             ),
-          ),
-        ],
-        divider(),
-        for (final preset in _presetColors)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 3),
-            child: _ColorDot(
-              color: preset,
-              selected: preset.toARGB32() == c.textColor.toARGB32(),
-              ringColor: palette.accent,
-              borderColor: palette.border,
-              onTap: () => c.setTextColor(preset),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Star list',
+              icon: const Icon(Icons.star_outline, size: 18),
+              onPressed: () =>
+                  c.toggleTextListPrefix(RichTextController.starPrefix),
             ),
-          ),
-        if (showActions) ...[
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Checkbox (tap again to check)',
+              icon: const Icon(Icons.check_box_outlined, size: 18),
+              onPressed: () => c.toggleTextListPrefix(
+                RichTextController.uncheckedPrefix,
+                cycle: true,
+              ),
+            ),
+          ],
           divider(),
-          _SelAction(
-            icon: Icons.control_point_duplicate,
-            label: 'Duplicate',
-            onTap: c.duplicateSelection,
-          ),
-          _SelAction(
-            icon: Icons.delete_outline,
-            label: 'Delete',
-            onTap: c.deleteSelection,
-          ),
+          for (final preset in _presetColors)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 3),
+              child: _ColorDot(
+                color: preset,
+                selected: preset.toARGB32() == c.textColor.toARGB32(),
+                ringColor: palette.accent,
+                borderColor: palette.border,
+                onTap: () => c.setTextColor(preset),
+              ),
+            ),
+          if (showActions) ...[
+            divider(),
+            _SelAction(
+              icon: Icons.control_point_duplicate,
+              label: 'Duplicate',
+              onTap: c.duplicateSelection,
+            ),
+            _SelAction(
+              icon: Icons.delete_outline,
+              label: 'Delete',
+              onTap: c.deleteSelection,
+            ),
+          ],
         ],
-      ],
+      ),
     ),
-  ),
   );
 }
 
@@ -2401,9 +2399,7 @@ class _ToggleChip extends StatelessWidget {
                 : null,
             borderRadius: BorderRadius.circular(kRadius),
             border: Border.all(
-              color: active
-                  ? theme.colorScheme.primary
-                  : theme.dividerColor,
+              color: active ? theme.colorScheme.primary : theme.dividerColor,
             ),
           ),
           child: Text(

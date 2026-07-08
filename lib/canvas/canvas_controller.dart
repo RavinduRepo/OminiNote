@@ -301,7 +301,9 @@ class CanvasController extends ChangeNotifier {
     final thumbW = math.max(_scrollbarMinThumb, trackW * trackW / contentW);
     final maxScroll = contentW - trackW;
     final scrolled = (-pan.dx).clamp(0.0, maxScroll);
-    final left = maxScroll <= 0 ? 0.0 : scrolled / maxScroll * (trackW - thumbW);
+    final left = maxScroll <= 0
+        ? 0.0
+        : scrolled / maxScroll * (trackW - thumbW);
     return Rect.fromLTWH(
       left,
       screenSize.height - scrollbarThickness - _scrollbarInset,
@@ -382,10 +384,10 @@ class CanvasController extends ChangeNotifier {
   /// The active tool's color (pen color for eraser/lasso, where it only
   /// matters as the "apply color to selection" source).
   Color get color => switch (tool) {
-        CanvasTool.highlighter => highlighterColor,
-        CanvasTool.text => textColor,
-        _ => penColor,
-      };
+    CanvasTool.highlighter => highlighterColor,
+    CanvasTool.text => textColor,
+    _ => penColor,
+  };
 
   set color(Color v) {
     switch (tool) {
@@ -500,7 +502,10 @@ class CanvasController extends ChangeNotifier {
 
   void toggleTextBold() {
     textBold = !textBold;
-    _applyTextStyle(attr: (a) => a.bold = textBold, run: (r) => r.bold = textBold);
+    _applyTextStyle(
+      attr: (a) => a.bold = textBold,
+      run: (r) => r.bold = textBold,
+    );
   }
 
   void toggleTextItalic() {
@@ -689,10 +694,8 @@ class CanvasController extends ChangeNotifier {
       _eraseAccum.isNotEmpty ||
       _dragMode != SelectionHit.none;
 
-  Offset _clampToPage(Offset local, CanvasPage page) => Offset(
-    local.dx.clamp(0.0, page.width),
-    local.dy.clamp(0.0, page.height),
-  );
+  Offset _clampToPage(Offset local, CanvasPage page) =>
+      Offset(local.dx.clamp(0.0, page.width), local.dy.clamp(0.0, page.height));
 
   /// Pointer down for a drawing-capable device (stylus / mouse). Returns true
   /// if the event was consumed by a tool gesture.
@@ -879,11 +882,13 @@ class CanvasController extends ChangeNotifier {
             if (page == null) continue;
             final ids = entry.value.map((r) => r.$2.id).toSet();
             for (final el in entry.value) {
-              page.erased.add(EraseTombstone(
-                strokeId: el.$2.id,
-                erasedAt: DateTime.now(),
-                deviceId: SettingsService().deviceId,
-              ));
+              page.erased.add(
+                EraseTombstone(
+                  strokeId: el.$2.id,
+                  erasedAt: DateTime.now(),
+                  deviceId: SettingsService().deviceId,
+                ),
+              );
             }
             page.strokes.removeWhere((e) => ids.contains(e.id));
           }
@@ -1219,8 +1224,7 @@ class CanvasController extends ChangeNotifier {
     final sourceElements = [...source.strokes, ...source.objects];
     final targetElements = [...target.strokes, ...target.objects];
     final sourceBefore = [
-      for (final e in sourceElements)
-        (beforeById[e.id] ?? e).deepCopy(),
+      for (final e in sourceElements) (beforeById[e.id] ?? e).deepCopy(),
     ];
     final targetBefore = [for (final e in targetElements) e.deepCopy()];
 
@@ -1231,7 +1235,8 @@ class CanvasController extends ChangeNotifier {
     ];
     final movingAfter = [
       for (final e in sourceElements)
-        if (movedIds.contains(e.id)) e.deepCopy()..translate(shift.dx, shift.dy),
+        if (movedIds.contains(e.id))
+          e.deepCopy()..translate(shift.dx, shift.dy),
     ];
     // Moved elements are edits for sync LWW — the copy that landed on the
     // target must beat any stale remote copy of them.
@@ -1257,7 +1262,10 @@ class CanvasController extends ChangeNotifier {
           final now = DateTime.now();
           for (final el in movingAfter) {
             final t = EraseTombstone(
-                strokeId: el.id, erasedAt: now, deviceId: dev);
+              strokeId: el.id,
+              erasedAt: now,
+              deviceId: dev,
+            );
             if (el is StrokeElement) {
               source.erased.add(t);
               target.erased.removeWhere((e) => e.strokeId == el.id);
@@ -1280,7 +1288,10 @@ class CanvasController extends ChangeNotifier {
 
     // Reselect the moved elements on the target page.
     selectionPageId = targetId;
-    selection = [...target.strokes, ...target.objects].where((e) => movedIds.contains(e.id)).toList();
+    selection = [
+      ...target.strokes,
+      ...target.objects,
+    ].where((e) => movedIds.contains(e.id)).toList();
     _recomputeSelectionBounds();
     notifyListeners();
   }
@@ -1292,8 +1303,10 @@ class CanvasController extends ChangeNotifier {
     page.objects.clear();
     for (final c in copies) {
       final copy = c.deepCopy();
-      if (copy is StrokeElement) page.strokes.add(copy);
-      else page.objects.add(copy);
+      if (copy is StrokeElement)
+        page.strokes.add(copy);
+      else
+        page.objects.add(copy);
     }
   }
 
@@ -1312,7 +1325,10 @@ class CanvasController extends ChangeNotifier {
     // Selection may hold stale refs after replacement.
     if (selectionPageId == pageId && selection.isNotEmpty) {
       final ids = selection.map((e) => e.id).toSet();
-      selection = [...page.strokes, ...page.objects].where((e) => ids.contains(e.id)).toList();
+      selection = [
+        ...page.strokes,
+        ...page.objects,
+      ].where((e) => ids.contains(e.id)).toList();
       _recomputeSelectionBounds();
     }
   }
@@ -1355,10 +1371,14 @@ class CanvasController extends ChangeNotifier {
           final strokeIds = removedStrokes.map((r) => r.$2.id).toSet();
           final objectIds = removedObjects.map((r) => r.$2.id).toSet();
           for (final id in strokeIds) {
-            page.erased.add(EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev));
+            page.erased.add(
+              EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev),
+            );
           }
           for (final id in objectIds) {
-            page.deletedObjects.add(EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev));
+            page.deletedObjects.add(
+              EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev),
+            );
           }
           page.strokes.removeWhere((e) => strokeIds.contains(e.id));
           page.objects.removeWhere((e) => objectIds.contains(e.id));
@@ -1367,12 +1387,16 @@ class CanvasController extends ChangeNotifier {
           final strokeIds = removedStrokes.map((r) => r.$2.id).toSet();
           final objectIds = removedObjects.map((r) => r.$2.id).toSet();
           page.erased.removeWhere((e) => strokeIds.contains(e.strokeId));
-          page.deletedObjects.removeWhere((e) => objectIds.contains(e.strokeId));
-          final sortedStrokes = [...removedStrokes]..sort((a, b) => a.$1.compareTo(b.$1));
+          page.deletedObjects.removeWhere(
+            (e) => objectIds.contains(e.strokeId),
+          );
+          final sortedStrokes = [...removedStrokes]
+            ..sort((a, b) => a.$1.compareTo(b.$1));
           for (final (index, el) in sortedStrokes) {
             page.strokes.insert(math.min(index, page.strokes.length), el);
           }
-          final sortedObjects = [...removedObjects]..sort((a, b) => a.$1.compareTo(b.$1));
+          final sortedObjects = [...removedObjects]
+            ..sort((a, b) => a.$1.compareTo(b.$1));
           for (final (index, el) in sortedObjects) {
             page.objects.insert(math.min(index, page.objects.length), el);
           }
@@ -1396,11 +1420,15 @@ class CanvasController extends ChangeNotifier {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
     final copies = [
-      for (final el in selection) el.deepCopy(withNewId: true)..translate(16, 16),
+      for (final el in selection)
+        el.deepCopy(withNewId: true)..translate(16, 16),
     ];
     _doOp(_addElementsOp('Duplicate', pageId, copies));
     final page = pages[pageId]!;
-    selection = [...page.strokes, ...page.objects].where((e) => copies.any((c) => c.id == e.id)).toList();
+    selection = [
+      ...page.strokes,
+      ...page.objects,
+    ].where((e) => copies.any((c) => c.id == e.id)).toList();
     _recomputeSelectionBounds();
     notifyListeners();
   }
@@ -1416,7 +1444,9 @@ class CanvasController extends ChangeNotifier {
     if (target == null) return;
     final page = pages[target.pageId]!;
 
-    final copies = [for (final el in _appClipboard) el.deepCopy(withNewId: true)];
+    final copies = [
+      for (final el in _appClipboard) el.deepCopy(withNewId: true),
+    ];
     var bbox = copies.first.bounds;
     for (final el in copies.skip(1)) {
       bbox = bbox.expandToInclude(el.bounds);
@@ -1429,7 +1459,10 @@ class CanvasController extends ChangeNotifier {
 
     _doOp(_addElementsOp('Paste', target.pageId, copies));
     selectionPageId = target.pageId;
-    selection = [...page.strokes, ...page.objects].where((e) => copies.any((c) => c.id == e.id)).toList();
+    selection = [
+      ...page.strokes,
+      ...page.objects,
+    ].where((e) => copies.any((c) => c.id == e.id)).toList();
     _recomputeSelectionBounds();
     tool = CanvasTool.lasso;
     toolOptionsOpen = false;
@@ -1446,13 +1479,23 @@ class CanvasController extends ChangeNotifier {
     final beforeStrokes = List.of(page.strokes);
     final beforeObjects = List.of(page.objects);
     final selectedStrokes = selection.whereType<StrokeElement>().toList();
-    final selectedObjects = selection.where((e) => e is! StrokeElement).toList();
+    final selectedObjects = selection
+        .where((e) => e is! StrokeElement)
+        .toList();
 
-    final restStrokes = page.strokes.where((e) => !selectedStrokes.contains(e)).toList();
-    final restObjects = page.objects.where((e) => !selectedObjects.contains(e)).toList();
+    final restStrokes = page.strokes
+        .where((e) => !selectedStrokes.contains(e))
+        .toList();
+    final restObjects = page.objects
+        .where((e) => !selectedObjects.contains(e))
+        .toList();
 
-    final afterStrokes = front ? [...restStrokes, ...selectedStrokes] : [...selectedStrokes, ...restStrokes];
-    final afterObjects = front ? [...restObjects, ...selectedObjects] : [...selectedObjects, ...restObjects];
+    final afterStrokes = front
+        ? [...restStrokes, ...selectedStrokes]
+        : [...selectedStrokes, ...restStrokes];
+    final afterObjects = front
+        ? [...restObjects, ...selectedObjects]
+        : [...selectedObjects, ...restObjects];
 
     // zIndex is what actually moves the selection across the stroke/object
     // split (an image behind ink, ink above an image); the list reorder above
@@ -1473,15 +1516,23 @@ class CanvasController extends ChangeNotifier {
         label: front ? 'Bring to front' : 'Send to back',
         dirtyPageIds: {pageId},
         apply: () {
-          page.strokes..clear()..addAll(afterStrokes);
-          page.objects..clear()..addAll(afterObjects);
+          page.strokes
+            ..clear()
+            ..addAll(afterStrokes);
+          page.objects
+            ..clear()
+            ..addAll(afterObjects);
           for (final el in selected) {
             el.zIndex = newZ;
           }
         },
         revert: () {
-          page.strokes..clear()..addAll(beforeStrokes);
-          page.objects..clear()..addAll(beforeObjects);
+          page.strokes
+            ..clear()
+            ..addAll(beforeStrokes);
+          page.objects
+            ..clear()
+            ..addAll(beforeObjects);
           for (final el in selected) {
             el.zIndex = beforeZ[el.id] ?? 0;
           }
@@ -1560,9 +1611,13 @@ class CanvasController extends ChangeNotifier {
         final ids = elements.map((e) => e.id).toSet();
         for (final el in elements) {
           if (el is StrokeElement) {
-            page.erased.add(EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev));
+            page.erased.add(
+              EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev),
+            );
           } else {
-            page.deletedObjects.add(EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev));
+            page.deletedObjects.add(
+              EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev),
+            );
           }
         }
         page.strokes.removeWhere((e) => ids.contains(e.id));
@@ -1575,6 +1630,24 @@ class CanvasController extends ChangeNotifier {
     _doOp(_addElementsOp('Insert', pageId, [element]));
   }
 
+  /// Inserts an image *beneath the ink layer*: ink drawn on the page (now or
+  /// later) stays on top, while the image still sits above the page
+  /// background/pattern. Newly added images stack above older ones but all
+  /// stay below strokes. (Contrast [addElement], which — via the
+  /// strokes-under-objects z tie-break — would drop the image on top of ink.)
+  void addImageBelowInk(String pageId, ImageElement image) {
+    final page = pages[pageId]!;
+    // Anchor to the lowest stroke z (default 0) so a freshly drawn stroke at
+    // z=0 renders above this image; images tie among themselves and fall back
+    // to insertion order (newest on top).
+    var minStrokeZ = 0.0;
+    for (final s in page.strokes) {
+      if (s.zIndex < minStrokeZ) minStrokeZ = s.zIndex;
+    }
+    image.zIndex = minStrokeZ - 1;
+    _doOp(_addElementsOp('Insert image', pageId, [image]));
+  }
+
   /// Drops an attachment chip near the top of the current page (stacking
   /// downward if others already sit there).
   void addAttachmentChip(String assetId, String name, String mime) {
@@ -1585,8 +1658,9 @@ class CanvasController extends ChangeNotifier {
     var top = 24.0;
     final left = (page.width - w) / 2;
     // Avoid stacking exactly on an existing chip.
-    while (page.objects.any((e) =>
-        e is AttachmentElement && (e.rect.top - top).abs() < h / 2)) {
+    while (page.objects.any(
+      (e) => e is AttachmentElement && (e.rect.top - top).abs() < h / 2,
+    )) {
       top += h + gap;
     }
     addElement(
@@ -1602,11 +1676,7 @@ class CanvasController extends ChangeNotifier {
     );
   }
 
-  void updateTextElement(
-    String pageId,
-    TextElement before,
-    TextElement after,
-  ) {
+  void updateTextElement(String pageId, TextElement before, TextElement after) {
     _stamp([after]);
     final beforeCopy = before.deepCopy();
     final afterCopy = after.deepCopy();
@@ -1633,7 +1703,13 @@ class CanvasController extends ChangeNotifier {
           label: 'Remove',
           dirtyPageIds: {pageId},
           apply: () {
-            page.erased.add(EraseTombstone(strokeId: el.id, erasedAt: DateTime.now(), deviceId: dev));
+            page.erased.add(
+              EraseTombstone(
+                strokeId: el.id,
+                erasedAt: DateTime.now(),
+                deviceId: dev,
+              ),
+            );
             page.strokes.removeWhere((e) => e.id == el.id);
           },
           revert: () {
@@ -1651,7 +1727,13 @@ class CanvasController extends ChangeNotifier {
           label: 'Remove',
           dirtyPageIds: {pageId},
           apply: () {
-            page.deletedObjects.add(EraseTombstone(strokeId: el.id, erasedAt: DateTime.now(), deviceId: dev));
+            page.deletedObjects.add(
+              EraseTombstone(
+                strokeId: el.id,
+                erasedAt: DateTime.now(),
+                deviceId: dev,
+              ),
+            );
             page.objects.removeWhere((e) => e.id == el.id);
           },
           revert: () {
@@ -1698,10 +1780,7 @@ class CanvasController extends ChangeNotifier {
         dirtyPageIds: {page.id},
         apply: () {
           pages[page.id] = page;
-          canvas.rows.insert(
-            math.min(rowIndex, canvas.rows.length),
-            row,
-          );
+          canvas.rows.insert(math.min(rowIndex, canvas.rows.length), row);
         },
         revert: () {
           canvas.rows.remove(row);
@@ -1827,16 +1906,10 @@ class CanvasController extends ChangeNotifier {
           page.bumpRev(SettingsService().deviceId);
           pages[pageId] = page;
           if (rowBecomesEmpty) {
-            canvas.rows.insert(
-              math.min(rowIndex, canvas.rows.length),
-              row,
-            );
+            canvas.rows.insert(math.min(rowIndex, canvas.rows.length), row);
           }
           if (!row.pageIds.contains(pageId)) {
-            row.pageIds.insert(
-              math.min(colIndex, row.pageIds.length),
-              pageId,
-            );
+            row.pageIds.insert(math.min(colIndex, row.pageIds.length), pageId);
           }
           // Restored to `pages` — the normal dirty-flush will persist it
           // (dirtyPageIds below covers this).
@@ -1859,15 +1932,16 @@ class CanvasController extends ChangeNotifier {
       height: src.height,
       background: src.background,
       source: src.source,
-      strokes: [
-        for (final el in src.strokes) el.deepCopy(withNewId: true),
-      ],
-      objects: [
-        for (final el in src.objects) el.deepCopy(withNewId: true),
-      ],
+      strokes: [for (final el in src.strokes) el.deepCopy(withNewId: true)],
+      objects: [for (final el in src.objects) el.deepCopy(withNewId: true)],
       erased: [
         for (final el in src.erased)
-          EraseTombstone(strokeId: el.strokeId, erasedAt: el.erasedAt, deviceId: el.deviceId, rev: el.rev)
+          EraseTombstone(
+            strokeId: el.strokeId,
+            erasedAt: el.erasedAt,
+            deviceId: el.deviceId,
+            rev: el.rev,
+          ),
       ],
     );
     final row = PageRow(id: _service.newId(), pageIds: [copy.id]);
@@ -1880,10 +1954,7 @@ class CanvasController extends ChangeNotifier {
         dirtyPageIds: {copy.id},
         apply: () {
           pages[copy.id] = copy;
-          canvas.rows.insert(
-            math.min(insertAt, canvas.rows.length),
-            row,
-          );
+          canvas.rows.insert(math.min(insertAt, canvas.rows.length), row);
         },
         revert: () {
           canvas.rows.remove(row);
@@ -2150,8 +2221,11 @@ class CanvasController extends ChangeNotifier {
   /// the next round trip reconciles that case.
   Future<void> applyRemoteStructure() async {
     if (_dirtyStructure) return;
-    final fresh =
-        await _service.getCanvas(canvas.notebookId, canvas.sectionId, canvas.id);
+    final fresh = await _service.getCanvas(
+      canvas.notebookId,
+      canvas.sectionId,
+      canvas.id,
+    );
     if (fresh == null) return; // canvas deleted remotely — shell reload handles
 
     canvas
@@ -2175,9 +2249,7 @@ class CanvasController extends ChangeNotifier {
 
     // Keep live in-memory pages (they may be ahead of disk); read only the
     // ones we don't have yet, and drop ones no row references anymore.
-    final referenced = <String>{
-      for (final row in canvas.rows) ...row.pageIds,
-    };
+    final referenced = <String>{for (final row in canvas.rows) ...row.pageIds};
     final fromDisk = await _service.loadPages(canvas);
     for (final entry in fromDisk.entries) {
       pages.putIfAbsent(entry.key, () => entry.value);

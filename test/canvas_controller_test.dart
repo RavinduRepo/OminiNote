@@ -214,6 +214,47 @@ void main() {
     });
   });
 
+  group('CanvasController.addImageBelowInk (ink stays on top)', () {
+    test(
+        'inserted image sits below existing strokes in z-order, and below a '
+        'stroke drawn afterward', () {
+      final page = CanvasPage(
+        id: 'a',
+        deviceId: 'test_device',
+        strokes: [_stroke('s1')],
+      );
+      final canvas = Canvas(
+        id: 'c-img',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Img test',
+        createdAt: DateTime(2026, 7, 8),
+        rows: [PageRow(id: 'r1', pageIds: ['a'])],
+      );
+      final controller = CanvasController(canvas: canvas, pages: {'a': page});
+
+      final image = ImageElement(
+        id: 'img1',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(0, 0, 100, 100),
+        assetId: 'asset1',
+      );
+      controller.addImageBelowInk('a', image);
+
+      // Image lands beneath the lowest stroke z (default 0).
+      expect(image.zIndex, lessThan(0));
+      // Paint order: image first (under), stroke last (on top).
+      final order = zOrderedElements(page).map((e) => e.id).toList();
+      expect(order, ['img1', 's1']);
+
+      // A stroke added afterward (default z 0) also renders above the image.
+      page.strokes.add(_stroke('s2'));
+      final order2 = zOrderedElements(page).map((e) => e.id).toList();
+      expect(order2.first, 'img1');
+      expect(order2.sublist(1), containsAll(['s1', 's2']));
+    });
+  });
+
   group('per-tool style memory', () {
     test('pen, highlighter, and text keep independent colors', () {
       final page = CanvasPage(id: 'a', deviceId: 'test_device');

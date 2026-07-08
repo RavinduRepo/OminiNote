@@ -13,11 +13,13 @@ import '../widgets/location_picker.dart';
 import 'canvas_screen.dart';
 import 'settings_screen.dart';
 
-/// OneNote-desktop-style split view. Sidebar: notebooks (reorderable) → each
-/// expands to its **section** tree (drag/reorder/color/group, cross-notebook
-/// drag moves sections). Main pane: when a section is selected, its **canvas**
-/// list; when a canvas is opened, the embedded drawing surface with a
-/// breadcrumb. Used instead of the mobile push flow on wide windows.
+/// OneNote-desktop-style three-pane view. Sidebar: notebooks (reorderable) →
+/// each expands to its **section** tree (drag/reorder/color/group,
+/// cross-notebook drag moves sections). Middle: the selected section's
+/// **canvas** list in a narrow page-list column. Main pane: the selected
+/// canvas embedded directly. The header's book icon collapses the sidebar
+/// *and* the canvas column to a narrow rail. Used instead of the mobile push
+/// flow on wide windows.
 class DesktopShellScreen extends StatefulWidget {
   const DesktopShellScreen({super.key});
 
@@ -37,11 +39,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Canvas? _selectedCanvas;
 
   double _sidebarWidth = 300;
+  double _canvasListWidth = 230;
   bool _sidebarCollapsed = false;
 
   static const double _minSidebarWidth = 220;
   static const double _maxSidebarWidth = 460;
   static const double _collapsedWidth = 56;
+  static const double _minCanvasListWidth = 170;
+  static const double _maxCanvasListWidth = 380;
 
   @override
   void initState() {
@@ -102,7 +107,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final sel = _selectedSection;
     if (sel == null) return;
     final fresh = await _service.getSection(sel.notebookId, sel.id);
-    final canvases = fresh == null ? <String, Canvas>{} : await _service.getCanvasMap(fresh);
+    final canvases = fresh == null
+        ? <String, Canvas>{}
+        : await _service.getCanvasMap(fresh);
     if (!mounted) return;
     setState(() {
       _selectedSection = fresh;
@@ -140,7 +147,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   Future<void> _colorNotebook(Notebook notebook) async {
-    final choice = await showColorSwatchPicker(context, current: notebook.color);
+    final choice = await showColorSwatchPicker(
+      context,
+      current: notebook.color,
+    );
     if (choice == null) return;
     notebook.color = choice.color;
     await _service.saveNotebook(notebook);
@@ -189,7 +199,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Future<void> _addSectionFolder(Notebook notebook, {String? folderId}) async {
     final name = await _prompt(title: 'New super-section', hint: 'Group name');
     if (name == null || name.isEmpty) return;
-    await _service.createSectionFolder(notebook, name, parentFolderId: folderId);
+    await _service.createSectionFolder(
+      notebook,
+      name,
+      parentFolderId: folderId,
+    );
     await _reloadNotebook(notebook.id);
   }
 
@@ -492,27 +506,36 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           final width = constraints.maxWidth.isFinite
               ? desired.clamp(0.0, constraints.maxWidth)
               : desired;
+          // Space left for the canvas-list column (guards the transient
+          // zero-width startup frame, same as the sidebar clamp).
+          final remaining = constraints.maxWidth.isFinite
+              ? (constraints.maxWidth - width).clamp(0.0, double.infinity)
+              : double.infinity;
+          final canvasColumnOpen =
+              !_sidebarCollapsed && _selectedSection != null;
           return Row(
             children: [
               _buildSidebar(theme, palette, width),
               if (!_sidebarCollapsed)
-                MouseRegion(
-                  cursor: SystemMouseCursors.resizeColumn,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onHorizontalDragUpdate: (d) => setState(() {
-                      _sidebarWidth = (_sidebarWidth + d.delta.dx).clamp(
-                        _minSidebarWidth,
-                        _maxSidebarWidth,
-                      );
-                    }),
-                    child: SizedBox(
-                      width: 6,
-                      child: Center(
-                        child: Container(width: 1, color: palette.border),
-                      ),
-                    ),
-                  ),
+                _resizeDivider(
+                  palette,
+                  (dx) => setState(() {
+                    _sidebarWidth = (_sidebarWidth + dx).clamp(
+                      _minSidebarWidth,
+                      _maxSidebarWidth,
+                    );
+                  }),
+                ),
+              _buildCanvasColumn(theme, palette, remaining),
+              if (canvasColumnOpen)
+                _resizeDivider(
+                  palette,
+                  (dx) => setState(() {
+                    _canvasListWidth = (_canvasListWidth + dx).clamp(
+                      _minCanvasListWidth,
+                      _maxCanvasListWidth,
+                    );
+                  }),
                 ),
               Expanded(child: _buildMainPane(theme, palette)),
             ],
@@ -525,103 +548,135 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Widget _buildMainPane(ThemeData theme, AppPalette palette) {
     final canvas = _selectedCanvas;
     if (canvas != null) {
-      return Column(
-        children: [
-          _buildBreadcrumb(palette),
-          Expanded(
-            child: CanvasScreen(
-              key: ValueKey(canvas.id),
-              canvas: canvas,
-              onCanvasRenamed: _reloadSelectedSection,
-            ),
-          ),
-        ],
+      // The canvas list stays visible in its own column (OneNote-style), so
+      // the canvas embeds directly — no breadcrumb / back bar needed.
+      return CanvasScreen(
+        key: ValueKey(canvas.id),
+        canvas: canvas,
+        onCanvasRenamed: _reloadSelectedSection,
       );
     }
-    final section = _selectedSection;
-    if (section != null) return _buildCanvasList(theme, palette, section);
+    if (_selectedSection != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.crop_portrait, size: 56, color: palette.textDim),
+            const SizedBox(height: 16),
+            Text(
+              'Select a canvas',
+              style: TextStyle(fontSize: 15, color: palette.textDim),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Pick one from the list, or create a new canvas.',
+              style: TextStyle(fontSize: 12.5, color: palette.textDim),
+            ),
+          ],
+        ),
+      );
+    }
     return _EmptyMainPane(onNewNotebook: _createNotebook);
   }
 
-  Widget _buildBreadcrumb(AppPalette palette) {
-    final section = _selectedSection;
-    final canvas = _selectedCanvas!;
-    return Material(
-      color: Theme.of(context).colorScheme.surface,
-      child: Container(
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: palette.border)),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Row(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.arrow_back, size: 20),
-              tooltip: 'Back to canvases',
-              onPressed: () => setState(() => _selectedCanvas = null),
-            ),
-            if (section != null) ...[
-              Flexible(
-                child: Text(
-                  section.name,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12.5, color: palette.textDim),
-                ),
-              ),
-              Icon(Icons.chevron_right, size: 16, color: palette.textDim),
-            ],
-            Text(
-              canvas.name,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-            ),
-          ],
+  /// A 6px draggable column divider (mouse resize-cursor + 1px hairline).
+  /// Shared by the sidebar and the canvas-list column.
+  Widget _resizeDivider(AppPalette palette, void Function(double dx) onDrag) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onHorizontalDragUpdate: (d) => onDrag(d.delta.dx),
+        child: SizedBox(
+          width: 6,
+          child: Center(child: Container(width: 1, color: palette.border)),
         ),
       ),
     );
   }
 
-  Widget _buildCanvasList(ThemeData theme, AppPalette palette, Section section) {
+  /// OneNote-style page-list column between the sidebar and the canvas:
+  /// the selected section's canvases. Slides closed together with the
+  /// sidebar (`_sidebarCollapsed`) and when no section is selected.
+  Widget _buildCanvasColumn(
+    ThemeData theme,
+    AppPalette palette,
+    double maxWidth,
+  ) {
+    final section = _selectedSection;
+    final open = !_sidebarCollapsed && section != null;
+    final target = open ? _canvasListWidth : 0.0;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      width: target.clamp(0.0, maxWidth),
+      // No right border — the resize divider beside it is the separator when
+      // open; when closed the column is 0-width so nothing shows.
+      color: palette.surface2,
+      child: ClipRect(
+        child: OverflowBox(
+          alignment: Alignment.topLeft,
+          minWidth: _canvasListWidth,
+          maxWidth: _canvasListWidth,
+          child: SizedBox(
+            width: _canvasListWidth,
+            child: section == null
+                ? const SizedBox.shrink()
+                : _buildCanvasListContent(theme, palette, section),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCanvasListContent(
+    ThemeData theme,
+    AppPalette palette,
+    Section section,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Material(
-          color: theme.colorScheme.surface,
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: palette.border)),
-            ),
-            padding: const EdgeInsets.fromLTRB(20, 14, 8, 14),
-            child: Row(
-              children: [
-                Icon(Icons.description_outlined, size: 18, color: palette.accent),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    section.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    ),
+        Container(
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: palette.border)),
+          ),
+          padding: const EdgeInsets.fromLTRB(14, 10, 4, 10),
+          child: Row(
+            children: [
+              Icon(
+                Icons.description_outlined,
+                size: 15,
+                color: AppPalette.resolveColor(section.id, section.color),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  section.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.add, size: 20),
-                  tooltip: 'Add',
-                  onSelected: (a) {
-                    if (a == 'canvas') _addCanvas();
-                    if (a == 'group') _addCanvasFolder();
-                  },
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(value: 'canvas', child: Text('New canvas')),
-                    PopupMenuItem(
-                      value: 'group',
-                      child: Text('New super-section'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+              ),
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.add, size: 18),
+                tooltip: 'Add',
+                padding: EdgeInsets.zero,
+                onSelected: (a) {
+                  if (a == 'canvas') _addCanvas();
+                  if (a == 'group') _addCanvasFolder();
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'canvas', child: Text('New canvas')),
+                  PopupMenuItem(
+                    value: 'group',
+                    child: Text('New super-section'),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
         Expanded(
@@ -632,15 +687,15 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     children: [
                       Icon(
                         Icons.edit_note_outlined,
-                        size: 48,
+                        size: 40,
                         color: palette.textDim,
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 10),
                       Text(
                         'No canvases yet',
-                        style: TextStyle(color: palette.textDim, fontSize: 14),
+                        style: TextStyle(color: palette.textDim, fontSize: 13),
                       ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 12),
                       FilledButton.icon(
                         onPressed: _addCanvas,
                         icon: const Icon(Icons.add, size: 16),
@@ -650,34 +705,32 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                   ),
                 )
               : SingleChildScrollView(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 640),
-                    child: ItemTreeView<Canvas>(
-                      containerId: section.id,
-                      nodes: section.nodes,
-                      items: _selectedCanvases,
-                      nameOf: (c) => c.name,
-                      colorOf: (c) => c.color,
-                      idOf: (c) => c.id,
-                      leafIcon: Icons.crop_portrait,
-                      selectedId: _selectedCanvas?.id,
-                      onOpen: (c) => setState(() => _selectedCanvas = c),
-                      onRenameLeaf: _renameCanvas,
-                      onColorLeaf: _colorCanvas,
-                      onDeleteLeaf: _deleteCanvas,
-                      onRenameFolder: _renameCanvasFolder,
-                      onColorFolder: _colorCanvasFolder,
-                      onAddLeafToFolder: (f) => _addCanvas(folderId: f.id),
-                      onAddFolderToFolder: (f) =>
-                          _addCanvasFolder(folderId: f.id),
-                      onUngroup: (f) async {
-                        await _service.ungroupInSection(section, f.id);
-                        await _reloadSelectedSection();
-                      },
-                      onDeleteFolder: _deleteCanvasFolder,
-                      onRelocate: _relocateCanvas,
-                      onTreeChanged: () => _service.saveSection(section),
-                    ),
+                  child: ItemTreeView<Canvas>(
+                    containerId: section.id,
+                    nodes: section.nodes,
+                    items: _selectedCanvases,
+                    dense: true,
+                    nameOf: (c) => c.name,
+                    colorOf: (c) => c.color,
+                    idOf: (c) => c.id,
+                    leafIcon: Icons.crop_portrait,
+                    selectedId: _selectedCanvas?.id,
+                    onOpen: (c) => setState(() => _selectedCanvas = c),
+                    onRenameLeaf: _renameCanvas,
+                    onColorLeaf: _colorCanvas,
+                    onDeleteLeaf: _deleteCanvas,
+                    onRenameFolder: _renameCanvasFolder,
+                    onColorFolder: _colorCanvasFolder,
+                    onAddLeafToFolder: (f) => _addCanvas(folderId: f.id),
+                    onAddFolderToFolder: (f) =>
+                        _addCanvasFolder(folderId: f.id),
+                    onUngroup: (f) async {
+                      await _service.ungroupInSection(section, f.id);
+                      await _reloadSelectedSection();
+                    },
+                    onDeleteFolder: _deleteCanvasFolder,
+                    onRelocate: _relocateCanvas,
+                    onTreeChanged: () => _service.saveSection(section),
                   ),
                 ),
         ),
@@ -719,7 +772,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   Widget _buildSidebarToggle(AppPalette palette) {
     return Tooltip(
-      message: _sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar',
+      message: _sidebarCollapsed ? 'Expand panels' : 'Collapse panels',
       child: InkWell(
         borderRadius: BorderRadius.circular(kRadius),
         onTap: () => setState(() => _sidebarCollapsed = !_sidebarCollapsed),
@@ -874,150 +927,177 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       key: ValueKey('nb_${notebook.id}'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        InkWell(
-          onTap: () => setState(() {
-            expanded
-                ? _expanded.remove(notebook.id)
-                : _expanded.add(notebook.id);
-          }),
-          child: Padding(
-            padding: const EdgeInsets.only(left: 6, right: 4),
-            child: SizedBox(
-              height: 44,
-              child: Row(
-                children: [
-                  ReorderableDragStartListener(
-                    index: index,
-                    child: MouseRegion(
-                      cursor: SystemMouseCursors.grab,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 2),
+        // Notebooks are the top level: neutral row, the solid initial chip
+        // carries the color; long-press anywhere to reorder (no handle).
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 2, 6, 2),
+          child: ReorderableDelayedDragStartListener(
+            index: index,
+            child: Material(
+              color: expanded ? palette.surface2 : Colors.transparent,
+              borderRadius: BorderRadius.circular(kRadius),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(kRadius),
+                onTap: () => setState(() {
+                  expanded
+                      ? _expanded.remove(notebook.id)
+                      : _expanded.add(notebook.id);
+                }),
+                child: SizedBox(
+                  height: 44,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 6),
+                      AnimatedRotation(
+                        turns: expanded ? 0.25 : 0,
+                        duration: const Duration(milliseconds: 150),
                         child: Icon(
-                          Icons.drag_indicator,
-                          size: 16,
+                          Icons.chevron_right,
+                          size: 18,
                           color: palette.textDim,
                         ),
                       ),
-                    ),
-                  ),
-                  AnimatedRotation(
-                    turns: expanded ? 0.25 : 0,
-                    duration: const Duration(milliseconds: 150),
-                    child: Icon(
-                      Icons.chevron_right,
-                      size: 18,
-                      color: palette.textDim,
-                    ),
-                  ),
-                  const SizedBox(width: 2),
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: color,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      notebook.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  PopupMenuButton<String>(
-                    icon: Icon(Icons.add, size: 18, color: palette.textDim),
-                    tooltip: 'Add',
-                    padding: EdgeInsets.zero,
-                    onSelected: (a) {
-                      if (a == 'section') _addSection(notebook);
-                      if (a == 'group') _addSectionFolder(notebook);
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
-                        value: 'section',
-                        child: Text('New section'),
-                      ),
-                      PopupMenuItem(
-                        value: 'group',
-                        child: Text('New super-section'),
-                      ),
-                    ],
-                  ),
-                  PopupMenuButton<String>(
-                    icon: Icon(
-                      Icons.more_vert,
-                      size: 18,
-                      color: palette.textDim,
-                    ),
-                    padding: EdgeInsets.zero,
-                    onSelected: (a) {
-                      switch (a) {
-                        case 'rename':
-                          _renameNotebook(notebook);
-                        case 'color':
-                          _colorNotebook(notebook);
-                        case 'delete':
-                          _deleteNotebook(notebook);
-                      }
-                    },
-                    itemBuilder: (context) => [
-                      const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                      const PopupMenuItem(
-                        value: 'color',
-                        child: Text('Change color'),
-                      ),
-                      PopupMenuItem(
-                        value: 'delete',
+                      const SizedBox(width: 4),
+                      Container(
+                        width: 20,
+                        height: 20,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: color,
+                          borderRadius: BorderRadius.circular(5),
+                        ),
                         child: Text(
-                          'Delete',
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
+                          notebook.name.isNotEmpty
+                              ? notebook.name[0].toUpperCase()
+                              : '?',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 11,
                           ),
                         ),
                       ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          notebook.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      PopupMenuButton<String>(
+                        icon: Icon(Icons.add, size: 18, color: palette.textDim),
+                        tooltip: 'Add',
+                        padding: EdgeInsets.zero,
+                        onSelected: (a) {
+                          if (a == 'section') _addSection(notebook);
+                          if (a == 'group') _addSectionFolder(notebook);
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: 'section',
+                            child: Text('New section'),
+                          ),
+                          PopupMenuItem(
+                            value: 'group',
+                            child: Text('New super-section'),
+                          ),
+                        ],
+                      ),
+                      PopupMenuButton<String>(
+                        icon: Icon(
+                          Icons.more_vert,
+                          size: 18,
+                          color: palette.textDim,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onSelected: (a) {
+                          switch (a) {
+                            case 'rename':
+                              _renameNotebook(notebook);
+                            case 'color':
+                              _colorNotebook(notebook);
+                            case 'delete':
+                              _deleteNotebook(notebook);
+                          }
+                        },
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                            value: 'rename',
+                            child: Text('Rename'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'color',
+                            child: Text('Change color'),
+                          ),
+                          PopupMenuItem(
+                            value: 'delete',
+                            child: Text(
+                              'Delete',
+                              style: TextStyle(
+                                color: Theme.of(context).colorScheme.error,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(width: 2),
                     ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
         ),
         if (expanded)
-          ItemTreeView<Section>(
-            containerId: notebook.id,
-            nodes: notebook.nodes,
-            items: sectionMap,
-            dense: true,
-            nameOf: (s) => s.name,
-            colorOf: (s) => s.color,
-            idOf: (s) => s.id,
-            leafIcon: Icons.description_outlined,
-            selectedId: _selectedSection?.id,
-            onOpen: _selectSection,
-            onRenameLeaf: _renameSection,
-            onColorLeaf: _colorSection,
-            onDeleteLeaf: _deleteSection,
-            onRenameFolder: (f) => _renameSectionFolder(notebook, f),
-            onColorFolder: (f) => _colorSectionFolder(notebook, f),
-            onAddLeafToFolder: (f) => _addSection(notebook, folderId: f.id),
-            onAddFolderToFolder: (f) =>
-                _addSectionFolder(notebook, folderId: f.id),
-            onUngroup: (f) async {
-              await _service.ungroupInNotebook(notebook, f.id);
-              await _reloadNotebook(notebook.id);
-            },
-            onDeleteFolder: (f) => _deleteSectionFolder(notebook, f),
-            onRelocate: (node, {required copy}) =>
-                _relocateSection(notebook, node, copy: copy),
-            onTreeChanged: () => _service.saveNotebook(notebook),
-            onCrossDrop: (dragged, srcId, folder, index) =>
-                _crossDropSection(notebook, dragged, srcId, folder),
+          // Sections hang off their notebook: indented under a rail in the
+          // notebook's color so the parent/child relationship is visible.
+          Padding(
+            padding: const EdgeInsets.only(left: 15, right: 4, bottom: 4),
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(
+                    color: color.withValues(alpha: 0.45),
+                    width: 2,
+                  ),
+                ),
+              ),
+              child: ItemTreeView<Section>(
+                containerId: notebook.id,
+                nodes: notebook.nodes,
+                items: sectionMap,
+                dense: true,
+                nameOf: (s) => s.name,
+                colorOf: (s) => s.color,
+                idOf: (s) => s.id,
+                leafIcon: Icons.description_outlined,
+                selectedId: _selectedSection?.id,
+                onOpen: _selectSection,
+                onRenameLeaf: _renameSection,
+                onColorLeaf: _colorSection,
+                onDeleteLeaf: _deleteSection,
+                onRenameFolder: (f) => _renameSectionFolder(notebook, f),
+                onColorFolder: (f) => _colorSectionFolder(notebook, f),
+                onAddLeafToFolder: (f) => _addSection(notebook, folderId: f.id),
+                onAddFolderToFolder: (f) =>
+                    _addSectionFolder(notebook, folderId: f.id),
+                onUngroup: (f) async {
+                  await _service.ungroupInNotebook(notebook, f.id);
+                  await _reloadNotebook(notebook.id);
+                },
+                onDeleteFolder: (f) => _deleteSectionFolder(notebook, f),
+                onRelocate: (node, {required copy}) =>
+                    _relocateSection(notebook, node, copy: copy),
+                onTreeChanged: () => _service.saveNotebook(notebook),
+                onCrossDrop: (dragged, srcId, folder, index) =>
+                    _crossDropSection(notebook, dragged, srcId, folder),
+              ),
+            ),
           ),
       ],
     );

@@ -62,7 +62,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _colorNotebook(Notebook notebook) async {
-    final choice = await showColorSwatchPicker(context, current: notebook.color);
+    final choice = await showColorSwatchPicker(
+      context,
+      current: notebook.color,
+    );
     if (choice == null) return;
     await _notebookService.setNotebookColor(notebook.id, choice.color);
     _loadNotebooks();
@@ -156,6 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                       itemCount: notebooks.length,
+                      buildDefaultDragHandles: false,
                       onReorder: _reorderNotebooks,
                       proxyDecorator: (child, index, animation) =>
                           Material(color: Colors.transparent, child: child),
@@ -164,20 +168,24 @@ class _HomeScreenState extends State<HomeScreen> {
                         return Padding(
                           key: ValueKey(notebook.id),
                           padding: const EdgeInsets.only(bottom: 8),
-                          child: _NotebookRow(
-                            notebook: notebook,
+                          // Long-press anywhere on the card to reorder — no
+                          // visible drag handle.
+                          child: ReorderableDelayedDragStartListener(
                             index: index,
-                            onTap: () {
-                              Navigator.push(
-                                context,
-                                fadeThroughRoute(
-                                  NotebookScreen(notebook: notebook),
-                                ),
-                              ).then((_) => _loadNotebooks());
-                            },
-                            onRename: () => _renameNotebook(notebook),
-                            onColor: () => _colorNotebook(notebook),
-                            onDelete: () => _deleteNotebook(notebook),
+                            child: _NotebookRow(
+                              notebook: notebook,
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  fadeThroughRoute(
+                                    NotebookScreen(notebook: notebook),
+                                  ),
+                                ).then((_) => _loadNotebooks());
+                              },
+                              onRename: () => _renameNotebook(notebook),
+                              onColor: () => _colorNotebook(notebook),
+                              onDelete: () => _deleteNotebook(notebook),
+                            ),
                           ),
                         );
                       },
@@ -195,7 +203,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class _NotebookRow extends StatelessWidget {
   final Notebook notebook;
-  final int index;
   final VoidCallback onTap;
   final VoidCallback onRename;
   final VoidCallback onColor;
@@ -203,7 +210,6 @@ class _NotebookRow extends StatelessWidget {
 
   const _NotebookRow({
     required this.notebook,
-    required this.index,
     required this.onTap,
     required this.onRename,
     required this.onColor,
@@ -228,18 +234,31 @@ class _NotebookRow extends StatelessWidget {
             borderRadius: BorderRadius.circular(kRadius),
             border: Border.all(color: palette.border),
           ),
-          padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
+          padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
           child: Row(
             children: [
+              // Solid initial chip: notebooks read as the top-level item
+              // (matches the desktop sidebar's collapsed rail).
               Container(
-                width: 4,
-                height: 34,
+                width: 38,
+                height: 38,
+                alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: identity,
-                  borderRadius: BorderRadius.circular(2),
+                  borderRadius: BorderRadius.circular(kRadius),
+                ),
+                child: Text(
+                  notebook.name.isNotEmpty
+                      ? notebook.name[0].toUpperCase()
+                      : '?',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                  ),
                 ),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -250,7 +269,7 @@ class _NotebookRow extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 15,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                     const SizedBox(height: 3),
@@ -269,17 +288,6 @@ class _NotebookRow extends StatelessWidget {
                 onRename: onRename,
                 onColor: onColor,
                 onDelete: onDelete,
-              ),
-              ReorderableDragStartListener(
-                index: index,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 2, right: 6),
-                  child: Icon(
-                    Icons.drag_indicator,
-                    color: palette.textDim,
-                    size: 20,
-                  ),
-                ),
               ),
             ],
           ),
