@@ -32,7 +32,7 @@ class AuthService {
   AuthService._internal();
 
   static const _kDesktopClientId =
-      'STRING_FROM_ENVIRONMENT';
+      String.fromEnvironment('GOOGLE_CLIENT_ID', defaultValue: '');
   static const _kDesktopClientSecret =
       String.fromEnvironment('GOOGLE_CLIENT_SECRET', defaultValue: '');
   static const _kRefreshTokenKey = 'omninote_drive_refresh_token';

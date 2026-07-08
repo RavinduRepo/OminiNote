@@ -1,17 +1,44 @@
 # omininote
 
-A new Flutter project.
+A Flutter stylus note-taking app with cloud sync support via Google Drive.
 
-## Getting Started
+## Setup
 
-This project is a starting point for a Flutter application.
+### Google Drive Integration (Desktop & Android)
 
-A few resources to get you started if this is your first Flutter project:
+This app requires Google OAuth credentials for Drive sync on desktop and Android platforms.
+
+1. **Get credentials from Google Cloud Console:**
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select an existing one
+   - Enable the Google Drive API
+   - Create an OAuth 2.0 Client ID (type: Desktop application)
+   - Download the credentials JSON
+
+2. **Set environment variables:**
+   ```bash
+   export GOOGLE_CLIENT_ID="your-client-id"
+   export GOOGLE_CLIENT_SECRET="your-client-secret"
+   ```
+
+   Or pass them inline when running:
+   ```bash
+   GOOGLE_CLIENT_ID="..." GOOGLE_CLIENT_SECRET="..." flutter run
+   ```
+
+3. **See `.env.example`** for a template of required environment variables.
+
+## Building & Running
+
+```bash
+flutter pub get          # Install dependencies
+flutter run -d windows   # Run on desktop (with env vars set)
+flutter run -d android   # Run on Android
+```
+
+See `CLAUDE.md` for full architecture and feature details.
+
+## Resources
 
 - [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
 - [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
