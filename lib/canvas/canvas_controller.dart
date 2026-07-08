@@ -1444,6 +1444,18 @@ class CanvasController extends ChangeNotifier {
     if (target == null) return;
     final page = pages[target.pageId]!;
 
+    // A single text element taller than the page (e.g. a cut linked text)
+    // re-flows through the split pipeline instead of pasting clipped.
+    if (_appClipboard.length == 1 && _appClipboard.single is TextElement) {
+      final t = _appClipboard.single as TextElement;
+      final maxW = page.width * 0.85;
+      final measured = autoTextRect(t, maxW); // pure measure, no mutation
+      if (measured.height > page.height - 48) {
+        insertRunsAsText(target.pageId, [for (final r in t.runs) r.clone()]);
+        return;
+      }
+    }
+
     final copies = [
       for (final el in _appClipboard) el.deepCopy(withNewId: true),
     ];
@@ -1628,6 +1640,226 @@ class CanvasController extends ChangeNotifier {
 
   void addElement(String pageId, CanvasElement element) {
     _doOp(_addElementsOp('Insert', pageId, [element]));
+  }
+
+  /// Pastes [runs] as text starting on [pageId]. Fits on the page → one
+  /// auto-sized box centered there (the classic paste). Taller than the page
+  /// → split at line boundaries into **linked** continuation boxes
+  /// ([TextElement.linkId]), each on its own **new** page — appended to the
+  /// right within the same row when the target row already flows
+  /// horizontally, else as new rows directly below — all one undoable op.
+  /// Returns the number of boxes created.
+  int insertRunsAsText(String pageId, List<TextRun> runs) {
+    final page = pages[pageId];
+    if (page == null || runs.isEmpty) return 0;
+    const margin = 24.0;
+    final maxW = page.width * 0.85;
+    final left = (page.width - maxW) / 2;
+
+    TextElement build(List<TextRun> chunk, {String? linkId}) {
+      final el = TextElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        rect: Rect.fromLTWH(left, margin, 10, 10),
+        runs: [for (final r in chunk) r.clone()],
+        linkId: linkId,
+        fontFamily: textFontFamily,
+        fontSize: textFontSize,
+        color: textColor,
+      );
+      el.rect = autoTextRect(el, maxW);
+      return el;
+    }
+
+    final chunks = splitRunsByHeight(runs, maxW, page.height - margin * 2);
+    if (chunks.length == 1) {
+      final el = build(chunks.single);
+      final shift = Offset(page.width / 2, page.height / 2) - el.rect.center;
+      el.translate(shift.dx, shift.dy);
+      if (el.rect.top < 16) el.translate(0, 16 - el.rect.top);
+      _doOp(_addElementsOp('Paste text', pageId, [el]));
+      return 1;
+    }
+
+    // Multi-page: continuation pages sized like the target, direction from
+    // the target row's shape.
+    final linkId = newModelId('lnk');
+    final parts = [for (final c in chunks) build(c, linkId: linkId)];
+
+    final rowIndex = canvas.rows.indexWhere((r) => r.pageIds.contains(pageId));
+    if (rowIndex < 0) return 0;
+    final row = canvas.rows[rowIndex];
+    final horizontal = row.pageIds.length > 1;
+
+    final newPages = <CanvasPage>[];
+    for (var i = 1; i < parts.length; i++) {
+      newPages.add(
+        CanvasPage(
+          id: newModelId('pg'),
+          deviceId: SettingsService().deviceId,
+          width: page.width,
+          height: page.height,
+          background: canvas.defaultBackground,
+        ),
+      );
+    }
+    final newRows = horizontal
+        ? const <PageRow>[]
+        : [
+            for (final p in newPages)
+              PageRow(id: _service.newId(), pageIds: [p.id]),
+          ];
+    final targetPageIds = [pageId, ...newPages.map((p) => p.id)];
+
+    _doOp(
+      _CanvasOp(
+        label: 'Paste text across pages',
+        structural: true,
+        dirtyPageIds: targetPageIds.toSet(),
+        apply: () {
+          for (final p in newPages) {
+            pages[p.id] = p;
+          }
+          if (horizontal) {
+            final at = row.pageIds.indexOf(pageId) + 1;
+            for (var i = 0; i < newPages.length; i++) {
+              if (!row.pageIds.contains(newPages[i].id)) {
+                row.pageIds.insert(at + i, newPages[i].id);
+              }
+            }
+          } else {
+            if (!canvas.rows.any((r) => identical(r, newRows.firstOrNull))) {
+              canvas.rows.insertAll(
+                math.min(rowIndex + 1, canvas.rows.length),
+                newRows,
+              );
+            }
+          }
+          for (var i = 0; i < parts.length; i++) {
+            final target = pages[targetPageIds[i]]!;
+            target.deletedObjects.removeWhere((t) => t.strokeId == parts[i].id);
+            if (!target.objects.any((e) => e.id == parts[i].id)) {
+              target.objects.add(parts[i]);
+            }
+          }
+        },
+        revert: () {
+          final dev = SettingsService().deviceId;
+          final now = DateTime.now();
+          for (var i = 0; i < parts.length; i++) {
+            final target = pages[targetPageIds[i]];
+            if (target == null) continue;
+            target.deletedObjects.add(
+              EraseTombstone(
+                strokeId: parts[i].id,
+                erasedAt: now,
+                deviceId: dev,
+              ),
+            );
+            target.objects.removeWhere((e) => e.id == parts[i].id);
+          }
+          if (horizontal) {
+            row.pageIds.removeWhere((id) => newPages.any((p) => p.id == id));
+          } else {
+            canvas.rows.removeWhere((r) => newRows.contains(r));
+          }
+          for (final p in newPages) {
+            pages.remove(p.id);
+          }
+        },
+      ),
+    );
+    return parts.length;
+  }
+
+  /// True when the lasso selection holds a text box that is part of a split
+  /// pasted text (has a [TextElement.linkId]) — enables the linked actions.
+  bool get selectionHasLinkedText =>
+      selection.any((e) => e is TextElement && e.linkId != null);
+
+  /// All parts of the linked texts in the current selection, in document
+  /// (row → page → object) order, with the page each lives on.
+  List<(String pageId, TextElement el)> _linkedParts() {
+    final ids = {
+      for (final e in selection)
+        if (e is TextElement && e.linkId != null) e.linkId!,
+    };
+    if (ids.isEmpty) return const [];
+    final out = <(String, TextElement)>[];
+    for (final row in canvas.rows) {
+      for (final pid in row.pageIds) {
+        final p = pages[pid];
+        if (p == null) continue;
+        for (final el in p.objects) {
+          if (el is TextElement && ids.contains(el.linkId)) out.add((pid, el));
+        }
+      }
+    }
+    return out;
+  }
+
+  /// Deletes every part of the selected linked text (all pages), one op.
+  /// The continuation pages themselves stay — they may hold other content.
+  void deleteLinkedText() {
+    final parts = _linkedParts();
+    if (parts.isEmpty) return;
+    clearSelection(notify: false);
+    _doOp(
+      _CanvasOp(
+        label: 'Delete linked text',
+        dirtyPageIds: parts.map((p) => p.$1).toSet(),
+        apply: () {
+          final dev = SettingsService().deviceId;
+          final now = DateTime.now();
+          for (final (pid, el) in parts) {
+            final page = pages[pid];
+            if (page == null) continue;
+            if (!page.deletedObjects.any((t) => t.strokeId == el.id)) {
+              page.deletedObjects.add(
+                EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev),
+              );
+            }
+            page.objects.removeWhere((e) => e.id == el.id);
+          }
+        },
+        revert: () {
+          for (final (pid, el) in parts) {
+            final page = pages[pid];
+            if (page == null) continue;
+            page.deletedObjects.removeWhere((t) => t.strokeId == el.id);
+            if (!page.objects.any((e) => e.id == el.id)) {
+              page.objects.add(el);
+            }
+          }
+        },
+      ),
+    );
+  }
+
+  /// Cuts the whole linked text: merges every part back into ONE text
+  /// element on the internal clipboard (concatenation restores the original
+  /// text exactly), then deletes the parts. Pasting it re-flows across pages
+  /// at the destination — this is how a split paste is *moved*.
+  void cutLinkedText() {
+    final parts = _linkedParts();
+    if (parts.isEmpty) return;
+    final first = parts.first.$2;
+    final merged = TextElement(
+      id: newModelId('el'),
+      deviceId: SettingsService().deviceId,
+      rect: first.rect,
+      runs: [
+        for (final (_, el) in parts)
+          for (final r in el.runs) r.clone(),
+      ],
+      fontFamily: first.fontFamily,
+      fontSize: first.fontSize,
+      color: first.color,
+      align: first.align,
+    );
+    _appClipboard = [merged];
+    deleteLinkedText();
+    notifyListeners();
   }
 
   /// Inserts an image *beneath the ink layer*: ink drawn on the page (now or

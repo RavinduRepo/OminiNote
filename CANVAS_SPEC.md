@@ -140,7 +140,9 @@ Today pdfrx owns the pan/zoom camera and ink merely follows it (see `CLAUDE.md` 
 
 ### 7.5 Copy / paste (new)
 - **Internal clipboard** for element selections (paste at viewport center, offset slightly).
-- **System clipboard** interop: paste external images/text; copy selected text out. **[OPEN]** how much system-clipboard fidelity for v1 (images+text vs text-only first).
+- **System clipboard** interop (implemented, full fidelity): paste external **images**, **rich HTML text** (formatting preserved — see below), and plain text; copy out images (lossless single image / rendered PNG) and text (**HTML + plain together**, so rich targets keep formatting).
+- **Rich text paste (implemented 07/08/26):** clipboard HTML from browsers/Word/OneNote → styled `TextRun`s via `lib/utils/html_text.dart`. Kept: bold/italic/color/size/family (tags + inline CSS), headings, line/paragraph breaks, ul/ol as plain-glyph list prefixes (numbered, nested-indented), collapsed whitespace. Degraded: tables → space-separated cells. Dropped: images inside the HTML, scripts/styles. PDF export draws text **per styled run**, so exports match.
+- **Long pastes split across pages (implemented 07/08/26):** text (rich or plain) taller than the target page splits at line boundaries into **linked** continuation boxes, each on its own new page — appended to the right when pasting on a page in a horizontal row, else as new rows below; one undo. Lasso any part → "Cut all parts" (re-paste re-flows elsewhere = move) / "Delete all parts". Typing into a box can still outgrow the page — split applies at paste time only.
 
 ### 7.6 Removed
 - **Delete the "Clear page" button** — redundant now (undo + eraser + selection-delete cover it).
@@ -260,18 +262,13 @@ Chosen fidelity: **keep imported PDF pages as their original vector content and 
 
 Handwriting→text recognition; shape-recognition/snapping; rulers/guides; real-time collaboration; cloud sync (planned separately); partial/pixel eraser; cross-page multi-select; audio/video elements; PDF form-field editing.
 
-### 17.1 Backlog — rich / structured text paste (post-v1, planned)
+### 17.1 Backlog — rich / structured text paste
 
-**Goal:** paste **structured, coloured, formatted text** (from a browser, Word, OneNote, etc.) and keep its styling instead of flattening to plain text — the OneNote behaviour the user called out. Possibly also render **Markdown** entered/pasted as markup.
+**Implemented 07/08/26** (see §7.5): HTML→`TextRun[]` converter (`lib/utils/html_text.dart`), HTML-first system paste, HTML+plain copy-out, and per-run PDF text export — all shipped together as planned here.
 
-**Feasibility (investigated 07/08/26):**
-- The data model already supports it. `TextElement` holds a list of styled `TextRun`s (per-range fontFamily/size/color/bold/italic), and painting/measuring already go through `textSpanForElement`. So rich pasted text maps directly onto multiple `TextRun`s — **no model change needed** for the common cases (bold/italic/colour/size runs).
-- The clipboard plumbing is already the right library. `super_clipboard` (used in `lib/utils/clipboard_images.dart`) exposes `Formats.htmlText` and `Formats.plainText`. Today `_pasteSystemText` (in `canvas_screen.dart`) only reads `Clipboard.kTextPlain`; the rich path would read `htmlText` when the source app offers it and fall back to plain.
-- **Missing piece = an HTML→`TextRun[]` converter.** Parse the pasted HTML fragment (e.g. via the `html` package's parser) and walk inline styles (`<b>/<strong>`, `<i>/<em>`, `<span style="color:…;font-size:…">`, `<br>`, block breaks) into runs. Scope carefully: inline text styling only — **not** tables/images/lists-as-HTML/nested block layout (those are a much bigger effort and belong to a later pass).
-
-**Markdown (separate, smaller):** could either (a) render Markdown to `TextRun`s on paste (one-shot, same converter shape as HTML), or (b) a live "Markdown text box" mode. (a) is the cheaper first step and reuses the run model.
-
-**Rough plan when picked up:** (1) HTML→runs converter + unit tests; (2) `_pasteSystemText` reads `htmlText` first, builds a multi-run `TextElement`, plain fallback unchanged; (3) auto-size the box to the multi-run span (`autoTextRect` already re-measures); (4) optional Markdown-on-paste reusing the converter. **Export caveat to clear at the same time:** PDF export currently draws each text box in its *base* style (per-run export is already a known TODO) — rich paste makes per-run export more visible, so do them together.
+**Still future:**
+- **Markdown rendering** — either (a) Markdown→`TextRun`s on paste (one-shot; same converter shape as the HTML one, cheap now that the run pipeline exists) or (b) a live "Markdown text box" mode. (a) first.
+- Richer HTML block layout (real tables, images inside pasted HTML, indent/quote styling) — deliberately out of scope for the inline-styling pass.
 
 ---
 
@@ -301,7 +298,7 @@ Highest-impact first:
 5. **[OPEN] Patterns allowed on PDF-backed pages?**
 6. **[OPEN] Selection confined to one page** in v1?
 7. **[OPEN] Attachments in export** (ignore vs append vs embed).
-8. **[OPEN] System-clipboard scope** for v1 (images+text vs text-only).
+8. ~~[OPEN] System-clipboard scope~~ — resolved beyond the original ask: images + rich HTML text + plain text, both directions (§7.5).
 9. **[CONFIRM] Export scope** options (whole section / selected / current).
 10. **[OPEN] Undo history** depth + persistence.
 

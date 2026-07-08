@@ -8,6 +8,7 @@ import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import '../utils/clipboard_images.dart';
+import '../utils/html_text.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
@@ -55,6 +56,18 @@ class _CanvasScreenState extends State<CanvasScreen> {
   bool _toolGestureActive = false;
   bool _scrollbarDragging = false;
 
+  /// Pointer id of the finger currently drawing (finger-draw mode only), so
+  /// other fingers' events don't feed the stroke and a second touch can
+  /// cancel it into a pan/pinch.
+  int? _fingerDrawPointer;
+
+  /// The current pointer went down inside the text-edit overlay: the
+  /// TextField owns the whole gesture (caret, drag-select), so our pointer-up
+  /// tap handling must not run — it would re-enter _startTextEdit on the same
+  /// element with a fresh controller and wipe the selection the user just
+  /// made ("selection dies as soon as the finger/mouse lifts").
+  bool _pointerInTextEditor = false;
+
   // A text box grabbed in text mode: a tap edits it, a drag moves it.
   TextElement? _grabbedText;
   String? _grabbedPageId;
@@ -99,13 +112,34 @@ class _CanvasScreenState extends State<CanvasScreen> {
     if (c == null || c.selection.isEmpty) return;
 
     if (c.selection.every((e) => e is TextElement)) {
-      final text = c.selection
-          .whereType<TextElement>()
-          .map((t) => t.text)
-          .join('\n');
-      if (text.trim().isNotEmpty) {
-        await Clipboard.setData(ClipboardData(text: text));
+      final texts = c.selection.whereType<TextElement>().toList();
+      final text = texts.map((t) => t.text).join('\n');
+      if (text.trim().isEmpty) return;
+      // Rich flavor first (styled runs → HTML with a plain-text fallback in
+      // the same clipboard item), so pasting into a rich target keeps the
+      // formatting; plain Clipboard only if the platform lacks support.
+      final allRuns = <TextRun>[];
+      for (final t in texts) {
+        if (allRuns.isNotEmpty) {
+          allRuns.add(
+            TextRun(
+              text: '\n',
+              fontSize: t.fontSize,
+              bold: false,
+              italic: false,
+              color: t.color,
+              fontFamily: t.fontFamily,
+            ),
+          );
+        }
+        allRuns.addAll(t.runs);
       }
+      try {
+        if (await ClipboardHtml.write(htmlFromRuns(allRuns), text)) return;
+      } catch (_) {
+        // fall through to plain text
+      }
+      await Clipboard.setData(ClipboardData(text: text));
       return;
     }
 
@@ -168,7 +202,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
   }
 
   /// Paste fallback when the internal clipboard is empty: OS image first,
-  /// then OS text.
+  /// then rich HTML text (formatting preserved), then plain OS text.
   Future<void> _pasteFromSystemClipboard() async {
     final c = _controller;
     if (c == null) return;
@@ -183,7 +217,47 @@ class _CanvasScreenState extends State<CanvasScreen> {
       await _insertImageBytes(imageBytes);
       return;
     }
+
+    // Rich text: browsers/Word/OneNote put an HTML flavor on the clipboard
+    // alongside the plain one — read it so bold/color/size etc. survive.
+    String? html;
+    try {
+      html = await ClipboardHtml.read();
+    } catch (_) {
+      html = null;
+    }
+    if (html != null && mounted && _pasteRichHtml(html)) return;
+
     await _pasteSystemText();
+  }
+
+  /// Drops styled multi-run text built from clipboard HTML on the current
+  /// page — split across linked continuation pages when it's taller than the
+  /// page. Returns false when the HTML held no visible text (the caller then
+  /// falls back to the plain-text paste).
+  bool _pasteRichHtml(String html) {
+    final c = _controller!;
+    final target = c.currentPageLayout;
+    if (target == null) return false;
+
+    final base = TextRun(
+      text: '',
+      fontSize: c.textFontSize,
+      bold: false,
+      italic: false,
+      color: c.textColor,
+      fontFamily: c.textFontFamily,
+    );
+    final runs = runsFromHtml(html, base);
+    if (runs.isEmpty) return false;
+
+    final boxes = c.insertRunsAsText(target.pageId, runs);
+    _toast(
+      boxes > 1
+          ? 'Pasted formatted text across $boxes pages'
+          : 'Pasted formatted text',
+    );
+    return boxes > 0;
   }
 
   /// Decodes [bytes], stores them as an asset, and drops an ImageElement
@@ -244,6 +318,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
   bool _isDrawingDevice(PointerEvent e) =>
       e.kind == PointerDeviceKind.stylus ||
       e.kind == PointerDeviceKind.invertedStylus ||
+      (e.kind == PointerDeviceKind.touch && SettingsService().fingerDraw) ||
       (e.kind == PointerDeviceKind.mouse && e.buttons == kPrimaryMouseButton);
 
   bool _forceEraser(PointerEvent e) =>
@@ -257,6 +332,19 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // (unless a text edit is active — the TextField keeps it then).
     if (_textEdit == null && !_canvasFocus.hasFocus) {
       _canvasFocus.requestFocus();
+    }
+
+    // Finger-draw mode: a second finger landing while one is drawing means
+    // the user wants to pan/pinch — cancel the in-progress finger stroke and
+    // hand the gesture to the scale recognizer (which tracks both fingers).
+    if (e.kind == PointerDeviceKind.touch &&
+        _fingerDrawPointer != null &&
+        e.pointer != _fingerDrawPointer &&
+        _toolGestureActive) {
+      _toolGestureActive = false;
+      _fingerDrawPointer = null;
+      c.cancelToolGesture();
+      return;
     }
 
     // A tool's options panel (colors/size, selection actions, text style) or
@@ -280,7 +368,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
       final editorRect = c
           .pageScreenRect(session.pageId, session.element.rect)
           .inflate(12);
-      if (editorRect.contains(e.localPosition)) return;
+      if (editorRect.contains(e.localPosition)) {
+        _pointerInTextEditor = true; // swallow the matching pointer-up too
+        return;
+      }
       _commitTextEdit();
     }
     _downPosition = e.localPosition;
@@ -318,6 +409,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
         e.pressure == 0 ? 0.5 : e.pressure,
         forceEraser: _forceEraser(e),
       );
+      if (_toolGestureActive && e.kind == PointerDeviceKind.touch) {
+        _fingerDrawPointer = e.pointer;
+      }
     } else if (e.kind == PointerDeviceKind.touch &&
         c.tool == CanvasTool.lasso &&
         c.selection.isNotEmpty &&
@@ -334,6 +428,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
       return;
     }
     if (!_toolGestureActive) return;
+    // A finger is drawing: only that finger's moves feed the stroke.
+    if (_fingerDrawPointer != null && e.pointer != _fingerDrawPointer) return;
     _controller!.updateToolGesture(
       e.localPosition,
       e.pressure == 0 ? 0.5 : e.pressure,
@@ -342,6 +438,19 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   void _onPointerUp(PointerUpEvent e) {
     final c = _controller!;
+    // This gesture lived inside the text editor (caret tap / drag-select):
+    // the TextField already handled it fully.
+    if (_pointerInTextEditor) {
+      _pointerInTextEditor = false;
+      return;
+    }
+    // A non-drawing finger lifting must not end the drawing finger's stroke.
+    if (_toolGestureActive &&
+        _fingerDrawPointer != null &&
+        e.pointer != _fingerDrawPointer) {
+      return;
+    }
+    _fingerDrawPointer = null;
     final down = _downPosition;
     _downPosition = null;
 
@@ -422,6 +531,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
       _toolGestureActive = false;
       _controller!.cancelToolGesture();
     }
+    _fingerDrawPointer = null;
+    _pointerInTextEditor = false;
     _grabbedText = null;
     _grabbedPageId = null;
     _elementGrabbing = false;
@@ -883,6 +994,20 @@ class _CanvasScreenState extends State<CanvasScreen> {
     );
   }
 
+  /// Toggles drawing with a finger (for pen-less use). Rebuild swaps the
+  /// gesture map (double-tap zoom off while drawing with fingers).
+  Future<void> _toggleFingerDraw() async {
+    final s = SettingsService();
+    await s.setFingerDraw(!s.fingerDraw);
+    if (!mounted) return;
+    setState(() {});
+    _toast(
+      s.fingerDraw
+          ? 'Finger drawing on — two fingers to pan/zoom'
+          : 'Finger drawing off',
+    );
+  }
+
   Future<void> _pasteFlow() async {
     final c = _controller!;
     if (CanvasController.clipboardHasContent) {
@@ -902,27 +1027,19 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
     final target = c.currentPageLayout;
     if (target == null) return;
-    final page = c.pages[target.pageId]!;
-    final width = math.min(page.width * 0.7, 320.0);
-    final el = TextElement(
-      id: newModelId('el'),
-      deviceId: SettingsService().deviceId,
-      rect: Rect.fromCenter(
-        center: Offset(page.width / 2, page.height / 2),
-        width: width,
-        height: c.textFontSize * 1.6,
+    // Same auto-size + split-across-pages pipeline as the rich paste, with
+    // one base-styled run.
+    final boxes = c.insertRunsAsText(target.pageId, [
+      TextRun(
+        text: text,
+        fontSize: c.textFontSize,
+        bold: false,
+        italic: false,
+        color: c.textColor,
+        fontFamily: c.textFontFamily,
       ),
-      text: text,
-      fontFamily: c.textFontFamily,
-      fontSize: c.textFontSize,
-      color: c.color,
-    );
-    final tp = TextPainter(
-      text: TextSpan(text: text, style: textStyleForElement(el)),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: width);
-    el.rect = Rect.fromLTWH(el.rect.left, el.rect.top, width, tp.height + 8);
-    c.addElement(target.pageId, el);
+    ]);
+    if (boxes > 1) _toast('Pasted text across $boxes pages');
   }
 
   // ── Sheets: page settings, navigator, attachments ────────────────────
@@ -1493,17 +1610,27 @@ class _CanvasScreenState extends State<CanvasScreen> {
                   _showAttachments();
                 case 'page_settings':
                   _showPageSettings();
+                case 'finger_draw':
+                  _toggleFingerDraw();
               }
             },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'rename', child: Text('Rename')),
-              PopupMenuItem(value: 'export', child: Text('Export PDF')),
-              PopupMenuItem(value: 'navigator', child: Text('Pages')),
-              PopupMenuItem(value: 'bookmarks', child: Text('Bookmarks')),
-              PopupMenuItem(value: 'attachments', child: Text('Attachments')),
-              PopupMenuItem(
+            itemBuilder: (context) => [
+              const PopupMenuItem(value: 'rename', child: Text('Rename')),
+              const PopupMenuItem(value: 'export', child: Text('Export PDF')),
+              const PopupMenuItem(value: 'navigator', child: Text('Pages')),
+              const PopupMenuItem(value: 'bookmarks', child: Text('Bookmarks')),
+              const PopupMenuItem(
+                value: 'attachments',
+                child: Text('Attachments'),
+              ),
+              const PopupMenuItem(
                 value: 'page_settings',
                 child: Text('Page settings'),
+              ),
+              CheckedPopupMenuItem(
+                value: 'finger_draw',
+                checked: SettingsService().fingerDraw,
+                child: const Text('Draw with finger'),
               ),
             ],
           ),
@@ -1611,15 +1738,18 @@ class _CanvasScreenState extends State<CanvasScreen> {
                           ..onUpdate = _onScaleUpdate
                           ..onEnd = _onScaleEnd,
                       ),
-                  DoubleTapGestureRecognizer:
-                      GestureRecognizerFactoryWithHandlers<
-                        DoubleTapGestureRecognizer
-                      >(
-                        () => DoubleTapGestureRecognizer(
-                          supportedDevices: {PointerDeviceKind.touch},
+                  // Touch double-tap = fit page width — but not in finger-draw
+                  // mode, where two quick taps are two ink dots, not a zoom.
+                  if (!SettingsService().fingerDraw)
+                    DoubleTapGestureRecognizer:
+                        GestureRecognizerFactoryWithHandlers<
+                          DoubleTapGestureRecognizer
+                        >(
+                          () => DoubleTapGestureRecognizer(
+                            supportedDevices: {PointerDeviceKind.touch},
+                          ),
+                          (r) => r..onDoubleTapDown = _onDoubleTapDown,
                         ),
-                        (r) => r..onDoubleTapDown = _onDoubleTapDown,
-                      ),
                 },
                 child: Stack(
                   children: [
@@ -1978,6 +2108,20 @@ Widget _buildLassoActionRow(
           label: 'Back',
           onTap: c.sendSelectionToBack,
         ),
+        // Split pasted text (linked boxes across pages): act on ALL parts.
+        // "Cut all" + paste elsewhere re-flows it there = the move story.
+        if (c.selectionHasLinkedText) ...[
+          _SelAction(
+            icon: Icons.cut,
+            label: 'Cut all parts',
+            onTap: c.cutLinkedText,
+          ),
+          _SelAction(
+            icon: Icons.delete_sweep_outlined,
+            label: 'Delete all parts',
+            onTap: c.deleteLinkedText,
+          ),
+        ],
       ],
     ),
   );
@@ -2133,6 +2277,21 @@ Widget _buildTextStyleRow(
               label: 'Delete',
               onTap: c.deleteSelection,
             ),
+            // A text-only selection shows THIS row, not the lasso action row
+            // — so the linked (split-paste) whole-text actions must live here
+            // too, or they'd be unreachable for text boxes.
+            if (c.selectionHasLinkedText) ...[
+              _SelAction(
+                icon: Icons.cut,
+                label: 'Cut all parts',
+                onTap: c.cutLinkedText,
+              ),
+              _SelAction(
+                icon: Icons.delete_sweep_outlined,
+                label: 'Delete all parts',
+                onTap: c.deleteLinkedText,
+              ),
+            ],
           ],
         ],
       ),

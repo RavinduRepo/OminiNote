@@ -125,13 +125,13 @@ class StrokeElement extends CanvasElement {
     required this.color,
     required this.size,
     required this.points,
-  })  : createdAt = createdAt ?? DateTime.now(),
-        super(
-          schemaVersion: schemaVersion,
-          rev: rev,
-          updatedAt: updatedAt,
-          deletedAt: deletedAt,
-        );
+  }) : createdAt = createdAt ?? DateTime.now(),
+       super(
+         schemaVersion: schemaVersion,
+         rev: rev,
+         updatedAt: updatedAt,
+         deletedAt: deletedAt,
+       );
 
   void invalidateCache() => cachedOutline = null;
 
@@ -152,19 +152,19 @@ class StrokeElement extends CanvasElement {
 
   @override
   StrokeElement deepCopy({bool withNewId = false}) => StrokeElement(
-        schemaVersion: schemaVersion,
-        id: withNewId ? newModelId('el') : id,
-        rev: rev,
-        updatedAt: updatedAt,
-        deviceId: deviceId,
-        deletedAt: deletedAt,
-        createdAt: createdAt,
-        z: z,
-        tool: tool,
-        color: color,
-        size: size,
-        points: points.map((p) => StrokePoint(p.x, p.y, p.p)).toList(),
-      )..zIndex = zIndex;
+    schemaVersion: schemaVersion,
+    id: withNewId ? newModelId('el') : id,
+    rev: rev,
+    updatedAt: updatedAt,
+    deviceId: deviceId,
+    deletedAt: deletedAt,
+    createdAt: createdAt,
+    z: z,
+    tool: tool,
+    color: color,
+    size: size,
+    points: points.map((p) => StrokePoint(p.x, p.y, p.p)).toList(),
+  )..zIndex = zIndex;
 
   @override
   void translate(double dx, double dy) {
@@ -198,47 +198,47 @@ class StrokeElement extends CanvasElement {
 
   @override
   Map<String, dynamic> toJson() => {
-        'schemaVersion': schemaVersion,
-        'type': 'stroke',
-        'id': id,
-        'rev': rev,
-        'updatedAt': updatedAt.millisecondsSinceEpoch,
-        'deviceId': deviceId,
-        'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    'schemaVersion': schemaVersion,
+    'type': 'stroke',
+    'id': id,
+    'rev': rev,
+    'updatedAt': updatedAt.millisecondsSinceEpoch,
+    'deviceId': deviceId,
+    'deletedAt': deletedAt?.millisecondsSinceEpoch,
     'zi': zIndex,
-        'createdAt': createdAt.millisecondsSinceEpoch,
-        'z': z,
-        'tool': tool.name,
-        'color': color.toARGB32(),
-        'size': size,
-        'points': points.map((p) => p.toJson()).toList(),
-      };
+    'createdAt': createdAt.millisecondsSinceEpoch,
+    'z': z,
+    'tool': tool.name,
+    'color': color.toARGB32(),
+    'size': size,
+    'points': points.map((p) => p.toJson()).toList(),
+  };
 
   factory StrokeElement.fromJson(Map<String, dynamic> json) => StrokeElement(
-        schemaVersion: json['schemaVersion'] ?? 1,
-        id: json['id'] ?? newModelId('el'),
-        rev: json['rev'] ?? 1,
-        updatedAt: json['updatedAt'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
-            : null,
-        deviceId: json['deviceId'] ?? 'unknown',
-        deletedAt: json['deletedAt'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
-            : null,
-        createdAt: json['createdAt'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(json['createdAt'])
-            : DateTime.now(),
-        z: json['z'] ?? '0|a0:',
-        tool: StrokeTool.values.firstWhere(
-          (t) => t.name == json['tool'],
-          orElse: () => StrokeTool.pen,
-        ),
-        color: Color(json['color'] ?? 0xFF000000),
-        size: (json['size'] as num?)?.toDouble() ?? 4.0,
-        points: List<Map<String, dynamic>>.from(
-          json['points'] ?? [],
-        ).map(StrokePoint.fromJson).toList(),
-      )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
+    schemaVersion: json['schemaVersion'] ?? 1,
+    id: json['id'] ?? newModelId('el'),
+    rev: json['rev'] ?? 1,
+    updatedAt: json['updatedAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+        : null,
+    deviceId: json['deviceId'] ?? 'unknown',
+    deletedAt: json['deletedAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+        : null,
+    createdAt: json['createdAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(json['createdAt'])
+        : DateTime.now(),
+    z: json['z'] ?? '0|a0:',
+    tool: StrokeTool.values.firstWhere(
+      (t) => t.name == json['tool'],
+      orElse: () => StrokeTool.pen,
+    ),
+    color: Color(json['color'] ?? 0xFF000000),
+    size: (json['size'] as num?)?.toDouble() ?? 4.0,
+    points: List<Map<String, dynamic>>.from(
+      json['points'] ?? [],
+    ).map(StrokePoint.fromJson).toList(),
+  )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
 }
 
 enum TextAlignOption { left, center, right }
@@ -302,6 +302,11 @@ class TextElement extends CanvasElement {
   /// Styled content runs (z-order-free; concatenated left-to-right).
   List<TextRun> runs;
 
+  /// Shared id linking the continuation boxes of one long pasted text that
+  /// was split across pages, so "cut/delete all parts" can find its siblings.
+  /// Null for ordinary boxes.
+  String? linkId;
+
   /// Paragraph alignment (whole box).
   TextAlignOption align;
 
@@ -324,6 +329,7 @@ class TextElement extends CanvasElement {
     this.rotation = 0,
     String text = '',
     List<TextRun>? runs,
+    this.linkId,
     this.fontFamily = 'sans',
     this.fontSize = 16,
     required this.color,
@@ -368,6 +374,7 @@ class TextElement extends CanvasElement {
     rect: rect,
     rotation: rotation,
     runs: [for (final r in runs) r.clone()],
+    linkId: linkId,
     fontFamily: fontFamily,
     fontSize: fontSize,
     color: color,
@@ -419,6 +426,7 @@ class TextElement extends CanvasElement {
     'rect': {'x': rect.left, 'y': rect.top, 'w': rect.width, 'h': rect.height},
     'rotation': rotation,
     'runs': [for (final r in runs) r.toJson()],
+    if (linkId != null) 'gid': linkId,
     // Baseline style, kept for the toolbar/new text and as a fallback.
     'fontFamily': fontFamily,
     'fontSize': fontSize,
@@ -435,9 +443,13 @@ class TextElement extends CanvasElement {
       schemaVersion: json['schemaVersion'] ?? 1,
       id: json['id'] ?? newModelId('el'),
       rev: json['rev'] ?? 1,
-      updatedAt: json['updatedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']) : null,
+      updatedAt: json['updatedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+          : null,
       deviceId: json['deviceId'] ?? 'unknown',
-      deletedAt: json['deletedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt']) : null,
+      deletedAt: json['deletedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+          : null,
       rect: Rect.fromLTWH(
         (r['x'] as num?)?.toDouble() ?? 0,
         (r['y'] as num?)?.toDouble() ?? 0,
@@ -453,6 +465,7 @@ class TextElement extends CanvasElement {
             ]
           : null,
       text: runsJson == null ? (json['text'] ?? '') : '',
+      linkId: json['gid'] as String?,
       fontFamily: json['fontFamily'] ?? 'sans',
       fontSize: (json['fontSize'] as num?)?.toDouble() ?? 16,
       color: Color(json['color'] ?? 0xFF000000),
@@ -555,9 +568,13 @@ class ImageElement extends CanvasElement {
       schemaVersion: json['schemaVersion'] ?? 1,
       id: json['id'] ?? newModelId('el'),
       rev: json['rev'] ?? 1,
-      updatedAt: json['updatedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']) : null,
+      updatedAt: json['updatedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+          : null,
       deviceId: json['deviceId'] ?? 'unknown',
-      deletedAt: json['deletedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt']) : null,
+      deletedAt: json['deletedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+          : null,
       rect: Rect.fromLTWH(
         (r['x'] as num?)?.toDouble() ?? 0,
         (r['y'] as num?)?.toDouble() ?? 0,
@@ -674,9 +691,13 @@ class AttachmentElement extends CanvasElement {
       schemaVersion: json['schemaVersion'] ?? 1,
       id: json['id'] ?? newModelId('el'),
       rev: json['rev'] ?? 1,
-      updatedAt: json['updatedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt']) : null,
+      updatedAt: json['updatedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['updatedAt'])
+          : null,
       deviceId: json['deviceId'] ?? 'unknown',
-      deletedAt: json['deletedAt'] != null ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt']) : null,
+      deletedAt: json['deletedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+          : null,
       rect: Rect.fromLTWH(
         (r['x'] as num?)?.toDouble() ?? 0,
         (r['y'] as num?)?.toDouble() ?? 0,

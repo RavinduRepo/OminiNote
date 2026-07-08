@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'dart:ui' show Color, Offset, Rect, Size;
 import 'package:perfect_freehand/perfect_freehand.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
+import '../canvas/text_measure.dart' show placedRunFragments;
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
@@ -38,6 +39,7 @@ class SyncfusionPdfExporter implements PdfExporter {
     out.pageSettings.margins.all = 0;
     _assetBytesRef = assetBytes;
     _bitmapCache.clear();
+    _runFontCache.clear();
     _referencedAttachments.clear();
     _embedNameByAsset.clear();
     _usedEmbedNames.clear();
@@ -106,12 +108,14 @@ class SyncfusionPdfExporter implements PdfExporter {
       for (final att in _referencedAttachments) {
         if (!embedded.add(att.assetId)) continue;
         try {
-          out.attachments.add(sf.PdfAttachment(
-            _embedNameFor(att),
-            await assetBytes(att.assetId),
-            description: 'Omininote attachment',
-            mimeType: att.mime,
-          ));
+          out.attachments.add(
+            sf.PdfAttachment(
+              _embedNameFor(att),
+              await assetBytes(att.assetId),
+              description: 'Omininote attachment',
+              mimeType: att.mime,
+            ),
+          );
         } catch (_) {
           // Missing/unreadable asset: chip still exports, file just isn't
           // embedded.
@@ -215,9 +219,9 @@ class SyncfusionPdfExporter implements PdfExporter {
     AttachmentElement el,
     double xOffset,
   ) {
-    final name = _embedNameFor(el)
-        .replaceAll('\\', r'\\')
-        .replaceAll('"', r'\"');
+    final name = _embedNameFor(
+      el,
+    ).replaceAll('\\', r'\\').replaceAll('"', r'\"');
     final annotation = sf.PdfActionAnnotation(
       Rect.fromLTWH(
         el.rect.left + xOffset,
@@ -273,8 +277,10 @@ class SyncfusionPdfExporter implements PdfExporter {
         Offset(gx + gw * (1 - fold), gy + gh * fold),
         Offset(gx + gw, gy + gh * fold),
       ]);
-    g.drawPath(foldPath,
-        brush: sf.PdfSolidBrush(sf.PdfColor(0xB2, 0x3C, 0x38)));
+    g.drawPath(
+      foldPath,
+      brush: sf.PdfSolidBrush(sf.PdfColor(0xB2, 0x3C, 0x38)),
+    );
 
     final textLeft = gx + gw + r.height * 0.2;
     final maxW = r.right - textLeft - 8;
@@ -282,11 +288,13 @@ class SyncfusionPdfExporter implements PdfExporter {
       final fontSize = (r.height * 0.32).clamp(9.0, 14.0);
       g.drawString(
         el.name,
-        sf.PdfStandardFont(sf.PdfFontFamily.helvetica, fontSize,
-            style: sf.PdfFontStyle.bold),
+        sf.PdfStandardFont(
+          sf.PdfFontFamily.helvetica,
+          fontSize,
+          style: sf.PdfFontStyle.bold,
+        ),
         brush: sf.PdfSolidBrush(sf.PdfColor(0x2B, 0x2B, 0x2B)),
-        bounds: Rect.fromLTWH(
-            textLeft, r.top, maxW, r.height),
+        bounds: Rect.fromLTWH(textLeft, r.top, maxW, r.height),
         format: sf.PdfStringFormat(
           alignment: sf.PdfTextAlignment.left,
           lineAlignment: sf.PdfVerticalAlignment.middle,
@@ -371,64 +379,63 @@ class SyncfusionPdfExporter implements PdfExporter {
     }
   }
 
+  /// Per-(family,size,bold,italic) standard-font cache for run fragments.
+  final _runFontCache = <String, sf.PdfStandardFont>{};
+
+  sf.PdfStandardFont _fontForRun(TextRun r) {
+    final key = '${r.fontFamily}|${r.fontSize}|${r.bold}|${r.italic}';
+    return _runFontCache[key] ??= () {
+      final family = switch (r.fontFamily) {
+        'serif' => sf.PdfFontFamily.timesRoman,
+        'mono' => sf.PdfFontFamily.courier,
+        _ => sf.PdfFontFamily.helvetica,
+      };
+      final styles = <sf.PdfFontStyle>[
+        if (r.bold) sf.PdfFontStyle.bold,
+        if (r.italic) sf.PdfFontStyle.italic,
+      ];
+      return styles.isEmpty
+          ? sf.PdfStandardFont(family, r.fontSize)
+          : sf.PdfStandardFont(family, r.fontSize, multiStyle: styles);
+    }();
+  }
+
+  /// Draws rich text **per styled run fragment**: the fragments (and thus
+  /// line breaks, wrapping, and alignment) come from the exact same
+  /// `TextPainter` layout the on-screen painter uses (`placedRunFragments`),
+  /// and each fragment is drawn with its own font/size/style/color — so
+  /// mixed-style boxes (rich paste, per-range styling) export faithfully
+  /// instead of collapsing to the box's base style.
   void _drawText(sf.PdfGraphics g, TextElement el, double xOffset) {
     if (el.text.trim().isEmpty) return;
+    final fragments = placedRunFragments(el);
+    if (fragments.isEmpty) return;
 
-    final family = switch (el.fontFamily) {
-      'serif' => sf.PdfFontFamily.timesRoman,
-      'mono' => sf.PdfFontFamily.courier,
-      _ => sf.PdfFontFamily.helvetica,
-    };
-    final styles = <sf.PdfFontStyle>[
-      if (el.bold) sf.PdfFontStyle.bold,
-      if (el.italic) sf.PdfFontStyle.italic,
-    ];
-    final font = styles.isEmpty
-        ? sf.PdfStandardFont(family, el.fontSize)
-        : sf.PdfStandardFont(family, el.fontSize, multiStyle: styles);
-
-    final format = sf.PdfStringFormat(
-      alignment: switch (el.align) {
-        TextAlignOption.center => sf.PdfTextAlignment.center,
-        TextAlignOption.right => sf.PdfTextAlignment.right,
-        _ => sf.PdfTextAlignment.left,
-      },
-      lineSpacing: el.fontSize * 0.3, // approximates the painter's 1.3 height
-    );
-
-    final rect = Rect.fromLTWH(
-      el.rect.left + xOffset,
-      el.rect.top,
-      el.rect.width,
-      el.rect.height,
-    );
+    void drawAll(double ox, double oy) {
+      for (final f in fragments) {
+        // The screen line box is 1.3× the font size with the glyphs roughly
+        // centered; PDF draws from the glyph top, so nudge down to line the
+        // tops up.
+        final y = oy + f.offset.dy + f.run.fontSize * 0.15;
+        g.drawString(
+          f.text,
+          _fontForRun(f.run),
+          brush: sf.PdfSolidBrush(_pdfColor(f.run.color)),
+          // Zero-size bounds = draw unclipped from this point.
+          bounds: Rect.fromLTWH(ox + f.offset.dx, y, 0, 0),
+        );
+      }
+    }
 
     if (el.rotation != 0) {
       final state = g.save();
-      final cx = rect.center.dx, cy = rect.center.dy;
+      final cx = el.rect.center.dx + xOffset, cy = el.rect.center.dy;
       g.translateTransform(cx, cy);
       g.rotateTransform(el.rotation * 180 / 3.141592653589793);
-      g.drawString(
-        el.text,
-        font,
-        brush: sf.PdfSolidBrush(_pdfColor(el.color)),
-        bounds: Rect.fromLTWH(
-          -rect.width / 2,
-          -rect.height / 2,
-          rect.width,
-          rect.height,
-        ),
-        format: format,
-      );
+      drawAll(-el.rect.width / 2, -el.rect.height / 2);
       g.restore(state);
     } else {
-      g.drawString(
-        el.text,
-        font,
-        brush: sf.PdfSolidBrush(_pdfColor(el.color)),
-        bounds: rect,
-        format: format,
-      );
+      drawAll(el.rect.left + xOffset, el.rect.top);
     }
   }
 

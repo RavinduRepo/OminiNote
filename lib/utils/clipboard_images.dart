@@ -16,8 +16,9 @@ class ClipboardImages {
     final clipboard = SystemClipboard.instance;
     if (clipboard == null) return false;
     final isJpeg = bytes.length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8;
-    final item = DataWriterItem(suggestedName: isJpeg ? 'image.jpg' : 'image.png')
-      ..add(isJpeg ? Formats.jpeg(bytes) : Formats.png(bytes));
+    final item = DataWriterItem(
+      suggestedName: isJpeg ? 'image.jpg' : 'image.png',
+    )..add(isJpeg ? Formats.jpeg(bytes) : Formats.png(bytes));
     await clipboard.write([item]);
     return true;
   }
@@ -40,20 +41,48 @@ class ClipboardImages {
     for (final format in formats) {
       if (!reader.canProvide(format)) continue;
       final completer = Completer<Uint8List?>();
-      reader.getFile(
-        format,
-        (file) async {
-          try {
-            completer.complete(await file.readAll());
-          } catch (_) {
-            completer.complete(null);
-          }
-        },
-        onError: (_) => completer.complete(null),
-      );
+      reader.getFile(format, (file) async {
+        try {
+          completer.complete(await file.readAll());
+        } catch (_) {
+          completer.complete(null);
+        }
+      }, onError: (_) => completer.complete(null));
       final bytes = await completer.future;
       if (bytes != null && bytes.isNotEmpty) return bytes;
     }
     return null;
+  }
+}
+
+/// OS-clipboard HTML interop (same `super_clipboard` plumbing as
+/// [ClipboardImages]). Rich text copied from browsers/Word/OneNote rides the
+/// clipboard as an HTML flavor alongside the plain-text one — reading it is
+/// what lets paste keep formatting.
+class ClipboardHtml {
+  const ClipboardHtml._();
+
+  /// The clipboard's HTML flavor, or null when the source app only offered
+  /// plain text (or no clipboard access on this platform).
+  static Future<String?> read() async {
+    final clipboard = SystemClipboard.instance;
+    if (clipboard == null) return null;
+    final reader = await clipboard.read();
+    if (!reader.canProvide(Formats.htmlText)) return null;
+    final html = await reader.readValue(Formats.htmlText);
+    return (html == null || html.trim().isEmpty) ? null : html;
+  }
+
+  /// Writes [html] + [plainText] together as one clipboard item, so rich
+  /// targets paste formatted text and plain targets get the fallback.
+  /// Returns false when the platform clipboard isn't available.
+  static Future<bool> write(String html, String plainText) async {
+    final clipboard = SystemClipboard.instance;
+    if (clipboard == null) return false;
+    final item = DataWriterItem()
+      ..add(Formats.htmlText(html))
+      ..add(Formats.plainText(plainText));
+    await clipboard.write([item]);
+    return true;
   }
 }

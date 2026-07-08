@@ -23,8 +23,7 @@ void main() {
 
       final decoded =
           CanvasElement.fromJson(
-                jsonDecode(jsonEncode(stroke.toJson()))
-                    as Map<String, dynamic>,
+                jsonDecode(jsonEncode(stroke.toJson())) as Map<String, dynamic>,
               )
               as StrokeElement;
 
@@ -105,6 +104,41 @@ void main() {
       expect(decoded.runs[1].bold, isTrue);
       expect(decoded.runs[1].color.toARGB32(), 0xFFD9553B);
       expect(decoded.runs[1].fontFamily, 'serif');
+    });
+
+    test('TextElement linkId (split-paste group) survives json + deepCopy', () {
+      final text = TextElement(
+        id: 'el_linked',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(0, 0, 200, 40),
+        color: const Color(0xFF000000),
+        text: 'part one',
+        linkId: 'lnk_1',
+      );
+
+      final decoded =
+          CanvasElement.fromJson(
+                jsonDecode(jsonEncode(text.toJson())) as Map<String, dynamic>,
+              )
+              as TextElement;
+      expect(decoded.linkId, 'lnk_1');
+      expect(text.deepCopy().linkId, 'lnk_1');
+
+      // Ordinary boxes stay null (and the json key is omitted).
+      final plain = TextElement(
+        id: 'el_plain',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(0, 0, 100, 40),
+        color: const Color(0xFF000000),
+        text: 'x',
+      );
+      expect(plain.toJson().containsKey('gid'), isFalse);
+      final plainBack =
+          CanvasElement.fromJson(
+                jsonDecode(jsonEncode(plain.toJson())) as Map<String, dynamic>,
+              )
+              as TextElement;
+      expect(plainBack.linkId, isNull);
     });
 
     test('legacy flat text (no runs) upgrades to a single run', () {
@@ -230,8 +264,11 @@ void main() {
         objects: [el],
       );
       final ordered = zOrderedElements(page);
-      expect(ordered.first.id, 'img1',
-          reason: 'sent-to-back image must paint before (under) ink');
+      expect(
+        ordered.first.id,
+        'img1',
+        reason: 'sent-to-back image must paint before (under) ink',
+      );
       expect(ordered.last.id, 's1');
     });
 

@@ -35,6 +35,18 @@ class SettingsService {
   /// shell, or auto-detect from window width.
   final ValueNotifier<LayoutMode> layoutMode = ValueNotifier(LayoutMode.auto);
 
+  /// Draw with a finger (touch) in addition to stylus/mouse — for when no pen
+  /// is at hand. While on, one finger draws and two-finger gestures still
+  /// pan/zoom. Device-local (never synced); toggled from the canvas overflow
+  /// menu.
+  bool fingerDraw = false;
+
+  Future<void> setFingerDraw(bool value) async {
+    if (fingerDraw == value) return;
+    fingerDraw = value;
+    await _persist();
+  }
+
   // ── Sync-related fields ─────────────────────────────────────────────────
 
   /// Stable identifier for this installation, generated once and persisted.
@@ -87,8 +99,9 @@ class SettingsService {
     Map<String, dynamic> data = {};
     if (await _settingsFile.exists()) {
       try {
-        data = jsonDecode(await _settingsFile.readAsString())
-            as Map<String, dynamic>;
+        data =
+            jsonDecode(await _settingsFile.readAsString())
+                as Map<String, dynamic>;
       } catch (_) {
         // Corrupt/partial settings file — fall back to defaults.
       }
@@ -96,6 +109,7 @@ class SettingsService {
 
     themeMode.value = _parseThemeMode(data['themeMode']);
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
+    fingerDraw = data['fingerDraw'] == true;
     if (data['defaultPageBackground'] is Map<String, dynamic>) {
       defaultPageBackground.value = PageBackground.fromJson(
         data['defaultPageBackground'] as Map<String, dynamic>,
@@ -111,8 +125,9 @@ class SettingsService {
     final lastSyncStr = data['lastSyncAt'] as String?;
     lastSyncAt = lastSyncStr != null ? DateTime.tryParse(lastSyncStr) : null;
     if (data['canvasViewports'] is Map<String, dynamic>) {
-      _canvasViewports =
-          Map<String, dynamic>.from(data['canvasViewports'] as Map);
+      _canvasViewports = Map<String, dynamic>.from(
+        data['canvasViewports'] as Map,
+      );
     }
 
     // Persist device ID if it was just generated.
@@ -152,6 +167,7 @@ class SettingsService {
       jsonEncode({
         'themeMode': themeMode.value.name,
         'layoutMode': layoutMode.value.name,
+        'fingerDraw': fingerDraw,
         'defaultPageBackground': defaultPageBackground.value.toJson(),
         'deviceId': deviceId,
         'driveChangesToken': driveChangesToken,
