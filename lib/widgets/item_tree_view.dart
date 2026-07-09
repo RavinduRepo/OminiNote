@@ -36,7 +36,10 @@ class ItemTreeView<T> extends StatefulWidget {
   final String Function(T) nameOf;
   final int? Function(T) colorOf;
   final String Function(T) idOf;
-  final IconData leafIcon;
+
+  /// Icon drawn on each leaf row, or null to draw no icon (leaf rows already
+  /// carry a colored identity pill, so an icon is optional).
+  final IconData? leafIcon;
 
   final String? selectedId;
   final bool dense;
@@ -80,7 +83,7 @@ class ItemTreeView<T> extends StatefulWidget {
     required this.nameOf,
     required this.colorOf,
     required this.idOf,
-    required this.leafIcon,
+    this.leafIcon,
     required this.selectedId,
     required this.onOpen,
     required this.onRenameLeaf,
@@ -300,7 +303,7 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
   ) {
     final theme = Theme.of(context);
     String label;
-    IconData icon;
+    IconData? icon;
     if (node is FolderNode) {
       label = node.name;
       icon = Icons.folder_outlined;
@@ -328,8 +331,10 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16, color: palette.accent),
-            const SizedBox(width: 8),
+            if (icon != null) ...[
+              Icon(icon, size: 16, color: palette.accent),
+              const SizedBox(width: 8),
+            ],
             Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
           ],
         ),
@@ -371,12 +376,14 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
                 ),
               ),
               const SizedBox(width: 9),
-              Icon(
-                widget.leafIcon,
-                size: 15,
-                color: selected ? palette.accent : palette.textDim,
-              ),
-              const SizedBox(width: 8),
+              if (widget.leafIcon != null) ...[
+                Icon(
+                  widget.leafIcon,
+                  size: 15,
+                  color: selected ? palette.accent : palette.textDim,
+                ),
+                const SizedBox(width: 8),
+              ],
               Expanded(
                 child: Text(
                   widget.nameOf(item),

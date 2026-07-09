@@ -268,7 +268,7 @@ class _SectionScreenState extends State<SectionScreen> {
                         nameOf: (c) => c.name,
                         colorOf: (c) => c.color,
                         idOf: (c) => c.id,
-                        leafIcon: Icons.crop_portrait,
+                        // No leaf icon — the colored identity pill is enough.
                         selectedId: null,
                         onOpen: _openCanvas,
                         onRenameLeaf: _renameCanvas,

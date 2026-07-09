@@ -153,14 +153,17 @@ class SettingsService {
   }
 
   /// The actual brightness in use right now, resolving System to the platform.
-  Brightness get effectiveBrightness => switch (themeMode.value) {
-    ThemeMode.light => Brightness.light,
-    ThemeMode.dark => Brightness.dark,
-    _ => WidgetsBinding
-          .instance
-          .platformDispatcher
-          .platformBrightness,
-  };
+  /// Falls back to light if the binding isn't available (e.g. unit tests that
+  /// construct a controller without a `WidgetsFlutterBinding`).
+  Brightness get effectiveBrightness {
+    if (themeMode.value == ThemeMode.light) return Brightness.light;
+    if (themeMode.value == ThemeMode.dark) return Brightness.dark;
+    try {
+      return WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    } catch (_) {
+      return Brightness.light;
+    }
+  }
 
   /// The background to seed into new pages/canvases. When [autoPageColor] is
   /// true the color tracks the theme; the user's pattern choice always applies.

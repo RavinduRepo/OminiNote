@@ -709,13 +709,31 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final session = _textEdit;
     if (session == null) return;
     final c = _controller!;
-    final attr = session.controller.styleForToolbar();
-    session.controller.defaults = attr.clone();
-    c.textFontFamily = attr.family;
-    c.textFontSize = attr.fontSize;
-    c.textBold = attr.bold;
-    c.textItalic = attr.italic;
-    c.textColor = attr.color; // text's own color slot, whatever tool is active
+    final rc = session.controller;
+    final sel = rc.selection;
+    final selectionMoved = sel != session.lastSelection;
+    session.lastSelection = sel;
+
+    // Only adopt the surrounding text's style as the typing style when the
+    // caret/selection actually moved. Applying a style to a collapsed caret
+    // preserves the selection, so this branch is skipped and the just-set
+    // typing style (`defaults`) survives to the next keystroke — the fix for
+    // "can't change style while typing".
+    if (selectionMoved) {
+      rc.defaults = rc.styleForToolbar().clone();
+    }
+
+    // Reflect the authoritative current style in the toolbar: for a collapsed
+    // caret that's the typing style (`defaults`) so a just-applied bold/size
+    // shows as active; for a range it's the range's leading style.
+    final display = (sel.isValid && sel.isCollapsed)
+        ? rc.defaults
+        : rc.styleForToolbar();
+    c.textFontFamily = display.family;
+    c.textFontSize = display.fontSize;
+    c.textBold = display.bold;
+    c.textItalic = display.italic;
+    c.textColor = display.color; // text's own color slot, whatever tool is active
     _remeasureEditing();
     c.notifyRepaint(); // refresh toolbar highlight
   }
@@ -1901,6 +1919,12 @@ class _TextEditSession {
   final TextElement before;
   final bool isNew;
   final RichTextController controller;
+
+  /// The selection at the previous editing notification. Used to tell a
+  /// caret/selection *move* (which should adopt the surrounding text's style
+  /// as the typing style) apart from a style-only change at the same caret
+  /// (which must NOT clobber the just-applied typing style).
+  TextSelection? lastSelection;
 
   _TextEditSession({
     required this.pageId,

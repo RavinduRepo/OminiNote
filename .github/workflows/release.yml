@@ -93,7 +93,13 @@ jobs:
 
       - name: Package Linux build
         run: |
-          cd build/linux/x64/release/bundle
+          BUNDLE=build/linux/x64/release/bundle
+          # Ship a desktop-launcher installer + icon inside the archive so
+          # users get an app-search entry instead of a bare binary.
+          cp packaging/linux/install.sh "$BUNDLE/install.sh"
+          chmod +x "$BUNDLE/install.sh"
+          cp assets/branding/icon_flat.png "$BUNDLE/omininote.png"
+          cd "$BUNDLE"
           tar -czf ../../../../../omininote-linux-x64.tar.gz .
 
       - uses: actions/upload-artifact@v4

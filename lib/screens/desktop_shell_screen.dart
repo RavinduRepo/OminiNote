@@ -713,7 +713,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     nameOf: (c) => c.name,
                     colorOf: (c) => c.color,
                     idOf: (c) => c.id,
-                    leafIcon: Icons.crop_portrait,
+                    // No leaf icon — the colored identity pill is enough.
                     selectedId: _selectedCanvas?.id,
                     onOpen: (c) => setState(() => _selectedCanvas = c),
                     onRenameLeaf: _renameCanvas,
