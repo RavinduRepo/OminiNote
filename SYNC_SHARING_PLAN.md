@@ -3,6 +3,19 @@
 Three related features share one foundation: **each notebook knowing its sync
 target**. Tracked here; update as phases land.
 
+## Status (updated 2026-07-10)
+
+- ✅ **Phase 0 — per-device local-only** — done & shipped.
+- ✅ **Phase 1 — sign-out safety** — done & shipped (closes the ★ must-have).
+- ⏭️ **Phase 2 — multi-account (simultaneous)** — **NEXT** (not started). See the
+  breakdown at the bottom.
+- ⬜ **Phase 3 — link sharing** — not started.
+
+**Resume here (Phase 2):** the big piece is making auth/Drive/Sync
+account-scoped. Start with the sub-plan in "Phase 2 breakdown" below and confirm
+the auth approach before writing code — it's real surgery on `AuthService` (one
+account today) and `DriveService` (one root + one index today).
+
 ```
           Notebook.syncTarget   ← foundation (small model change)
            /            \
@@ -72,3 +85,37 @@ separate, *synced* property — added then.
   share** screen (item, who shared, permission) → **Add to my notes** (copy) or
   **Open shared** (live). Shared items live in a **"Shared with me"** area on
   Home. v1 = copy (no scope risk); v2 = live edit (Picker flow / scope upgrade).
+
+## Phase 2 breakdown (start here next session)
+
+Goal: be signed into several Google accounts at once; each notebook syncs to its
+chosen account (or local-only). Current code assumes **one** account everywhere.
+
+**Confirm first (decisions before code):**
+- How to add a 2nd+ account: Android `google_sign_in` supports multiple; desktop
+  PKCE stores one refresh token today → need a **token set per account** in
+  `flutter_secure_storage` (keyed by account id).
+- Where a notebook's account lives: `Notebook.syncTarget = <account-id>`
+  (**synced** in notebooks.json, so the binding is consistent across devices) —
+  distinct from Phase 0's device-local local-only set.
+
+**Work items (rough order):**
+1. `AuthService`: from one `account` to a **list of accounts** + a "default"
+   (for new notebooks). Per-account token storage/refresh. Keep the single
+   `account` API working (compat) or migrate call sites.
+2. `DriveService`: from one root+index to **per-account instances** (each its own
+   `omininote/` root folder + `drive_index_<acct>.json` + changes token). Likely
+   a `DriveService` per account, keyed by account id.
+3. `SyncService`: route each dirty relPath / pulled file to **its notebook's
+   account's** DriveService. `notebooks.json` gets split/filtered per account
+   (each account's Drive only sees its own notebooks — like the local-only
+   filter, generalized).
+4. Model + UI: `Notebook.syncTarget = <account-id>`; a per-notebook **"Sync to…"**
+   picker (accounts + Local-only); Settings shows the list of connected accounts
+   with add/remove.
+5. Migration: existing notebooks (syncTarget null) → the first/default account.
+
+**Watch-outs:** the changes-poll + index are per-account now (multiple pollers);
+echo-suppression + `_pulling/_resyncing` guards must be per-account too, or one
+account's sync blocks another. Test the same edge cases as Phase 1 (sign-out of
+one account while others stay).
