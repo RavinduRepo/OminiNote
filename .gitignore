@@ -56,3 +56,6 @@ android/key.properties
 android/app/release.jks
 *.jks
 *.keystore
+
+# Local secrets folder (copy of all ignored credential files for easy transfer)
+SECRETS/
