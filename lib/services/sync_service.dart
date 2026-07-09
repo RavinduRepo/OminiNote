@@ -169,9 +169,25 @@ class SyncService {
     _pushing = true;
     status.value = SyncStatus.syncing;
     try {
+      // Local-only notebooks never leave the device: skip their content files
+      // and strip them from the uploaded notebooks.json.
+      final localOnly = NotebookService().localOnlyNotebookIds();
       // Snapshot so concurrent edits during the drain aren't lost.
       final pending = List<String>.from(_dirty);
       for (final rel in pending) {
+        final nbId = NotebookService().notebookIdOfRelPath(rel);
+        if (nbId != null && localOnly.contains(nbId)) {
+          _dirty.remove(rel); // content of a local-only notebook — never upload
+          continue;
+        }
+        if (rel == 'notebooks.json') {
+          // Upload the index with local-only notebooks filtered out.
+          await DriveService()
+              .uploadJson(rel, await NotebookService().syncedIndexJson());
+          _dirty.remove(rel);
+          await _saveJournal();
+          continue;
+        }
         final file = NotebookService().fileForRelPath(rel);
         if (!await file.exists()) {
           _dirty.remove(rel);
@@ -345,6 +361,14 @@ class SyncService {
   Future<bool> _pullFile(String rel, RemoteFile rf) async {
     final file = NotebookService().fileForRelPath(rel);
 
+    // A local-only notebook is disconnected from sync on this device: never
+    // apply pulled content for it (blocks the download direction). Re-enabling
+    // sync triggers a fullResync to catch up on anything missed.
+    final nbId = NotebookService().notebookIdOfRelPath(rel);
+    if (nbId != null && NotebookService().localOnlyNotebookIds().contains(nbId)) {
+      return false;
+    }
+
     if (_isAsset(rel)) {
       // Content-addressed & immutable: fetch only if we don't have it.
       if (await file.exists()) {
@@ -374,14 +398,43 @@ class SyncService {
     final result = MergeEngine.reconcile(rel, localText, remoteText);
     DriveService().recordRemote(rel, rf.id, rf.headRevisionId);
 
-    if (result.changedLocal) {
-      await NotebookService().writeAtomicPublic(file, result.content);
+    // The pulled notebooks.json must not touch notebooks this device has
+    // disconnected — restore their local entries over the merge result.
+    var content = result.content;
+    var changedLocal = result.changedLocal;
+    if (rel == 'notebooks.json') {
+      content = _preserveLocalOnly(localText, content);
+      changedLocal = content != (localText ?? '');
+    }
+
+    if (changedLocal) {
+      await NotebookService().writeAtomicPublic(file, content);
     }
     if (result.localContributed) {
       _markDirty(rel);
     }
-    _notifyOpenCanvas(rel, result.content);
-    return result.changedLocal;
+    _notifyOpenCanvas(rel, content);
+    return changedLocal;
+  }
+
+  /// Overrides every local-only notebook's entry in [mergedContent] with its
+  /// local version (or removes it if absent locally), so a pulled notebooks.json
+  /// can't change a notebook this device has disconnected from sync.
+  String _preserveLocalOnly(String? localText, String mergedContent) {
+    final localOnly = NotebookService().localOnlyNotebookIds();
+    if (localOnly.isEmpty) return mergedContent;
+    final merged = jsonDecode(mergedContent) as Map<String, dynamic>;
+    final local = localText == null
+        ? <String, dynamic>{}
+        : jsonDecode(localText) as Map<String, dynamic>;
+    for (final id in localOnly) {
+      if (local.containsKey(id)) {
+        merged[id] = local[id];
+      } else {
+        merged.remove(id);
+      }
+    }
+    return jsonEncode(merged);
   }
 
   /// Routes a pulled file to the open canvas's live listener (if any), so the

@@ -5,8 +5,10 @@ import '../models/canvas.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
+import '../services/auth_service.dart';
 import '../services/notebook_service.dart';
 import '../services/search_service.dart';
+import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
@@ -275,6 +277,38 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final items = await _service.collectNotebookExportItems(notebook);
     if (!mounted) return;
     await runTreeExport(context, items: items, fileName: notebook.name);
+  }
+
+  Future<void> _toggleSync(Notebook notebook) async {
+    final makeLocal = !SettingsService().isNotebookLocalOnly(notebook.id);
+    if (makeLocal) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Keep only on this device?'),
+          content: Text(
+            '"${notebook.name}" will stop syncing on this device — no uploads '
+            'and no changes pulled from other devices. This is a per-device '
+            'choice; other devices can still sync their own copy. Content '
+            'already on Drive stays there until you delete it.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Make local-only'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    await _service.setNotebookLocalOnly(notebook.id, makeLocal);
+    if (!makeLocal && AuthService().isSignedIn) SyncService().repair();
+    if (mounted) setState(() {});
   }
 
   Future<void> _exportSectionPdf(Section section) async {
@@ -1201,6 +1235,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               _colorNotebook(notebook);
                             case 'export':
                               _exportNotebookPdf(notebook);
+                            case 'sync':
+                              _toggleSync(notebook);
                             case 'delete':
                               _deleteNotebook(notebook);
                           }
@@ -1217,6 +1253,13 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           const PopupMenuItem(
                             value: 'export',
                             child: Text('Export to PDF'),
+                          ),
+                          PopupMenuItem(
+                            value: 'sync',
+                            child: Text(
+                                SettingsService().isNotebookLocalOnly(notebook.id)
+                                    ? 'Enable cloud sync'
+                                    : 'Make local-only'),
                           ),
                           PopupMenuItem(
                             value: 'delete',

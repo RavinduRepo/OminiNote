@@ -65,6 +65,23 @@ class SettingsService {
   /// Timestamp of the last successful sync, or null if never synced.
   DateTime? lastSyncAt;
 
+  /// Notebook ids this device keeps **local-only**: never uploaded and never
+  /// updated from Drive (sync is blocked in *both* directions for them). This
+  /// is a **per-device** decision, deliberately not synced — another device may
+  /// still sync the same notebook. Persisted in settings.json.
+  Set<String> localOnlyNotebooks = {};
+
+  bool isNotebookLocalOnly(String id) => localOnlyNotebooks.contains(id);
+
+  Future<void> setNotebookLocalOnly(String id, bool local) async {
+    if (local) {
+      if (!localOnlyNotebooks.add(id)) return;
+    } else {
+      if (!localOnlyNotebooks.remove(id)) return;
+    }
+    await _persist();
+  }
+
   /// Per-canvas last viewport (canvasId → {z, x, y}) so a canvas reopens
   /// where the user left it. Device-local by design — zoom/pan depend on this
   /// screen, so it lives in settings.json (never synced). Capped so it can't
@@ -130,6 +147,10 @@ class SettingsService {
     driveChangesToken = (data['driveChangesToken'] as String?) ?? '';
     final lastSyncStr = data['lastSyncAt'] as String?;
     lastSyncAt = lastSyncStr != null ? DateTime.tryParse(lastSyncStr) : null;
+    if (data['localOnlyNotebooks'] is List) {
+      localOnlyNotebooks =
+          Set<String>.from((data['localOnlyNotebooks'] as List).cast<String>());
+    }
     if (data['canvasViewports'] is Map<String, dynamic>) {
       _canvasViewports = Map<String, dynamic>.from(
         data['canvasViewports'] as Map,
@@ -210,6 +231,7 @@ class SettingsService {
         'deviceId': deviceId,
         'driveChangesToken': driveChangesToken,
         'lastSyncAt': lastSyncAt?.toIso8601String(),
+        'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'canvasViewports': _canvasViewports,
       }),
     );

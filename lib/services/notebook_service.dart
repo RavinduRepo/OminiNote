@@ -175,6 +175,11 @@ class NotebookService {
     await saveNotebook(nb);
   }
 
+  /// Marks a notebook local-only (or not) on **this device only**. Device-local
+  /// (settings.json), never synced — see [SettingsService.localOnlyNotebooks].
+  Future<void> setNotebookLocalOnly(String notebookId, bool local) =>
+      SettingsService().setNotebookLocalOnly(notebookId, local);
+
   Future<void> reorderNotebooks(List<String> orderedIds) async {
     final data = await _readIndex();
     final reordered = <String, dynamic>{};
@@ -1003,6 +1008,32 @@ class NotebookService {
 
   /// Relative (forward-slash) path of an absolute local path, or null if it is
   /// outside [appDir] or not a synced file.
+  /// Notebook ids this device keeps local-only (device-local decision).
+  Set<String> localOnlyNotebookIds() => SettingsService().localOnlyNotebooks;
+
+  /// The `notebooks.json` content to *upload* to Drive: the local index minus
+  /// this device's local-only notebooks (they must never leave the device).
+  Future<String> syncedIndexJson() async {
+    final data = await _readIndex();
+    final localOnly = SettingsService().localOnlyNotebooks;
+    final filtered = <String, dynamic>{};
+    for (final e in data.entries) {
+      if (localOnly.contains(e.key)) continue;
+      filtered[e.key] = e.value;
+    }
+    return jsonEncode(filtered);
+  }
+
+  /// The notebook id inside a synced relPath (`notebooks/<id>/...`), or null for
+  /// the top-level `notebooks.json` and non-notebook paths.
+  String? notebookIdOfRelPath(String rel) {
+    const prefix = 'notebooks/';
+    if (!rel.startsWith(prefix)) return null;
+    final rest = rel.substring(prefix.length);
+    final slash = rest.indexOf('/');
+    return slash == -1 ? null : rest.substring(0, slash);
+  }
+
   String? relPathOf(String absolutePath) {
     final base = appDir.path.replaceAll('\\', '/');
     final p = absolutePath.replaceAll('\\', '/');

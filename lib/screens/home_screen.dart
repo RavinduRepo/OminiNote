@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../models/notebook.dart';
+import '../services/auth_service.dart';
 import '../services/notebook_service.dart';
+import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
@@ -56,6 +58,39 @@ class _HomeScreenState extends State<HomeScreen> {
     final items = await _notebookService.collectNotebookExportItems(notebook);
     if (!mounted) return;
     await runTreeExport(context, items: items, fileName: notebook.name);
+  }
+
+  Future<void> _toggleSync(Notebook notebook) async {
+    final makeLocal = !SettingsService().isNotebookLocalOnly(notebook.id);
+    if (makeLocal) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Keep only on this device?'),
+          content: Text(
+            '"${notebook.name}" will stop syncing on this device — no uploads '
+            'and no changes pulled from other devices. This is a per-device '
+            'choice; other devices can still sync their own copy. Content '
+            'already on Drive stays there until you delete it.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Make local-only'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    await _notebookService.setNotebookLocalOnly(notebook.id, makeLocal);
+    // Re-enabling: catch up on anything missed while disconnected.
+    if (!makeLocal && AuthService().isSignedIn) SyncService().repair();
+    _loadNotebooks();
   }
 
   Future<void> _renameNotebook(Notebook notebook) async {
@@ -198,6 +233,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               onRename: () => _renameNotebook(notebook),
                               onColor: () => _colorNotebook(notebook),
                               onExport: () => _exportNotebookPdf(notebook),
+                              onToggleSync: () => _toggleSync(notebook),
                               onDelete: () => _deleteNotebook(notebook),
                             ),
                           ),
@@ -221,6 +257,7 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
   final VoidCallback onExport;
+  final VoidCallback onToggleSync;
   final VoidCallback onDelete;
 
   const _NotebookRow({
@@ -229,6 +266,7 @@ class _NotebookRow extends StatelessWidget {
     required this.onRename,
     required this.onColor,
     required this.onExport,
+    required this.onToggleSync,
     required this.onDelete,
   });
 
@@ -304,6 +342,8 @@ class _NotebookRow extends StatelessWidget {
                 onRename: onRename,
                 onColor: onColor,
                 onExport: onExport,
+                onToggleSync: onToggleSync,
+                isLocalOnly: SettingsService().isNotebookLocalOnly(notebook.id),
                 onDelete: onDelete,
               ),
             ],
@@ -318,11 +358,15 @@ class _RowMenu extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
   final VoidCallback onExport;
+  final VoidCallback onToggleSync;
+  final bool isLocalOnly;
   final VoidCallback onDelete;
   const _RowMenu({
     required this.onRename,
     required this.onColor,
     required this.onExport,
+    required this.onToggleSync,
+    required this.isLocalOnly,
     required this.onDelete,
   });
 
@@ -335,6 +379,7 @@ class _RowMenu extends StatelessWidget {
         if (value == 'rename') onRename();
         if (value == 'color') onColor();
         if (value == 'export') onExport();
+        if (value == 'sync') onToggleSync();
         if (value == 'delete') onDelete();
       },
       itemBuilder: (context) => [
@@ -365,6 +410,19 @@ class _RowMenu extends StatelessWidget {
               Icon(Icons.picture_as_pdf_outlined, size: 18),
               SizedBox(width: 10),
               Text('Export to PDF'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'sync',
+          child: Row(
+            children: [
+              Icon(
+                isLocalOnly ? Icons.cloud_upload_outlined : Icons.cloud_off_outlined,
+                size: 18,
+              ),
+              const SizedBox(width: 10),
+              Text(isLocalOnly ? 'Enable cloud sync' : 'Make local-only'),
             ],
           ),
         ),
