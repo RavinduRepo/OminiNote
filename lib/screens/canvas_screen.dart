@@ -7,8 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../utils/clipboard_images.dart';
 import '../utils/html_text.dart';
+import '../utils/url_text.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
@@ -486,7 +488,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
       // moves the current selection (handled by endToolGesture).
       if (c.tool == CanvasTool.lasso && !moved) {
         c.cancelToolGesture();
-        _lassoTap(e.localPosition, e.kind);
+        final url = _urlAt(e.localPosition);
+        if (url != null) {
+          _openUrl(url);
+        } else {
+          _lassoTap(e.localPosition, e.kind);
+        }
         return;
       }
 
@@ -496,6 +503,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     // Taps that didn't start a gesture.
     if (!moved && e.kind != PointerDeviceKind.trackpad) {
+      // A tap directly on a link opens it, regardless of tool (the blue
+      // underlined text is the affordance). Tapping elsewhere falls through.
+      final url = _urlAt(e.localPosition);
+      if (url != null) {
+        _openUrl(url);
+        return;
+      }
       if (c.tool == CanvasTool.text) {
         // In the text tool a tap on an attachment opens it (single tap);
         // otherwise edit an existing box / create a new one.
@@ -567,6 +581,32 @@ class _CanvasScreenState extends State<CanvasScreen> {
       }
     }
     return null;
+  }
+
+  /// The link URL under a screen position, if the tap landed on a link run in
+  /// the topmost text box there (else null).
+  String? _urlAt(Offset screenPos) {
+    final c = _controller!;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return null;
+    final page = c.pages[pageLayout.pageId]!;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    for (final el in [...page.strokes, ...page.objects].reversed) {
+      if (el is TextElement && el.rect.inflate(4).contains(local)) {
+        return urlAtOffset(el, local - el.rect.topLeft);
+      }
+    }
+    return null;
+  }
+
+  /// Opens [url] in the system browser. Returns true if a tap was consumed.
+  Future<void> _openUrl(String url) async {
+    final ok = await launchUrl(
+      Uri.parse(url),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!ok && mounted) _toast("Couldn't open $url");
   }
 
   /// Topmost attachment chip under a screen position.
@@ -776,7 +816,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
     c.setEditing(null, null);
 
     final el = session.element;
-    el.runs = runsFromController(rc);
+    // Auto-link URLs in the committed text (splits runs at URL boundaries).
+    el.runs = linkifyRuns(runsFromController(rc));
     final page = c.pages[session.pageId];
     if (page != null) {
       el.rect = autoTextRect(el, page.width - el.rect.left - 6);

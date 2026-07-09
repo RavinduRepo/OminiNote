@@ -6,6 +6,12 @@ import 'canvas_screen.dart';
 import 'notebook_screen.dart';
 import 'section_screen.dart';
 
+/// Observes route pushes/pops so a mobile list screen can (re)glow a search
+/// target when it becomes visible again (e.g. popping back from an opened
+/// canvas to the section list). Registered in [MaterialApp.navigatorObservers].
+final RouteObserver<PageRoute<dynamic>> searchRouteObserver =
+    RouteObserver<PageRoute<dynamic>>();
+
 /// Builds the search index and opens the search screen. Call from a search icon
 /// on any list screen (or a Ctrl/Cmd+K shortcut on desktop).
 ///
@@ -121,11 +127,27 @@ class _SearchScreenState extends State<_SearchScreen> {
       return;
     }
     // Mobile: rebuild the natural back stack from the root so Back walks up the
-    // hierarchy, exactly as if the user had navigated there by hand.
+    // hierarchy, exactly as if the user had navigated there by hand. Each list
+    // screen glows the child that leads to the target (or the target itself, for
+    // a super-section), so popping back highlights the trail — desktop parity.
     navigator.popUntil((route) => route.isFirst);
-    navigator.push(fadeThroughRoute(NotebookScreen(notebook: r.notebook)));
+    // The notebook screen glows the section it leads into, or a notebook-level
+    // super-section that is itself the target.
+    final notebookGlow = r.kind == SearchKind.superSection && r.section == null
+        ? r.folderId
+        : r.section?.id;
+    navigator.push(fadeThroughRoute(
+      NotebookScreen(notebook: r.notebook, glowId: notebookGlow),
+    ));
     if (r.section != null) {
-      navigator.push(fadeThroughRoute(SectionScreen(section: r.section!)));
+      // The section screen glows the canvas it opens, or a section-level
+      // super-section that is itself the target.
+      final sectionGlow = r.kind == SearchKind.superSection
+          ? r.folderId
+          : r.canvas?.id;
+      navigator.push(fadeThroughRoute(
+        SectionScreen(section: r.section!, glowId: sectionGlow),
+      ));
     }
     if (r.canvas != null) {
       navigator.push(fadeThroughRoute(

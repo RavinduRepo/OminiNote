@@ -2,7 +2,7 @@ import 'dart:typed_data';
 import 'dart:ui' show Color, Offset, Rect, Size;
 import 'package:perfect_freehand/perfect_freehand.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
-import '../canvas/text_measure.dart' show placedRunFragments;
+import '../canvas/text_measure.dart' show placedRunFragments, kLinkColor;
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
@@ -417,13 +417,27 @@ class SyncfusionPdfExporter implements PdfExporter {
         // centered; PDF draws from the glyph top, so nudge down to line the
         // tops up.
         final y = oy + f.offset.dy + f.run.fontSize * 0.15;
+        final isLink = f.run.link != null;
+        final color = isLink ? _pdfColor(kLinkColor) : _pdfColor(f.run.color);
+        final font = _fontForRun(f.run);
+        final x = ox + f.offset.dx;
         g.drawString(
           f.text,
-          _fontForRun(f.run),
-          brush: sf.PdfSolidBrush(_pdfColor(f.run.color)),
+          font,
+          brush: sf.PdfSolidBrush(color),
           // Zero-size bounds = draw unclipped from this point.
-          bounds: Rect.fromLTWH(ox + f.offset.dx, y, 0, 0),
+          bounds: Rect.fromLTWH(x, y, 0, 0),
         );
+        // Underline link runs to match the on-screen link styling.
+        if (isLink) {
+          final w = font.measureString(f.text).width;
+          final uy = y + f.run.fontSize * 1.05;
+          g.drawLine(
+            sf.PdfPen(color, width: 0.6),
+            Offset(x, uy),
+            Offset(x + w, uy),
+          );
+        }
       }
     }
 

@@ -14,16 +14,23 @@ const double kTextBoxPad = 4.0;
   _ => (null, const <String>[]),
 };
 
+/// Link runs render in a fixed blue + underline (conventional, theme-neutral —
+/// stroke/text colors are absolute in this app), overriding the run's own color.
+const Color kLinkColor = Color(0xFF2563EB);
+
 /// Style for a single styled run.
 TextStyle textStyleForRun(TextRun r) {
   final (family, fallback) = fontFamilyResolve(r.fontFamily);
+  final isLink = r.link != null;
   return TextStyle(
-    color: r.color,
+    color: isLink ? kLinkColor : r.color,
     fontSize: r.fontSize,
     fontFamily: family,
     fontFamilyFallback: fallback,
     fontWeight: r.bold ? FontWeight.w700 : FontWeight.w400,
     fontStyle: r.italic ? FontStyle.italic : FontStyle.normal,
+    decoration: isLink ? TextDecoration.underline : null,
+    decorationColor: isLink ? kLinkColor : null,
     height: 1.3,
   );
 }
@@ -41,6 +48,30 @@ TextStyle textStyleForElement(TextElement el) {
     fontStyle: el.italic ? FontStyle.italic : FontStyle.normal,
     height: 1.3,
   );
+}
+
+/// The link URL at [localOffset] (relative to the box's top-left) within [el],
+/// or null if that point isn't on a link run. Uses the same layout the painter
+/// does, so it lines up with what's drawn.
+String? urlAtOffset(TextElement el, Offset localOffset) {
+  if (el.runs.every((r) => r.link == null)) return null;
+  final tp = TextPainter(
+    text: textSpanForElement(el),
+    textDirection: TextDirection.ltr,
+    textAlign: switch (el.align) {
+      TextAlignOption.center => TextAlign.center,
+      TextAlignOption.right => TextAlign.right,
+      _ => TextAlign.left,
+    },
+  )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+  final idx = tp.getPositionForOffset(localOffset).offset;
+  var acc = 0;
+  for (final r in el.runs) {
+    final end = acc + r.text.length;
+    if (idx < end) return r.link;
+    acc = end;
+  }
+  return el.runs.isNotEmpty ? el.runs.last.link : null;
 }
 
 /// The element's content as a multi-style span (one child per run).

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'screens/desktop_shell_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/note_search.dart';
 import 'services/auth_service.dart';
 import 'services/drive_service.dart';
 import 'services/notebook_service.dart';
@@ -80,6 +81,7 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
           theme: AppTheme.light(),
           darkTheme: AppTheme.dark(),
           themeMode: themeMode,
+          navigatorObservers: [searchRouteObserver],
           home: const _RootRouter(),
         );
       },

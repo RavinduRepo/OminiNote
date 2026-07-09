@@ -256,6 +256,10 @@ class TextRun {
   /// 'sans' | 'serif' | 'mono'.
   String fontFamily;
 
+  /// When set, this run is a hyperlink to this (normalized) URL — rendered
+  /// underlined in a link color and tappable. Auto-detected from the text.
+  String? link;
+
   TextRun({
     required this.text,
     required this.fontSize,
@@ -263,6 +267,7 @@ class TextRun {
     required this.italic,
     required this.color,
     required this.fontFamily,
+    this.link,
   });
 
   TextRun clone() => TextRun(
@@ -272,6 +277,7 @@ class TextRun {
     italic: italic,
     color: color,
     fontFamily: fontFamily,
+    link: link,
   );
 
   Map<String, dynamic> toJson() => {
@@ -281,6 +287,7 @@ class TextRun {
     'i': italic,
     'c': color.toARGB32(),
     'f': fontFamily,
+    if (link != null) 'l': link,
   };
 
   factory TextRun.fromJson(Map<String, dynamic> j) => TextRun(
@@ -290,6 +297,7 @@ class TextRun {
     italic: j['i'] ?? false,
     color: Color(j['c'] ?? 0xFF000000),
     fontFamily: j['f'] ?? 'sans',
+    link: j['l'] as String?,
   );
 }
 

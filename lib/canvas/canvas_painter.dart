@@ -260,7 +260,41 @@ class CanvasPainter extends CustomPainter {
       canvas.translate(-c.dx, -c.dy);
     }
     painter.paint(canvas, el.rect.topLeft);
+
+    // Editable-space hint: a link-only box carries an auto-appended trailing
+    // space so there's a spot to tap for editing/moving (tapping the link text
+    // itself opens the URL). Draw a faint underline under that space so the
+    // spot is visible, like a fill-in blank.
+    if (_hasTrailingEditSpace(el)) {
+      final len = el.text.length;
+      final start =
+          painter.getOffsetForCaret(TextPosition(offset: len - 1), Rect.zero);
+      final end =
+          painter.getOffsetForCaret(TextPosition(offset: len), Rect.zero);
+      final x0 = el.rect.left + start.dx;
+      final w = math.max(end.dx - start.dx, 10.0);
+      final y = el.rect.top + start.dy + el.runs.last.fontSize * 1.15;
+      canvas.drawLine(
+        Offset(x0, y),
+        Offset(x0 + w, y),
+        Paint()
+          ..color = const Color(0x66888888)
+          ..strokeWidth = 1.2,
+      );
+    }
     canvas.restore();
+  }
+
+  /// True when [el] is a link-only box with the auto-appended trailing space
+  /// (every run but the last is a link, and the last is that plain space).
+  bool _hasTrailingEditSpace(TextElement el) {
+    final runs = el.runs;
+    if (runs.length < 2) return false;
+    if (runs.last.link != null || runs.last.text != ' ') return false;
+    for (var i = 0; i < runs.length - 1; i++) {
+      if (runs[i].link == null) return false;
+    }
+    return true;
   }
 
   void _paintImage(Canvas canvas, ImageElement el) {

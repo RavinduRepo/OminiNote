@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
@@ -17,21 +18,56 @@ import 'section_screen.dart';
 class NotebookScreen extends StatefulWidget {
   final Notebook notebook;
 
-  const NotebookScreen({super.key, required this.notebook});
+  /// A section / super-section id to briefly glow when reached via search (so
+  /// the mobile flow highlights the target like the desktop shell does).
+  final String? glowId;
+
+  const NotebookScreen({super.key, required this.notebook, this.glowId});
 
   @override
   State<NotebookScreen> createState() => _NotebookScreenState();
 }
 
-class _NotebookScreenState extends State<NotebookScreen> {
+class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
   final _service = NotebookService();
   Notebook? _notebook;
   Map<String, Section> _sections = {};
+  String? _glowId;
+  Timer? _glowTimer;
 
   @override
   void initState() {
     super.initState();
     _reload();
+    if (widget.glowId != null) _startGlow();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) searchRouteObserver.subscribe(this, route);
+  }
+
+  @override
+  void didPopNext() {
+    // A screen above was popped and we're visible again — re-glow the target.
+    if (widget.glowId != null) _startGlow();
+  }
+
+  void _startGlow() {
+    _glowTimer?.cancel();
+    setState(() => _glowId = widget.glowId);
+    _glowTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted) setState(() => _glowId = null);
+    });
+  }
+
+  @override
+  void dispose() {
+    _glowTimer?.cancel();
+    searchRouteObserver.unsubscribe(this);
+    super.dispose();
   }
 
   Future<void> _reload() async {
@@ -259,6 +295,7 @@ class _NotebookScreenState extends State<NotebookScreen> {
                 idOf: (s) => s.id,
                 leafIcon: Icons.description_outlined,
                 selectedId: null,
+                glowId: _glowId,
                 onOpen: _openSection,
                 onRenameLeaf: _renameSection,
                 onColorLeaf: _colorSection,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/canvas.dart';
 import '../models/section.dart';
@@ -17,21 +18,55 @@ import 'note_search.dart';
 class SectionScreen extends StatefulWidget {
   final Section section;
 
-  const SectionScreen({super.key, required this.section});
+  /// A canvas / super-section id to briefly glow when reached via search.
+  final String? glowId;
+
+  const SectionScreen({super.key, required this.section, this.glowId});
 
   @override
   State<SectionScreen> createState() => _SectionScreenState();
 }
 
-class _SectionScreenState extends State<SectionScreen> {
+class _SectionScreenState extends State<SectionScreen> with RouteAware {
   final _service = NotebookService();
   Section? _section;
   Map<String, Canvas> _canvases = {};
+  String? _glowId;
+  Timer? _glowTimer;
 
   @override
   void initState() {
     super.initState();
     _reload();
+    if (widget.glowId != null) _startGlow();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) searchRouteObserver.subscribe(this, route);
+  }
+
+  @override
+  void didPopNext() {
+    // Popped back from an opened canvas — re-glow the canvas we came from.
+    if (widget.glowId != null) _startGlow();
+  }
+
+  void _startGlow() {
+    _glowTimer?.cancel();
+    setState(() => _glowId = widget.glowId);
+    _glowTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted) setState(() => _glowId = null);
+    });
+  }
+
+  @override
+  void dispose() {
+    _glowTimer?.cancel();
+    searchRouteObserver.unsubscribe(this);
+    super.dispose();
   }
 
   Future<void> _reload() async {
@@ -276,6 +311,7 @@ class _SectionScreenState extends State<SectionScreen> {
                         idOf: (c) => c.id,
                         // No leaf icon — the colored identity pill is enough.
                         selectedId: null,
+                        glowId: _glowId,
                         onOpen: _openCanvas,
                         onRenameLeaf: _renameCanvas,
                         onColorLeaf: _colorCanvas,

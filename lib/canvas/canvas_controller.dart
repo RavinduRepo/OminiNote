@@ -12,6 +12,7 @@ import '../services/render_cache.dart';
 import '../services/settings_service.dart';
 import '../services/sync/merge_engine.dart';
 import '../services/sync_service.dart';
+import '../utils/url_text.dart';
 import 'canvas_layout.dart';
 import 'rich_text_controller.dart';
 import 'text_measure.dart';
@@ -1723,9 +1724,11 @@ class CanvasController extends ChangeNotifier {
   /// right within the same row when the target row already flows
   /// horizontally, else as new rows directly below — all one undoable op.
   /// Returns the number of boxes created.
-  int insertRunsAsText(String pageId, List<TextRun> runs) {
+  int insertRunsAsText(String pageId, List<TextRun> runsIn) {
     final page = pages[pageId];
-    if (page == null || runs.isEmpty) return 0;
+    if (page == null || runsIn.isEmpty) return 0;
+    // Auto-link URLs in pasted/inserted text.
+    final runs = linkifyRuns(runsIn);
     const margin = 24.0;
     final maxW = page.width * 0.85;
     final left = (page.width - maxW) / 2;
