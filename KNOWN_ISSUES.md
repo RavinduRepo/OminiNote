@@ -6,6 +6,8 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Cross-platform
 
+- **macOS bundle ID still uses `com.example.omininote`.** The Android package was renamed to `io.github.ravinduRepo.omininote` but the macOS bundle ID in `macos/Runner/Configs/AppInfo.xcconfig` (and the `keychain-access-groups` entitlement) still references the old name. This is harmless for local testing but should be updated for consistency before any Mac App Store submission. Changing the macOS bundle ID also requires regenerating the entitlements and any associated provisioning profile.
+
 - **macOS sandbox entitlements are still missing file access.** `macos/Runner/DebugProfile.entitlements` and `Release.entitlements` enable `com.apple.security.app-sandbox` but grant no file-access entitlement (e.g. `com.apple.security.files.user-selected.read-only`). PDF/image picking and reads may silently fail in macOS release builds without this. (`keychain-access-groups` was added 07/09/26 to fix `flutter_secure_storage` failing with `-34018 "A required entitlement isn't present"` on Google sign-in — file access is the remaining gap.)
 
 ### Canvas v1 limitations (deliberate scope cuts — see CANVAS_SPEC.md §17/§19)
@@ -21,7 +23,7 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Cloud sync (Drive, v2)
 
-- **Setup prerequisites (not code — Google Cloud config).** Sync needs OAuth clients in the Cloud project: a **Desktop** client (id/secret embedded in `auth_service.dart`) and an **Android** client registered for package `com.example.omininote` + the signing SHA-1 (debug SHA-1 for `flutter run`, release SHA-1 for the store build). The consent screen must list the `drive.file` and `userinfo.email` scopes. While the consent screen is in **Testing**, refresh tokens die after 7 days and only allow-listed test users can sign in — publish before beta (plan §7.3).
+- **Setup prerequisites (not code — Google Cloud config).** Sync needs OAuth clients in the Cloud project: a **Desktop** client (id/secret in `.dart_defines.json`) and an **Android** client registered for package `io.github.ravinduRepo.omininote` + the signing SHA-1 (debug SHA-1 per dev machine for `flutter run`, release SHA-1 `34:48:37:E1:...` for store builds). Each dev machine needs its own Android debug OAuth client registered with its local debug keystore SHA-1. The consent screen is now **In production** with `drive.file` classified as non-sensitive — no user cap, any Gmail can sign in. Branding verification is pending (blocked on `github.io` shared-domain limitation; cosmetic only — app works without it).
 - **Open-canvas live merge is now wired** (07/07/26 — see Fixed). Remaining window: two devices editing the *same page* within one poll cycle merge via union on the next round trip — ink is never lost, but LWW-resolved fields (an element's position, page background) can briefly flip-flop before settling.
 - **Structural edits are last-writer-wins, not CRDT.** `section.json`/`canvas.json` resolve by `(rev, updatedAt, deviceId)`. Page *ink* is always union-merged and never lost, but if the **same canvas** has pages added/reordered offline on two devices, one device's structural layout wins (the losing side's new page *files* survive on disk/Drive but may be unreferenced). `notebooks.json` avoids this by union-merging per notebook id. Fractional page indexing (plan §1.5) would remove this limitation.
 - **No Conflicts Inbox / conflicted copies yet** (plan §3.4). A delete that races an edit resolves by the `(rev,updatedAt,deviceId)` tuple rather than restoring + prompting.
@@ -37,6 +39,44 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 - **IDs are timestamp-based** (`millis + 3-digit sequence` / `micros + sequence`) — fine in practice, but not UUIDs.
 - **Syncfusion licensing**: export builds on `syncfusion_flutter_pdf` under the Community License (user-approved 07/06/26). If the project outgrows eligibility, swap via the `PdfExporter` interface.
+
+### Distribution / installation
+
+- **Linux release build has no desktop launcher entry.** The GitHub release `.tar.gz` extracts to a plain bundle directory with no `.desktop` file or icon. Users must manually create `~/.local/share/applications/omininote.desktop` pointing at the extracted binary and copy an icon from `assets/branding/`. Consider shipping a small install script in the archive, or packaging as Flatpak/AppImage which handle this automatically.
+
+- **macOS release build is unsigned.** Distributed `.app` bundles trigger Gatekeeper ("Apple could not verify…") because there is no Developer ID certificate. Users must run `xattr -cr OminiNote.app` or use System Settings → Privacy & Security → Open Anyway on first launch. Resolving requires an Apple Developer account ($99/yr) for Developer ID signing. Mac App Store distribution requires a separate Paid distribution certificate.
+
+- **Android: debug and release builds install as separate apps** if the debug build was ever installed before the package rename (old `com.example.omininote` stays alongside new `io.github.ravinduRepo.omininote`). Users upgrading from a pre-rename debug build must manually uninstall the old one.
+
+### Features — planned
+
+- **[★ MUST HAVE] Sign-out safety + per-notebook sync control.** Currently deleting a notebook while signed out then signing back in propagates the deletion to Drive. Needed: (1) warn on sign-out if any notebooks have unsynced local changes; (2) optionally remove local copies of cloud-synced notebooks on sign-out to prevent stale-delete accidents; (3) per-notebook toggle: Sync / Local-only / choose which account. This also lays the groundwork for multi-account sync.
+
+- **Multi-account sync.** Ability to sync different notebooks to different Google accounts, or have a second account as a collaborator. Depends on per-notebook sync control above.
+
+- **Android multi-window / split-screen.** The app should declare `android:resizeableActivity="true"` in the manifest so it can run in Android split-screen alongside another app (e.g. browser for research + notes side by side). Requires verifying layout reflow at narrow widths.
+
+- **Input-adaptive default tool.** On canvas open, the active tool should default based on the primary input device detected: stylus present → pen tool; mouse/trackpad → lasso/select; touch-only → configurable (currently always pen). Requires listening to `PointerDeviceKind` on first pointer event after canvas load.
+
+- **URL auto-detection in text.** Text runs containing URLs should be auto-linked (visually underlined, tap/click opens in browser). Needs a URL regex pass at commit time, storing link ranges as a `TextRun` attribute, and `url_launcher` on tap.
+
+- **Fuzzy search across notebook/section/canvas names and bookmark labels.** Keyboard shortcut (e.g. Ctrl+K / Cmd+K) opens a palette that filters all notebooks, sections, canvases, and bookmarks by name as you type. No need to index canvas content for v1 — names + bookmark text is enough to be useful.
+
+- **Multi-level PDF export.** Export an entire notebook or section as a single PDF: canvas name becomes a section heading, pages flow in order, row-merged pages stay wide. Currently export is per-canvas only.
+
+- **Page reorganisation grid.** The Pages navigator (canvas overflow → Pages) shows a list; replace or augment with a drag-reorder thumbnail grid so pages can be freely repositioned by press-and-hold.
+
+- **Copy a single page to another canvas/notebook.** Right now you can copy elements via lasso but not a whole page as a unit. Should produce a deep copy (new page id) and optionally link it (see linked copies below).
+
+- **Linked copies of sections/canvases.** When duplicating a section, super-section, or canvas, offer a "Linked copy" checkbox: changes in either copy propagate to the other (like OneNote's page sync). Architecture TBD — simplest approach is a `linkId` on the section/canvas level mirroring the existing `TextElement.linkId` pattern.
+
+- **Voice recording + playback sync.** Record audio during a note session; on playback, animate/highlight ink strokes drawn at the same timestamp (like Samsung Notes "Audio Sync"). Requires a recording plugin, timestamp watermarking of strokes, and a playback controller. Large feature — park until core is stable.
+
+- **Note summarisation.** Feed canvas text content to an LLM API and insert a summary text element. Depends on voice recording (for audio transcription path) or can start with text-only canvases.
+
+- **Link sharing.** Generate a shareable link to a specific canvas or section that opens it directly in the app (deep link). Requires a URI scheme (`omininote://`) registered in each platform's manifest, and a server-side redirect or Drive share as the transport. Related to multi-account feature.
+
+- **Canvas icon in item tree.** The canvas leaf row shows a plain square icon with no clear purpose. Remove it or replace with something meaningful (e.g. a page-count badge, last-edited indicator). Minor UI polish.
 
 ### Branding
 
