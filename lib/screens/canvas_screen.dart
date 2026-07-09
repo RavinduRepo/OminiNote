@@ -35,7 +35,15 @@ class CanvasScreen extends StatefulWidget {
   /// of the name instead of relying on this screen's own AppBar title.
   final VoidCallback? onCanvasRenamed;
 
-  const CanvasScreen({super.key, required this.canvas, this.onCanvasRenamed});
+  /// Optional page to jump to once loaded (e.g. opening a bookmark from search).
+  final String? initialPageId;
+
+  const CanvasScreen({
+    super.key,
+    required this.canvas,
+    this.onCanvasRenamed,
+    this.initialPageId,
+  });
 
   @override
   State<CanvasScreen> createState() => _CanvasScreenState();
@@ -102,6 +110,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
         ..systemCopyHook = _copySelectionToSystemClipboard
         ..systemPasteFallback = _pasteFromSystemClipboard;
     });
+    // Jump to a requested page (e.g. a bookmark opened from search) once the
+    // first layout has set the screen size, so the fit math has real bounds.
+    final target = widget.initialPageId;
+    if (target != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _controller?.jumpToPage(target);
+      });
+    }
   }
 
   // ── OS clipboard bridging ─────────────────────────────────────────────

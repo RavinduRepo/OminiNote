@@ -9,6 +9,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
+import 'note_search.dart';
 import 'section_screen.dart';
 
 /// Mobile screen 2: a notebook's tree of **sections** + nested super-sections.
@@ -220,6 +221,11 @@ class _NotebookScreenState extends State<NotebookScreen> {
       appBar: AppBar(
         title: Text(widget.notebook.name),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: 'Search',
+            onPressed: () => openNoteSearch(context),
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),
             tooltip: 'Add',

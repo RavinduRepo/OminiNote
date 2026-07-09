@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/canvas.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
@@ -11,6 +12,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import 'canvas_screen.dart';
+import 'note_search.dart';
 import 'settings_screen.dart';
 
 /// OneNote-desktop-style three-pane view. Sidebar: notebooks (reorderable) →
@@ -499,7 +501,16 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
-    return Scaffold(
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
+            openNoteSearch(context),
+        const SingleActivator(LogicalKeyboardKey.keyK, meta: true): () =>
+            openNoteSearch(context),
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
       body: LayoutBuilder(
         builder: (context, constraints) {
           final desired = _sidebarCollapsed ? _collapsedWidth : _sidebarWidth;
@@ -541,6 +552,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             ],
           );
         },
+      ),
+        ),
       ),
     );
   }
@@ -807,6 +820,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
               overflow: TextOverflow.ellipsis,
             ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.search, size: 20),
+            tooltip: 'Search (Ctrl/Cmd+K)',
+            onPressed: () => openNoteSearch(context),
           ),
           IconButton(
             icon: const Icon(Icons.add, size: 20),

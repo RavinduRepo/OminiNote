@@ -6,6 +6,7 @@ import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/refreshable_empty.dart';
+import 'note_search.dart';
 import 'notebook_screen.dart';
 import 'settings_screen.dart';
 
@@ -129,6 +130,11 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('Notebooks'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: 'Search',
+            onPressed: () => openNoteSearch(context),
+          ),
           // Single, consistent add entry point across all list screens: the
           // app-bar "+" (the old FAB overlapped the last row's ⋮ menu).
           IconButton(

@@ -10,6 +10,7 @@ import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
 import 'canvas_screen.dart';
+import 'note_search.dart';
 
 /// Mobile screen 3: a section's tree of **canvases** + nested super-sections.
 /// Tapping a canvas opens the drawing surface (`CanvasScreen`).
@@ -237,6 +238,11 @@ class _SectionScreenState extends State<SectionScreen> {
       appBar: AppBar(
         title: Text(widget.section.name),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: 'Search',
+            onPressed: () => openNoteSearch(context),
+          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),
             tooltip: 'Add',

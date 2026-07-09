@@ -16,7 +16,6 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 - **Selection is single-page**; can't lasso across page boundaries.
 - **No camera capture** for images (gallery/file picker only — camera needs a plugin + permissions).
 - **Undo/redo history is in-memory** (~100 ops), cleared when the canvas closes.
-- **Attachments are ignored on export** (listed in UI only).
 - **S-Pen button-to-erase works while the pen is touching** (`kPrimaryStylusButton` / inverted stylus); a pure hover-button tool toggle isn't implemented.
 - **Perf pass pending**: committed strokes repaint every frame (no per-page picture cache yet); fine for moderate sections, revisit for very large ones (spec §14).
 - **Orphaned page files**: deleting a page removes it from `section.json` but leaves `pages/<id>.json` on disk (undo may restore it). Harmless; a GC-on-open could clean these later.
@@ -54,7 +53,7 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 - **Multi-account sync.** Ability to sync different notebooks to different Google accounts, or have a second account as a collaborator. Depends on per-notebook sync control above.
 
-- **Android multi-window / split-screen.** The app should declare `android:resizeableActivity="true"` in the manifest so it can run in Android split-screen alongside another app (e.g. browser for research + notes side by side). Requires verifying layout reflow at narrow widths.
+- **Android multi-instance (multiple OminiNote windows).** The goal is running *two or more copies of OminiNote itself* side by side so you can view/edit more than one note at once (Android supports this on large screens / DeX). Basic split-screen *with another app* already works; true multi-instance needs the activity to opt into multiple tasks (`android:resizeableActivity` + a multi-instance/`documentLaunchMode` setup and a way to launch a second instance from Recents), plus verifying the single-instance in-memory state (open controllers, sync listeners) is safe across two processes/tasks. Deferred.
 
 - **URL auto-detection in text.** Text runs containing URLs should be auto-linked (visually underlined, tap/click opens in browser). Needs a URL regex pass at commit time, storing link ranges as a `TextRun` attribute, and `url_launcher` on tap.
 
