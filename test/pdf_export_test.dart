@@ -131,6 +131,58 @@ void main() {
     );
 
     test(
+      'exportTree appends every canvas and builds a nested outline',
+      () async {
+        Canvas canvas(String id, String name) => Canvas(
+              id: id,
+              notebookId: 'n1',
+              sectionId: 's1',
+              name: name,
+              createdAt: DateTime(2026, 7, 9),
+              rows: [PageRow(id: 'r_$id', pageIds: ['pg_$id'])],
+            );
+        CanvasPage page(String id) =>
+            CanvasPage(id: 'pg_$id', deviceId: 'test_device');
+
+        final items = [
+          PdfExportItem(
+            outline: const ['My NB', 'Physics', 'Chapter 1'],
+            canvas: canvas('c1', 'Chapter 1'),
+            pages: {'pg_c1': page('c1')},
+            assetBytes: (_) async => Uint8List(0),
+          ),
+          PdfExportItem(
+            outline: const ['My NB', 'Physics', 'Chapter 2'],
+            canvas: canvas('c2', 'Chapter 2'),
+            pages: {'pg_c2': page('c2')},
+            assetBytes: (_) async => Uint8List(0),
+          ),
+          PdfExportItem(
+            outline: const ['My NB', 'Chemistry', 'Intro'],
+            canvas: canvas('c3', 'Intro'),
+            pages: {'pg_c3': page('c3')},
+            assetBytes: (_) async => Uint8List(0),
+          ),
+        ];
+
+        final bytes = await SyncfusionPdfExporter().exportTree(items);
+        final doc = sf.PdfDocument(inputBytes: bytes);
+        // One page per canvas.
+        expect(doc.pages.count, 3);
+        // A single shared root "My NB", with the two sub-sections nested under.
+        expect(doc.bookmarks.count, 1);
+        final nb = doc.bookmarks[0];
+        expect(nb.title, 'My NB');
+        expect(nb.count, 2); // Physics, Chemistry
+        expect(nb[0].title, 'Physics');
+        expect(nb[0].count, 2); // Chapter 1, Chapter 2
+        expect(nb[1].title, 'Chemistry');
+        expect(nb[1].count, 1); // Intro
+        doc.dispose();
+      },
+    );
+
+    test(
       'a page with a background pattern exports meaningfully more content '
       'than the same page left blank (the pattern is actually drawn)',
       () async {

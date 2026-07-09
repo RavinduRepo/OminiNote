@@ -6,6 +6,7 @@ import '../models/tree.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/pdf_export_ui.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
@@ -81,6 +82,12 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
   }
 
   // ── Actions ─────────────────────────────────────────────────────────
+
+  Future<void> _exportSectionPdf(Section section) async {
+    final items = await _service.collectSectionExportItems(section);
+    if (!mounted) return;
+    await runTreeExport(context, items: items, fileName: section.name);
+  }
 
   Future<void> _addSection({String? folderId}) async {
     final name = await _prompt(title: 'New section', hint: 'Section name');
@@ -297,6 +304,7 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
                 selectedId: null,
                 glowId: _glowId,
                 onOpen: _openSection,
+                onExportLeaf: _exportSectionPdf,
                 onRenameLeaf: _renameSection,
                 onColorLeaf: _colorSection,
                 onDeleteLeaf: _deleteSection,

@@ -6,6 +6,7 @@ import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/refreshable_empty.dart';
+import '../utils/pdf_export_ui.dart';
 import 'note_search.dart';
 import 'notebook_screen.dart';
 import 'settings_screen.dart';
@@ -49,6 +50,12 @@ class _HomeScreenState extends State<HomeScreen> {
     if (name == null || name.isEmpty) return;
     await _notebookService.createNotebook(name);
     _loadNotebooks();
+  }
+
+  Future<void> _exportNotebookPdf(Notebook notebook) async {
+    final items = await _notebookService.collectNotebookExportItems(notebook);
+    if (!mounted) return;
+    await runTreeExport(context, items: items, fileName: notebook.name);
   }
 
   Future<void> _renameNotebook(Notebook notebook) async {
@@ -190,6 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               },
                               onRename: () => _renameNotebook(notebook),
                               onColor: () => _colorNotebook(notebook),
+                              onExport: () => _exportNotebookPdf(notebook),
                               onDelete: () => _deleteNotebook(notebook),
                             ),
                           ),
@@ -212,6 +220,7 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onRename;
   final VoidCallback onColor;
+  final VoidCallback onExport;
   final VoidCallback onDelete;
 
   const _NotebookRow({
@@ -219,6 +228,7 @@ class _NotebookRow extends StatelessWidget {
     required this.onTap,
     required this.onRename,
     required this.onColor,
+    required this.onExport,
     required this.onDelete,
   });
 
@@ -293,6 +303,7 @@ class _NotebookRow extends StatelessWidget {
               _RowMenu(
                 onRename: onRename,
                 onColor: onColor,
+                onExport: onExport,
                 onDelete: onDelete,
               ),
             ],
@@ -306,10 +317,12 @@ class _NotebookRow extends StatelessWidget {
 class _RowMenu extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
+  final VoidCallback onExport;
   final VoidCallback onDelete;
   const _RowMenu({
     required this.onRename,
     required this.onColor,
+    required this.onExport,
     required this.onDelete,
   });
 
@@ -321,6 +334,7 @@ class _RowMenu extends StatelessWidget {
       onSelected: (value) {
         if (value == 'rename') onRename();
         if (value == 'color') onColor();
+        if (value == 'export') onExport();
         if (value == 'delete') onDelete();
       },
       itemBuilder: (context) => [
@@ -341,6 +355,16 @@ class _RowMenu extends StatelessWidget {
               Icon(Icons.palette_outlined, size: 18),
               SizedBox(width: 10),
               Text('Change color'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'export',
+          child: Row(
+            children: [
+              Icon(Icons.picture_as_pdf_outlined, size: 18),
+              SizedBox(width: 10),
+              Text('Export to PDF'),
             ],
           ),
         ),

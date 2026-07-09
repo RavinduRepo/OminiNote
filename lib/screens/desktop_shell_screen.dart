@@ -13,6 +13,7 @@ import '../widgets/sync_status_icon.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
+import '../utils/pdf_export_ui.dart';
 import 'canvas_screen.dart';
 import 'note_search.dart';
 import 'settings_screen.dart';
@@ -268,6 +269,18 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       _expanded.add(notebook.id);
       _sidebarCollapsed = false;
     });
+  }
+
+  Future<void> _exportNotebookPdf(Notebook notebook) async {
+    final items = await _service.collectNotebookExportItems(notebook);
+    if (!mounted) return;
+    await runTreeExport(context, items: items, fileName: notebook.name);
+  }
+
+  Future<void> _exportSectionPdf(Section section) async {
+    final items = await _service.collectSectionExportItems(section);
+    if (!mounted) return;
+    await runTreeExport(context, items: items, fileName: section.name);
   }
 
   Future<void> _renameNotebook(Notebook notebook) async {
@@ -1186,6 +1199,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               _renameNotebook(notebook);
                             case 'color':
                               _colorNotebook(notebook);
+                            case 'export':
+                              _exportNotebookPdf(notebook);
                             case 'delete':
                               _deleteNotebook(notebook);
                           }
@@ -1198,6 +1213,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           const PopupMenuItem(
                             value: 'color',
                             child: Text('Change color'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'export',
+                            child: Text('Export to PDF'),
                           ),
                           PopupMenuItem(
                             value: 'delete',
@@ -1246,6 +1265,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 selectedId: _selectedSection?.id,
                 glowId: _glowId,
                 onOpen: _selectSection,
+                onExportLeaf: _exportSectionPdf,
                 onRenameLeaf: _renameSection,
                 onColorLeaf: _colorSection,
                 onDeleteLeaf: _deleteSection,

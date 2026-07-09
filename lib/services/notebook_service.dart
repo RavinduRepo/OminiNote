@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/canvas.dart';
@@ -7,6 +8,7 @@ import '../models/canvas_page.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
+import 'pdf_exporter.dart';
 import 'settings_service.dart';
 import 'sync_service.dart';
 
@@ -879,6 +881,88 @@ class NotebookService {
 
   File assetFile(Canvas canvas, String assetId) =>
       File('${assetsDir(canvas).path}/$assetId');
+
+  // ── Multi-level PDF export collection ──────────────────────────────────
+  //
+  // Walk the tree in display order, loading every canvas + its pages, and
+  // build a flat list of [PdfExportItem]s whose `outline` path mirrors the
+  // hierarchy (notebook › super-section › section › super-section › canvas) so
+  // the exporter can emit a nested PDF outline (topic/sub-topic bookmarks).
+
+  Future<List<PdfExportItem>> collectNotebookExportItems(Notebook nb) async {
+    final items = <PdfExportItem>[];
+    await _walkNotebookForExport(nb, nb.nodes, [nb.name], items);
+    return items;
+  }
+
+  Future<List<PdfExportItem>> collectSectionExportItems(
+    Section section, {
+    List<String> prefix = const [],
+  }) async {
+    final items = <PdfExportItem>[];
+    await _walkSectionForExport(
+      section,
+      section.nodes,
+      [...prefix, section.name],
+      items,
+    );
+    return items;
+  }
+
+  Future<void> _walkNotebookForExport(
+    Notebook nb,
+    List<TreeNode> nodes,
+    List<String> path,
+    List<PdfExportItem> out,
+  ) async {
+    for (final node in nodes) {
+      if (node is FolderNode) {
+        await _walkNotebookForExport(nb, node.children, [...path, node.name], out);
+      } else if (node is LeafNode) {
+        final section = await getSection(nb.id, node.refId);
+        if (section == null) continue;
+        await _walkSectionForExport(
+          section,
+          section.nodes,
+          [...path, section.name],
+          out,
+        );
+      }
+    }
+  }
+
+  Future<void> _walkSectionForExport(
+    Section section,
+    List<TreeNode> nodes,
+    List<String> path,
+    List<PdfExportItem> out,
+  ) async {
+    for (final node in nodes) {
+      if (node is FolderNode) {
+        await _walkSectionForExport(
+          section,
+          node.children,
+          [...path, node.name],
+          out,
+        );
+      } else if (node is LeafNode) {
+        final canvas = await getCanvas(
+          section.notebookId,
+          section.id,
+          node.refId,
+        );
+        if (canvas == null) continue;
+        final pages = await loadPages(canvas);
+        out.add(PdfExportItem(
+          outline: [...path, canvas.name],
+          canvas: canvas,
+          pages: pages,
+          assetBytes: (assetId) async =>
+              Uint8List.fromList(await assetFile(canvas, assetId).readAsBytes()),
+        ));
+      }
+    }
+  }
 
   /// Copies every asset referenced by [page] from the [src] canvas's asset dir
   /// into the [dst] canvas's asset dir (assets are content-addressed, so the

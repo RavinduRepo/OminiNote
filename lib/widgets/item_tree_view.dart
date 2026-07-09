@@ -54,6 +54,10 @@ class ItemTreeView<T> extends StatefulWidget {
   final void Function(T) onColorLeaf;
   final void Function(T) onDeleteLeaf;
 
+  /// Optional "Export to PDF" action on each leaf (used for sections, so a
+  /// whole section exports from the list without opening it). Null = no item.
+  final void Function(T)? onExportLeaf;
+
   final void Function(FolderNode) onRenameFolder;
   final void Function(FolderNode) onColorFolder;
   final void Function(FolderNode) onAddLeafToFolder;
@@ -95,6 +99,7 @@ class ItemTreeView<T> extends StatefulWidget {
     required this.onRenameLeaf,
     required this.onColorLeaf,
     required this.onDeleteLeaf,
+    this.onExportLeaf,
     required this.onRenameFolder,
     required this.onColorFolder,
     required this.onAddLeafToFolder,
@@ -441,6 +446,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
             widget.onRelocate(node, copy: false);
           case 'copy':
             widget.onRelocate(node, copy: true);
+          case 'export':
+            widget.onExportLeaf?.call(item);
           case 'delete':
             widget.onDeleteLeaf(item);
         }
@@ -450,6 +457,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
         const PopupMenuItem(value: 'color', child: Text('Change color')),
         const PopupMenuItem(value: 'move', child: Text('Move to…')),
         const PopupMenuItem(value: 'copy', child: Text('Copy to…')),
+        if (widget.onExportLeaf != null)
+          const PopupMenuItem(value: 'export', child: Text('Export to PDF')),
         PopupMenuItem(
           value: 'delete',
           child: Text(
