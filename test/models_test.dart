@@ -268,6 +268,50 @@ void main() {
       expect(decoded.strokes.single, isA<StrokeElement>());
     });
 
+    test('cloneWithNewIds: fresh page/element ids, same content, assets listed',
+        () {
+      final page = CanvasPage(
+        id: 'pg_src',
+        deviceId: 'dev_a',
+        width: 400,
+        height: 600,
+        source: const PdfSource(assetId: 'doc.pdf', pageIndex: 1),
+        strokes: [
+          StrokeElement(
+            id: 'el_stroke',
+            deviceId: 'dev_a',
+            z: '0|a0:',
+            tool: StrokeTool.pen,
+            color: const Color(0xFF000000),
+            size: 4,
+            points: [StrokePoint(1, 2, 0.5)],
+          ),
+        ],
+        objects: [
+          ImageElement(
+            id: 'el_img',
+            deviceId: 'dev_a',
+            rect: const Rect.fromLTWH(0, 0, 50, 50),
+            assetId: 'pic.png',
+          ),
+        ],
+      );
+
+      final clone = page.cloneWithNewIds(deviceId: 'dev_b');
+      // New ids everywhere so the copy can coexist with the original.
+      expect(clone.id, isNot('pg_src'));
+      expect(clone.deviceId, 'dev_b');
+      expect(clone.strokes.single.id, isNot('el_stroke'));
+      expect(clone.objects.single.id, isNot('el_img'));
+      // Content preserved.
+      expect(clone.width, 400);
+      expect(clone.source?.assetId, 'doc.pdf');
+      expect(clone.strokes.single.points.single.p, 0.5);
+      expect((clone.objects.single as ImageElement).assetId, 'pic.png');
+      // Assets to copy on paste = pdf + image.
+      expect(page.referencedAssetIds(), {'doc.pdf', 'pic.png'});
+    });
+
     test('zIndex round-trips and survives deepCopy (cross-list layering)', () {
       final el = ImageElement(
         id: 'img1',

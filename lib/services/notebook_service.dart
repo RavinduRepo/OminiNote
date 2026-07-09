@@ -880,6 +880,26 @@ class NotebookService {
   File assetFile(Canvas canvas, String assetId) =>
       File('${assetsDir(canvas).path}/$assetId');
 
+  /// Copies every asset referenced by [page] from the [src] canvas's asset dir
+  /// into the [dst] canvas's asset dir (assets are content-addressed, so the
+  /// id/filename is unchanged and an already-present asset is skipped). Used
+  /// when pasting a page copied from another canvas.
+  Future<void> copyPageAssets(
+    Canvas src,
+    Canvas dst,
+    CanvasPage page,
+  ) async {
+    if (src.id == dst.id) return; // same canvas — assets already present
+    for (final assetId in page.referencedAssetIds()) {
+      final srcFile = assetFile(src, assetId);
+      final dstFile = assetFile(dst, assetId);
+      if (await dstFile.exists() || !await srcFile.exists()) continue;
+      final bytes = await srcFile.readAsBytes();
+      await writeAtomicBytesPublic(dstFile, bytes);
+      SyncService().onLocalAssetSaved(dstFile.path, bytes);
+    }
+  }
+
   /// IDs unique across the app: millis + a monotonic suffix.
   static int _idSeq = 0;
   String newId() =>

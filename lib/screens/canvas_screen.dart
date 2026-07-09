@@ -17,6 +17,7 @@ import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
 import '../services/notebook_service.dart';
+import '../services/page_clipboard.dart';
 import '../services/pdf_exporter.dart';
 import '../services/settings_service.dart';
 import '../theme/app_theme.dart';
@@ -830,6 +831,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 ),
                 onTap: () => Navigator.pop(context, 'pdf'),
               ),
+              if (PageClipboard().hasPage.value)
+                ListTile(
+                  leading: const Icon(Icons.content_paste_go_outlined),
+                  title: const Text('Paste page'),
+                  subtitle: const Text('A page copied from any canvas'),
+                  onTap: () => Navigator.pop(context, 'pastePage'),
+                ),
               const Divider(),
               const _SheetLabel('Content'),
               ListTile(
@@ -874,6 +882,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
         await _insertImageFlow();
       case 'paste':
         await _pasteFlow();
+      case 'pastePage':
+        await c.pastePageFromClipboard();
+        _toast('Page pasted at the end');
     }
   }
 
@@ -1215,6 +1226,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
                       switch (action) {
                         case 'duplicate':
                           c.duplicatePage(l.pageId);
+                        case 'copy':
+                          c.copyPageToClipboard(l.pageId);
+                          _toast('Page copied — paste it from Add ＋ in any '
+                              'canvas');
                         case 'delete':
                           if (!c.deletePage(l.pageId)) {
                             _toast("Can't delete the only page");
@@ -1229,6 +1244,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
                       PopupMenuItem(
                         value: 'duplicate',
                         child: Text('Duplicate'),
+                      ),
+                      PopupMenuItem(
+                        value: 'copy',
+                        child: Text('Copy page'),
                       ),
                       PopupMenuItem(value: 'up', child: Text('Move row up')),
                       PopupMenuItem(

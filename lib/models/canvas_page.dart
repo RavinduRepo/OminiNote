@@ -149,6 +149,34 @@ class CanvasPage {
   Size get size => Size(width, height);
   Rect get localRect => Rect.fromLTWH(0, 0, width, height);
 
+  /// A fresh, independent copy of this page: a new page id and new element ids
+  /// (so it can coexist with the original, even in the same canvas). Tombstones
+  /// are intentionally dropped — the copy starts clean. Used to duplicate a
+  /// page and to paste a page copied from another canvas. Any referenced assets
+  /// (image/PDF/attachment) must be copied separately by the caller.
+  CanvasPage cloneWithNewIds({required String deviceId}) => CanvasPage(
+        id: newModelId('pg'),
+        deviceId: deviceId,
+        width: width,
+        height: height,
+        background: background,
+        source: source,
+        strokes: [for (final el in strokes) el.deepCopy(withNewId: true)],
+        objects: [for (final el in objects) el.deepCopy(withNewId: true)],
+      );
+
+  /// Every asset id this page references (PDF background + image/attachment
+  /// objects), for copying assets when the page moves between canvases.
+  Set<String> referencedAssetIds() {
+    final ids = <String>{};
+    if (source != null) ids.add(source!.assetId);
+    for (final el in objects) {
+      if (el is ImageElement) ids.add(el.assetId);
+      if (el is AttachmentElement) ids.add(el.assetId);
+    }
+    return ids;
+  }
+
   void bumpRev(String newDeviceId) {
     rev += 1;
     updatedAt = DateTime.now();

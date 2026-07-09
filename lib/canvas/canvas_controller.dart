@@ -7,6 +7,7 @@ import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
 import '../services/notebook_service.dart';
+import '../services/page_clipboard.dart';
 import '../services/render_cache.dart';
 import '../services/settings_service.dart';
 import '../services/sync/merge_engine.dart';
@@ -2260,6 +2261,42 @@ class CanvasController extends ChangeNotifier {
         apply: () {
           pages[copy.id] = copy;
           canvas.rows.insert(math.min(insertAt, canvas.rows.length), row);
+        },
+        revert: () {
+          canvas.rows.remove(row);
+          pages.remove(copy.id);
+        },
+      ),
+    );
+  }
+
+  /// Copies [pageId] to the app-global page clipboard so it can be pasted into
+  /// another canvas / section / notebook (or back into this one).
+  void copyPageToClipboard(String pageId) {
+    final page = pages[pageId];
+    if (page == null) return;
+    PageClipboard().copy(canvas, page);
+  }
+
+  /// Pastes the clipboard page as a new page appended at the end of this
+  /// canvas, copying any referenced assets first. No-op if the clipboard is
+  /// empty. One undoable structural op.
+  Future<void> pastePageFromClipboard() async {
+    final clip = PageClipboard();
+    final src = clip.sourceCanvas;
+    final srcPage = clip.page;
+    if (src == null || srcPage == null) return;
+    final copy = srcPage.cloneWithNewIds(deviceId: SettingsService().deviceId);
+    await _service.copyPageAssets(src, canvas, copy);
+    final row = PageRow(id: _service.newId(), pageIds: [copy.id]);
+    _doOp(
+      _CanvasOp(
+        label: 'Paste page',
+        structural: true,
+        dirtyPageIds: {copy.id},
+        apply: () {
+          pages[copy.id] = copy;
+          canvas.rows.add(row);
         },
         revert: () {
           canvas.rows.remove(row);

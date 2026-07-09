@@ -61,8 +61,6 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 - **Page reorganisation grid.** The Pages navigator (canvas overflow → Pages) shows a list; replace or augment with a drag-reorder thumbnail grid so pages can be freely repositioned by press-and-hold.
 
-- **Copy a single page to another canvas/notebook.** Right now you can copy elements via lasso but not a whole page as a unit. Should produce a deep copy (new page id) and optionally link it (see linked copies below).
-
 - **Linked copies of sections/canvases.** When duplicating a section, super-section, or canvas, offer a "Linked copy" checkbox: changes in either copy propagate to the other (like OneNote's page sync). Architecture TBD — simplest approach is a `linkId` on the section/canvas level mirroring the existing `TextElement.linkId` pattern.
 
 - **Voice recording + playback sync.** Record audio during a note session; on playback, animate/highlight ink strokes drawn at the same timestamp (like Samsung Notes "Audio Sync"). Requires a recording plugin, timestamp watermarking of strokes, and a playback controller. Large feature — park until core is stable.
@@ -78,6 +76,8 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 - **iOS and web app icons are intentionally skipped** in the `flutter_launcher_icons` config (`ios: false`, no `web` block) — consistent with iOS/web not being project priorities.
 
 ## Fixed
+
+- ~~No way to copy a whole page to another canvas/notebook (only lasso element-copy existed)~~ (07/09/26) — **Copy whole page.** The Pages navigator's per-page menu gains **Copy page** → snapshots the page into an app-global `PageClipboard` (holds an independent clone + the source canvas for assets). Any canvas's **Add ＋** sheet then shows **Paste page** (only when the clipboard holds one) → appends a fresh copy at the end: `CanvasPage.cloneWithNewIds` makes new page + element ids, `NotebookService.copyPageAssets` copies referenced image/PDF/attachment assets (content-addressed, dedup-skipped) into the destination canvas, one undoable structural op. Works across sections and notebooks. Covered by a `cloneWithNewIds` / `referencedAssetIds` test in `models_test`.
 
 - ~~No search; search results opened a separate dumped-in view with no navigation context and no keyboard control~~ (07/09/26) — **Fuzzy search across all names + bookmarks.** A search icon on every list screen (Home / Notebook / Section) and the desktop shell header (plus **Ctrl/Cmd+K** on desktop) opens a search screen that fuzzy-filters **notebook, section, super-section, and canvas names + bookmark labels** (`SearchService`, exact/prefix/contains/subsequence ranking; content isn't indexed). Results open the item **in its natural context**, not a separate view: on **mobile** it rebuilds the real back stack (Notebooks → Sections → Canvases → Canvas) so Back walks up the hierarchy; on **desktop** the shell reveals it *in place* — expands the notebook + any collapsed super-sections on the path, selects section → canvas in the panes, jumps a bookmark to its page, and briefly **glows** the target row (every kind: notebook, super-section, section, canvas). The search screen is a custom page (not `SearchDelegate`) so it has full **keyboard nav**: the top result is highlighted, ↑/↓ move it (auto-scroll), Enter opens the highlighted one, tap opens directly. Covered by `test/search_service_test.dart` (filter/ranking). Known minor gap: revealing a bookmark to a page in an already-open desktop canvas won't re-jump (same widget key).
 
