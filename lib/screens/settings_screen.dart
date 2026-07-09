@@ -71,7 +71,10 @@ class SettingsScreen extends StatelessWidget {
         title: const Text('Settings'),
         actions: const [SyncStatusIcon(), SizedBox(width: 12)],
       ),
-      body: ListView(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 640),
+          child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
         children: [
           const _SectionLabel('Account'),
@@ -120,15 +123,23 @@ class SettingsScreen extends StatelessWidget {
           const SizedBox(height: 24),
           const _SectionLabel('Default page'),
           _Card(
-            child: ValueListenableBuilder<PageBackground>(
-              valueListenable: settings.defaultPageBackground,
-              builder: (context, bg, _) => _DefaultPageSection(
-                background: bg,
-                onChanged: settings.setDefaultPageBackground,
+            child: ValueListenableBuilder<bool>(
+              valueListenable: settings.autoPageColor,
+              builder: (context, isAuto, _) =>
+                  ValueListenableBuilder<PageBackground>(
+                valueListenable: settings.defaultPageBackground,
+                builder: (context, bg, _) => _DefaultPageSection(
+                  background: bg,
+                  isAuto: isAuto,
+                  onChanged: settings.setDefaultPageBackground,
+                  onSetAuto: () => settings.setAutoPageColor(true),
+                ),
               ),
             ),
           ),
         ],
+          ),
+        ),
       ),
     );
   }
@@ -419,11 +430,15 @@ class _StorageTile extends StatelessWidget {
 /// App-wide default page color + pattern for new sections/pages.
 class _DefaultPageSection extends StatelessWidget {
   final PageBackground background;
+  final bool isAuto;
   final ValueChanged<PageBackground> onChanged;
+  final VoidCallback onSetAuto;
 
   const _DefaultPageSection({
     required this.background,
+    required this.isAuto,
     required this.onChanged,
+    required this.onSetAuto,
   });
 
   static const _presets = [
@@ -437,6 +452,8 @@ class _DefaultPageSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final primary = theme.colorScheme.primary;
+    final divider = theme.dividerColor;
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -452,12 +469,32 @@ class _DefaultPageSection extends StatelessWidget {
           const SizedBox(height: 10),
           Row(
             children: [
+              // Auto swatch — half white / half dark, shows theme-adaptive color
+              Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: GestureDetector(
+                  onTap: onSetAuto,
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: isAuto ? primary : divider,
+                        width: isAuto ? 3 : 1,
+                      ),
+                    ),
+                    child: ClipOval(
+                      child: CustomPaint(painter: _HalfAndHalfPainter()),
+                    ),
+                  ),
+                ),
+              ),
               for (final preset in _presets)
                 Padding(
                   padding: const EdgeInsets.only(right: 10),
                   child: GestureDetector(
-                    onTap: () =>
-                        onChanged(background.copyWith(color: preset)),
+                    onTap: () => onChanged(background.copyWith(color: preset)),
                     child: Container(
                       width: 34,
                       height: 34,
@@ -465,12 +502,14 @@ class _DefaultPageSection extends StatelessWidget {
                         color: preset,
                         shape: BoxShape.circle,
                         border: Border.all(
-                          color: background.color.toARGB32() ==
-                                  preset.toARGB32()
-                              ? theme.colorScheme.primary
-                              : theme.dividerColor,
-                          width: background.color.toARGB32() ==
-                                  preset.toARGB32()
+                          color: !isAuto &&
+                                  background.color.toARGB32() ==
+                                      preset.toARGB32()
+                              ? primary
+                              : divider,
+                          width: !isAuto &&
+                                  background.color.toARGB32() ==
+                                      preset.toARGB32()
                               ? 3
                               : 1,
                         ),
@@ -546,6 +585,38 @@ class _ThemeSection extends StatelessWidget {
       ),
     );
   }
+}
+
+// ── Half-and-half painter for Auto page color swatch ─────────────────────────
+
+class _HalfAndHalfPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint();
+    // Light half (top-left triangle)
+    paint.color = const Color(0xFFFFFFFF);
+    canvas.drawPath(
+      Path()
+        ..moveTo(0, 0)
+        ..lineTo(size.width, 0)
+        ..lineTo(0, size.height)
+        ..close(),
+      paint,
+    );
+    // Dark half (bottom-right triangle)
+    paint.color = const Color(0xFF2A2A2E);
+    canvas.drawPath(
+      Path()
+        ..moveTo(size.width, 0)
+        ..lineTo(size.width, size.height)
+        ..lineTo(0, size.height)
+        ..close(),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_HalfAndHalfPainter old) => false;
 }
 
 // ── Shared widgets ────────────────────────────────────────────────────────────

@@ -321,7 +321,7 @@ class NotebookService {
     sectionId: sectionId,
     name: name,
     createdAt: DateTime.now(),
-    defaultBackground: SettingsService().defaultPageBackground.value,
+    defaultBackground: SettingsService().effectiveDefaultBackground(),
   );
 
   Future<void> _writeCanvasWithDefaultPage(Canvas canvas) async {

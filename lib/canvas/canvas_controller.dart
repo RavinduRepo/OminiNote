@@ -375,9 +375,15 @@ class CanvasController extends ChangeNotifier {
   // Per-tool style memory: pen, highlighter, and text each keep their own
   // color (and the two ink tools their own width) — switching tools restores
   // that tool's last choice instead of sharing one global color.
-  Color penColor = const Color(0xFFD9553B); // red default
-  Color highlighterColor = const Color(0xFFF2C230); // amber default
-  Color textColor = const Color(0xFF17171A);
+  // Initial ink/text colors follow the current theme so they're always visible
+  // against the default page background: dark on light pages, light on dark.
+  Color penColor = SettingsService().effectiveBrightness == Brightness.dark
+      ? const Color(0xFFE8E8E8)
+      : const Color(0xFF17171A);
+  Color highlighterColor = const Color(0xFFF2C230); // amber — works on both
+  Color textColor = SettingsService().effectiveBrightness == Brightness.dark
+      ? const Color(0xFFE8E8E8)
+      : const Color(0xFF17171A);
   double penSize = 4.0;
   double highlighterSize = 6.0;
 

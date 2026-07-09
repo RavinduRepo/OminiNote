@@ -28,8 +28,13 @@ class SettingsService {
   /// App-wide default page background seeded into new sections/pages. Editable
   /// from Settings (outside a notebook) so the default applies everywhere.
   final ValueNotifier<PageBackground> defaultPageBackground = ValueNotifier(
-    const PageBackground(),
+    const PageBackground(pattern: BgPattern.ruled),
   );
+
+  /// When true, [effectiveDefaultBackground] derives the page color from the
+  /// current theme (white for light, charcoal for dark) instead of using the
+  /// stored color. Set to false the first time the user picks a color manually.
+  final ValueNotifier<bool> autoPageColor = ValueNotifier(true);
 
   /// Mobile (single-pane, pushed navigation) vs desktop (split-view sidebar)
   /// shell, or auto-detect from window width.
@@ -110,6 +115,7 @@ class SettingsService {
     themeMode.value = _parseThemeMode(data['themeMode']);
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
+    autoPageColor.value = data['autoPageColor'] != false; // default true
     if (data['defaultPageBackground'] is Map<String, dynamic>) {
       defaultPageBackground.value = PageBackground.fromJson(
         data['defaultPageBackground'] as Map<String, dynamic>,
@@ -146,8 +152,36 @@ class SettingsService {
     await _persist();
   }
 
+  /// The actual brightness in use right now, resolving System to the platform.
+  Brightness get effectiveBrightness => switch (themeMode.value) {
+    ThemeMode.light => Brightness.light,
+    ThemeMode.dark => Brightness.dark,
+    _ => WidgetsBinding
+          .instance
+          .platformDispatcher
+          .platformBrightness,
+  };
+
+  /// The background to seed into new pages/canvases. When [autoPageColor] is
+  /// true the color tracks the theme; the user's pattern choice always applies.
+  PageBackground effectiveDefaultBackground() {
+    final color = autoPageColor.value
+        ? (effectiveBrightness == Brightness.dark
+            ? const Color(0xFF2A2A2E)
+            : const Color(0xFFFFFFFF))
+        : defaultPageBackground.value.color;
+    return defaultPageBackground.value.copyWith(color: color);
+  }
+
   Future<void> setDefaultPageBackground(PageBackground background) async {
+    autoPageColor.value = false;
     defaultPageBackground.value = background;
+    await _persist();
+  }
+
+  Future<void> setAutoPageColor(bool value) async {
+    if (autoPageColor.value == value) return;
+    autoPageColor.value = value;
     await _persist();
   }
 
@@ -168,6 +202,7 @@ class SettingsService {
         'themeMode': themeMode.value.name,
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
+        'autoPageColor': autoPageColor.value,
         'defaultPageBackground': defaultPageBackground.value.toJson(),
         'deviceId': deviceId,
         'driveChangesToken': driveChangesToken,
