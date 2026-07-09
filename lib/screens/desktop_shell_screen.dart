@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/canvas.dart';
@@ -5,6 +6,7 @@ import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
+import '../services/search_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
@@ -40,6 +42,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Map<String, Canvas> _selectedCanvases = {};
   Canvas? _selectedCanvas;
 
+  // Search-reveal state: page to jump to when opening a bookmarked canvas, and
+  // the id of the item to briefly glow (so you can see where search took you).
+  String? _pendingJumpPageId;
+  String? _glowId;
+  Timer? _glowTimer;
+
   double _sidebarWidth = 300;
   double _canvasListWidth = 230;
   bool _sidebarCollapsed = false;
@@ -60,7 +68,134 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   @override
   void dispose() {
     SyncService().dataVersion.removeListener(_onSyncData);
+    _glowTimer?.cancel();
     super.dispose();
+  }
+
+  // ── Search reveal ───────────────────────────────────────────────────────
+
+  /// Opens a search result *in place*: expands the notebook + any collapsed
+  /// super-sections on the path, selects the section and canvas in the panes
+  /// (jumping to a bookmarked page), and briefly glows the target — so it looks
+  /// exactly like navigating there by hand, not a separate view.
+  Future<void> _revealSearchResult(SearchResult r) async {
+    final nb = _notebooks?.where((n) => n.id == r.notebook.id).firstOrNull;
+    if (nb == null) return;
+    setState(() => _expanded.add(nb.id));
+
+    // A notebook hit: expand it and glow the notebook row.
+    if (r.kind == SearchKind.notebook) {
+      _flashGlow(nb.id);
+      return;
+    }
+
+    // A notebook-level super-section (groups sections in the sidebar tree):
+    // reveal + glow the folder in place.
+    if (r.kind == SearchKind.superSection && r.section == null) {
+      final fid = r.folderId;
+      if (fid != null) _expandToFolder(nb.nodes, fid);
+      _flashGlow(fid ?? nb.id);
+      return;
+    }
+
+    final sectionId = r.section?.id;
+    if (sectionId == null) {
+      _flashGlow(nb.id);
+      return;
+    }
+
+    // Expand super-sections leading to the section in the notebook tree.
+    _expandFoldersTo(nb.nodes, sectionId);
+
+    final section = _sectionMaps[nb.id]?[sectionId] ??
+        await _service.getSection(nb.id, sectionId);
+    if (section == null || !mounted) return;
+    await _selectSection(section);
+
+    // A section-level super-section (groups canvases in the canvas column):
+    // open its section, reveal + glow the folder there.
+    if (r.kind == SearchKind.superSection) {
+      final fid = r.folderId;
+      if (fid != null) _expandToFolder(section.nodes, fid);
+      _flashGlow(fid ?? sectionId);
+      return;
+    }
+
+    final canvasId = r.canvas?.id;
+    if (canvasId == null) {
+      _flashGlow(sectionId);
+      return;
+    }
+
+    // Expand super-sections leading to the canvas in the section tree.
+    _expandFoldersTo(section.nodes, canvasId);
+    final canvas = _selectedCanvases[canvasId];
+    if (canvas == null) return;
+    setState(() {
+      _selectedCanvas = canvas;
+      _pendingJumpPageId = r.pageId; // non-null for a bookmark
+    });
+    _flashGlow(canvasId);
+  }
+
+  /// Un-collapses every super-section on the path to [targetLeafId]. Returns
+  /// true if the leaf was found in [nodes].
+  bool _expandFoldersTo(List<TreeNode> nodes, String targetLeafId) {
+    for (final n in nodes) {
+      if (n is LeafNode && n.refId == targetLeafId) return true;
+      if (n is FolderNode && _expandFoldersTo(n.children, targetLeafId)) {
+        n.collapsed = false;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Un-collapses the folder [folderId] (revealing its contents) and every
+  /// ancestor folder on the path to it. Returns true if found.
+  bool _expandToFolder(List<TreeNode> nodes, String folderId) {
+    for (final n in nodes) {
+      if (n is FolderNode) {
+        if (n.id == folderId) {
+          n.collapsed = false;
+          return true;
+        }
+        if (_expandToFolder(n.children, folderId)) {
+          n.collapsed = false;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  void _flashGlow(String id) {
+    _glowTimer?.cancel();
+    setState(() => _glowId = id);
+    _glowTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted) setState(() => _glowId = null);
+    });
+  }
+
+  /// A fading accent wash + border to briefly highlight a notebook row reached
+  /// via search (the tree rows use their own equivalent inside ItemTreeView).
+  Widget _glowBox(AppPalette palette, String id) {
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('glow_$id'),
+      tween: Tween(begin: 1, end: 0),
+      duration: const Duration(milliseconds: 1600),
+      curve: Curves.easeOut,
+      builder: (context, t, _) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: palette.accent.withValues(alpha: 0.28 * t),
+          border: Border.all(
+            color: palette.accent.withValues(alpha: 0.7 * t),
+            width: 1.5,
+          ),
+          borderRadius: BorderRadius.circular(kRadius),
+        ),
+      ),
+    );
   }
 
   void _onSyncData() {
@@ -504,9 +639,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
-            openNoteSearch(context),
+            openNoteSearch(context, onReveal: _revealSearchResult),
         const SingleActivator(LogicalKeyboardKey.keyK, meta: true): () =>
-            openNoteSearch(context),
+            openNoteSearch(context, onReveal: _revealSearchResult),
       },
       child: Focus(
         autofocus: true,
@@ -567,6 +702,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         key: ValueKey(canvas.id),
         canvas: canvas,
         onCanvasRenamed: _reloadSelectedSection,
+        initialPageId: _pendingJumpPageId,
       );
     }
     if (_selectedSection != null) {
@@ -728,7 +864,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     idOf: (c) => c.id,
                     // No leaf icon — the colored identity pill is enough.
                     selectedId: _selectedCanvas?.id,
-                    onOpen: (c) => setState(() => _selectedCanvas = c),
+                    glowId: _glowId,
+                    onOpen: (c) => setState(() {
+                      _selectedCanvas = c;
+                      _pendingJumpPageId = null; // manual open: don't re-jump
+                    }),
                     onRenameLeaf: _renameCanvas,
                     onColorLeaf: _colorCanvas,
                     onDeleteLeaf: _deleteCanvas,
@@ -824,7 +964,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           IconButton(
             icon: const Icon(Icons.search, size: 20),
             tooltip: 'Search (Ctrl/Cmd+K)',
-            onPressed: () => openNoteSearch(context),
+            onPressed: () => openNoteSearch(context, onReveal: _revealSearchResult),
           ),
           IconButton(
             icon: const Icon(Icons.add, size: 20),
@@ -940,6 +1080,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final expanded = _expanded.contains(notebook.id);
     final color = AppPalette.resolveColor(notebook.id, notebook.color);
     final sectionMap = _sectionMaps[notebook.id] ?? const {};
+    final glow = _glowId != null && _glowId == notebook.id;
 
     return Column(
       key: ValueKey('nb_${notebook.id}'),
@@ -954,7 +1095,13 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             child: Material(
               color: expanded ? palette.surface2 : Colors.transparent,
               borderRadius: BorderRadius.circular(kRadius),
-              child: InkWell(
+              child: Stack(
+                children: [
+                  if (glow)
+                    Positioned.fill(
+                      child: IgnorePointer(child: _glowBox(palette, notebook.id)),
+                    ),
+                  InkWell(
                 borderRadius: BorderRadius.circular(kRadius),
                 onTap: () => setState(() {
                   expanded
@@ -1068,6 +1215,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                   ),
                 ),
               ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1095,6 +1244,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 idOf: (s) => s.id,
                 leafIcon: Icons.description_outlined,
                 selectedId: _selectedSection?.id,
+                glowId: _glowId,
                 onOpen: _selectSection,
                 onRenameLeaf: _renameSection,
                 onColorLeaf: _colorSection,

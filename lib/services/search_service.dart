@@ -25,6 +25,10 @@ class SearchResult {
   /// The bookmarked page to jump to (bookmarks only).
   final String? pageId;
 
+  /// The super-section (folder) id (super-section results only), so the host
+  /// can expand + glow the exact folder.
+  final String? folderId;
+
   SearchResult({
     required this.kind,
     required this.title,
@@ -33,6 +37,7 @@ class SearchResult {
     this.section,
     this.canvas,
     this.pageId,
+    this.folderId,
   });
 }
 
@@ -62,12 +67,13 @@ class SearchService {
       ));
       // Super-sections that group sections inside this notebook. They have no
       // screen of their own, so a hit opens the containing notebook.
-      _collectFolders(nb.nodes, (name) {
+      _collectFolders(nb.nodes, (id, name) {
         out.add(SearchResult(
           kind: SearchKind.superSection,
           title: name,
           path: nb.name,
           notebook: nb,
+          folderId: id,
         ));
       });
       for (final sectionId in nb.allSectionIds) {
@@ -82,13 +88,14 @@ class SearchService {
         ));
         // Super-sections that group canvases inside this section — a hit opens
         // the containing section.
-        _collectFolders(section.nodes, (name) {
+        _collectFolders(section.nodes, (id, name) {
           out.add(SearchResult(
             kind: SearchKind.superSection,
             title: name,
             path: '${nb.name} › ${section.name}',
             notebook: nb,
             section: section,
+            folderId: id,
           ));
         });
         for (final canvasId in section.allCanvasIds) {
@@ -120,11 +127,14 @@ class SearchService {
     return out;
   }
 
-  /// Depth-first walk collecting every super-section (folder) name in [nodes].
-  void _collectFolders(List<TreeNode> nodes, void Function(String) add) {
+  /// Depth-first walk collecting every super-section (folder) id + name.
+  void _collectFolders(
+    List<TreeNode> nodes,
+    void Function(String id, String name) add,
+  ) {
     for (final n in nodes) {
       if (n is FolderNode) {
-        add(n.name);
+        add(n.id, n.name);
         _collectFolders(n.children, add);
       }
     }

@@ -42,6 +42,11 @@ class ItemTreeView<T> extends StatefulWidget {
   final IconData? leafIcon;
 
   final String? selectedId;
+
+  /// Id of a leaf to briefly glow (e.g. the target the user just reached via
+  /// search). Null = no glow.
+  final String? glowId;
+
   final bool dense;
 
   final void Function(T) onOpen;
@@ -85,6 +90,7 @@ class ItemTreeView<T> extends StatefulWidget {
     required this.idOf,
     this.leafIcon,
     required this.selectedId,
+    this.glowId,
     required this.onOpen,
     required this.onRenameLeaf,
     required this.onColorLeaf,
@@ -352,12 +358,21 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     if (item == null) return const SizedBox.shrink();
     final id = widget.idOf(item);
     final selected = widget.selectedId == id;
+    final glow = widget.glowId != null && widget.glowId == id;
     final color = AppPalette.resolveColor(id, widget.colorOf(item));
 
     return Material(
       color: selected ? palette.accentSoft : Colors.transparent,
-      child: InkWell(
-        onTap: () => widget.onOpen(item),
+      child: Stack(
+        children: [
+          // A brief accent wash that fades out, so search reveals are easy to
+          // spot. Keyed by the glow id so it re-runs each time it's set.
+          if (glow)
+            Positioned.fill(
+              child: IgnorePointer(child: _glowOverlay(palette, id)),
+            ),
+          InkWell(
+            onTap: () => widget.onOpen(item),
         child: SizedBox(
           height: _rowHeight,
           child: Row(
@@ -401,6 +416,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
             ],
           ),
         ),
+          ),
+        ],
       ),
     );
   }
@@ -444,6 +461,27 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     );
   }
 
+  /// A fading accent wash + border used to briefly highlight a row the user
+  /// just reached via search. Keyed by [id] so it restarts each reveal.
+  Widget _glowOverlay(AppPalette palette, String id) {
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('glow_$id'),
+      tween: Tween(begin: 1, end: 0),
+      duration: const Duration(milliseconds: 1600),
+      curve: Curves.easeOut,
+      builder: (context, t, _) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: palette.accent.withValues(alpha: 0.28 * t),
+          border: Border.all(
+            color: palette.accent.withValues(alpha: 0.7 * t),
+            width: 1.5,
+          ),
+          borderRadius: BorderRadius.circular(kRadius),
+        ),
+      ),
+    );
+  }
+
   Widget _folderRow(
     BuildContext context,
     AppPalette palette,
@@ -452,6 +490,7 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
   ) {
     final color = AppPalette.resolveColor(folder.id, folder.color);
     final count = folder.collectLeafIds().length;
+    final glow = widget.glowId != null && widget.glowId == folder.id;
 
     return DragTarget<_DragData>(
       onWillAcceptWithDetails: (d) => _accepts(d.data, folder.children),
@@ -467,7 +506,13 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
           color: active
               ? palette.accent.withValues(alpha: 0.14)
               : Colors.transparent,
-          child: InkWell(
+          child: Stack(
+            children: [
+              if (glow)
+                Positioned.fill(
+                  child: IgnorePointer(child: _glowOverlay(palette, folder.id)),
+                ),
+              InkWell(
             onTap: () => _toggleCollapse(folder),
             child: SizedBox(
               height: _rowHeight,
@@ -515,6 +560,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
                 ],
               ),
             ),
+          ),
+            ],
           ),
         );
       },
