@@ -1,5 +1,6 @@
 FLUTTER := $(shell which flutter 2>/dev/null || echo /home/ravindu/development/flutter/bin/flutter)
 DEFINES := --dart-define-from-file=.dart_defines.json
+export PATH := $(PATH):/home/ravindu/Android/Sdk/platform-tools
 
 .PHONY: linux windows macos android apk
 

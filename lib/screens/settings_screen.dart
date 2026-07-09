@@ -629,14 +629,17 @@ class _Card extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
-    return Container(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(kRadius + 2),
-        border: Border.all(color: palette.border),
-      ),
+    return Material(
+      color: theme.colorScheme.surface,
+      borderRadius: BorderRadius.circular(kRadius + 2),
       clipBehavior: Clip.antiAlias,
-      child: child,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(kRadius + 2),
+          border: Border.all(color: palette.border),
+        ),
+        child: child,
+      ),
     );
   }
 }
