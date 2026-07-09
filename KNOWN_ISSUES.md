@@ -6,7 +6,7 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Cross-platform
 
-- **macOS sandbox entitlements are incomplete.** `macos/Runner/DebugProfile.entitlements` and `Release.entitlements` enable `com.apple.security.app-sandbox` but grant no file-access entitlement (e.g. `com.apple.security.files.user-selected.read-only`). PDF/image picking and reads may silently fail in macOS release builds without this.
+- **macOS sandbox entitlements are still missing file access.** `macos/Runner/DebugProfile.entitlements` and `Release.entitlements` enable `com.apple.security.app-sandbox` but grant no file-access entitlement (e.g. `com.apple.security.files.user-selected.read-only`). PDF/image picking and reads may silently fail in macOS release builds without this. (`keychain-access-groups` was added 07/09/26 to fix `flutter_secure_storage` failing with `-34018 "A required entitlement isn't present"` on Google sign-in — file access is the remaining gap.)
 
 ### Canvas v1 limitations (deliberate scope cuts — see CANVAS_SPEC.md §17/§19)
 
