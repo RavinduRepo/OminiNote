@@ -225,6 +225,76 @@ class _SignedOutRow extends StatelessWidget {
   }
 }
 
+/// Sign-out with safety: warns about unsynced changes and offers to remove
+/// local copies of synced notebooks (clean account switch, no accidental
+/// delete propagation). Local-only notebooks are always kept.
+Future<void> _signOutFlow(BuildContext context, String email) async {
+  final pending = SyncService().hasPendingUploads;
+  var removeLocal = false;
+  final go = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setLocal) => AlertDialog(
+        title: const Text('Sign out?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Sign out of ${email.isEmpty ? 'this account' : email}?'),
+            if (pending) ...[
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      size: 18, color: Colors.orange),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Some changes haven\'t synced to Drive yet. They stay on '
+                      'this device, but won\'t upload until you sign back in.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: removeLocal,
+              onChanged: pending
+                  ? null
+                  : (v) => setLocal(() => removeLocal = v ?? false),
+              title: const Text('Remove downloaded notebooks'),
+              subtitle: Text(
+                pending
+                    ? 'Sync first to enable this.'
+                    : 'Keeps local-only notebooks. Synced ones re-download when '
+                        'you sign back in.',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (go != true) return;
+  await SyncService().prepareSignOut(purgeSynced: removeLocal);
+  await AuthService().signOut();
+}
+
 class _SignedInRow extends StatelessWidget {
   final dynamic account; // GoogleSignInAccount
   const _SignedInRow({required this.account});
@@ -273,9 +343,7 @@ class _SignedInRow extends StatelessWidget {
             ),
           ),
           TextButton(
-            onPressed: () async {
-              await AuthService().signOut();
-            },
+            onPressed: () => _signOutFlow(context, email),
             child: const Text('Sign out'),
           ),
         ],

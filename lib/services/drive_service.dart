@@ -505,6 +505,32 @@ class DriveService {
     } catch (_) {}
   }
 
+  /// Forgets the reconciled `head` for every file under a notebook (keeping the
+  /// fileId mapping), so the next pull/resync re-downloads and merges them.
+  /// Used when re-enabling sync on a notebook that was local-only: its files
+  /// were listed (heads recorded) but their content was never applied, so
+  /// without this the unchanged-file check would wrongly skip them.
+  Future<void> forgetNotebookHeads(String notebookId) async {
+    final prefix = 'notebooks/$notebookId/';
+    for (final key in _index.keys.toList()) {
+      if (key.startsWith(prefix)) {
+        _index[key] = _IndexEntry(_index[key]!.id, null);
+      }
+    }
+    await _saveIndex();
+  }
+
+  /// Clears the path↔fileId↔head index (and its file). Used on sign-out so a
+  /// later sign-in — possibly to a different account — bootstraps fresh instead
+  /// of resuming against the previous account's Drive mappings.
+  Future<void> resetIndex() async {
+    _index.clear();
+    _rootFolderId = null;
+    _folderIds.clear();
+    _folderPathById.clear();
+    await _saveIndex();
+  }
+
   Future<void> _saveIndex() async {
     try {
       _indexFile ??=

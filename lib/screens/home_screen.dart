@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import '../models/notebook.dart';
-import '../services/auth_service.dart';
 import '../services/notebook_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
@@ -68,10 +67,8 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (context) => AlertDialog(
           title: const Text('Keep only on this device?'),
           content: Text(
-            '"${notebook.name}" will stop syncing on this device — no uploads '
-            'and no changes pulled from other devices. This is a per-device '
-            'choice; other devices can still sync their own copy. Content '
-            'already on Drive stays there until you delete it.',
+            '"${notebook.name}" will stop syncing here. Other devices keep '
+            'their own copy.',
           ),
           actions: [
             TextButton(
@@ -89,7 +86,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     await _notebookService.setNotebookLocalOnly(notebook.id, makeLocal);
     // Re-enabling: catch up on anything missed while disconnected.
-    if (!makeLocal && AuthService().isSignedIn) SyncService().repair();
+    if (!makeLocal) SyncService().reenableNotebookSync(notebook.id);
     _loadNotebooks();
   }
 

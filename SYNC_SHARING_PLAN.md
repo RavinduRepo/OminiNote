@@ -53,9 +53,18 @@ separate, *synced* property — added then.
   cloud sync** toggle; `SyncService` blocks sync **both directions** for
   local-only notebooks (push + pull) and preserves their local index entry.
   *Done.*
-- **Phase 1 — Sign-out safety.** Warn if a synced notebook has unflushed edits;
-  offer to remove local copies of notebooks fully synced to the account being
-  left; local-only notebooks always stay. Closes the accidental-delete gap.
+- **Phase 1 — Sign-out safety.** *Done.* Sign-out dialog warns about unsynced
+  edits and offers **"Remove downloaded notebooks"** (`purgeLocalSyncedNotebooks`
+  — deletes local copies of synced notebooks WITHOUT tombstoning, keeps
+  local-only ones) for a clean account switch + no accidental-delete
+  propagation; on sign-out the Drive index + changes token reset so re-sign-in
+  bootstraps. Two sync-correctness fixes found via this: (a) re-enabling a
+  local-only notebook now `forgetNotebookHeads` + a *guaranteed* resync (a plain
+  `repair` was dropped by the in-progress guard, so re-connected notebooks never
+  pulled); (b) in-flight guards (`_pulling`/`_resyncing`/`_pushing`) are
+  force-reset on sign-out **and** sign-in, so a sync interrupted by sign-out
+  can't leave a flag stuck and permanently block the next session's pull (the
+  "my edits go up but theirs never come down" bug).
 - **Phase 2 — Multi-account (simultaneous).** `AuthService` holds multiple
   accounts; `DriveService`/`SyncService` become per-account (own root + index);
   per-notebook "which account" picker.

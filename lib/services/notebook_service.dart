@@ -180,6 +180,30 @@ class NotebookService {
   Future<void> setNotebookLocalOnly(String notebookId, bool local) =>
       SettingsService().setNotebookLocalOnly(notebookId, local);
 
+  /// Removes local copies of all **synced** notebooks (keeps local-only ones),
+  /// WITHOUT tombstoning them — so signing back into the same account simply
+  /// re-downloads them, and no accidental delete propagates to Drive. Used on
+  /// sign-out to make account switching clean and delete-safe. Returns the
+  /// number of notebooks removed. Uses non-syncing writes (no dirty marks).
+  Future<int> purgeLocalSyncedNotebooks() async {
+    final localOnly = SettingsService().localOnlyNotebooks;
+    final data = await _readIndex();
+    final kept = <String, dynamic>{};
+    var removed = 0;
+    for (final entry in data.entries) {
+      if (localOnly.contains(entry.key)) {
+        kept[entry.key] = entry.value;
+        continue;
+      }
+      final dir = Directory('${appDir.path}/notebooks/${entry.key}');
+      if (await dir.exists()) await dir.delete(recursive: true);
+      removed++;
+    }
+    // Write the trimmed index without notifying sync (no tombstone, no upload).
+    await writeAtomicPublic(notebooksFile, jsonEncode(kept));
+    return removed;
+  }
+
   Future<void> reorderNotebooks(List<String> orderedIds) async {
     final data = await _readIndex();
     final reordered = <String, dynamic>{};

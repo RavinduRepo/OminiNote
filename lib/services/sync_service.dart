@@ -106,6 +106,12 @@ class SyncService {
   }
 
   Future<void> _onSignedIn() async {
+    // A sign-in is a fresh start: any in-flight guard is from a prior session
+    // (whose ops failed when the account went away). Force a clean slate so a
+    // stuck flag can't block this session's pulls/resyncs.
+    _pulling = false;
+    _resyncing = false;
+    _pushing = false;
     await DriveService().init();
     // Bootstrap (full download+merge) only when this install has never synced —
     // i.e. no changes token yet, or no local Drive index to poll against.
@@ -138,6 +144,53 @@ class SyncService {
 
   /// "Repair sync" — full two-way reconcile against the whole Drive tree.
   Future<void> repair() => fullResync();
+
+  /// True when edits haven't yet reached Drive (used to warn on sign-out).
+  bool get hasPendingUploads => _dirty.isNotEmpty;
+
+  /// Re-connects a notebook that was local-only: forgets the reconciled heads
+  /// of its files (which were listed but never applied while disconnected) and
+  /// runs a full resync to pull + merge whatever changed on other devices. The
+  /// resync is *guaranteed* to run even if one is currently in flight (a plain
+  /// [repair] would be dropped by the `_resyncing` guard).
+  Future<void> reenableNotebookSync(String notebookId) async {
+    if (!AuthService().isSignedIn) return;
+    await DriveService().forgetNotebookHeads(notebookId);
+    if (_resyncing) {
+      _scheduleResync(); // one is running — queue a follow-up
+    } else {
+      unawaited(fullResync());
+    }
+  }
+
+  /// Prepares for sign-out: stops sync, resets the Drive index + changes token
+  /// so a later sign-in (possibly a different account) bootstraps fresh. When
+  /// [purgeSynced] is true, also removes local copies of synced notebooks
+  /// (keeping local-only ones) so switching accounts is clean and no accidental
+  /// delete propagates. Returns how many notebooks were purged.
+  Future<int> prepareSignOut({required bool purgeSynced}) async {
+    _pushDebounce?.cancel();
+    _pollTimer?.cancel();
+    _resyncDebounce?.cancel();
+    // Clear in-flight guards: a sync interrupted by sign-out must not leave a
+    // flag stuck true, or the next sign-in's pull/resync is blocked forever
+    // (push is unaffected — the "my edits go up but theirs never come down"
+    // bug). The interrupted ops fail cleanly (account/token gone).
+    _pulling = false;
+    _resyncing = false;
+    _pushing = false;
+    status.value = SyncStatus.idle;
+    var removed = 0;
+    if (purgeSynced) {
+      _dirty.clear();
+      await _saveJournal();
+      removed = await NotebookService().purgeLocalSyncedNotebooks();
+    }
+    await DriveService().resetIndex();
+    await SettingsService().setDriveChangesToken('');
+    _bumpData();
+    return removed;
+  }
 
   /// Flush pending uploads immediately (e.g. when the app is backgrounded).
   Future<void> flushPending() => _flushPush();

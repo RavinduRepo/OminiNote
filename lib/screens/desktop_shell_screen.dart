@@ -5,7 +5,6 @@ import '../models/canvas.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
-import '../services/auth_service.dart';
 import '../services/notebook_service.dart';
 import '../services/search_service.dart';
 import '../services/settings_service.dart';
@@ -287,10 +286,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         builder: (context) => AlertDialog(
           title: const Text('Keep only on this device?'),
           content: Text(
-            '"${notebook.name}" will stop syncing on this device — no uploads '
-            'and no changes pulled from other devices. This is a per-device '
-            'choice; other devices can still sync their own copy. Content '
-            'already on Drive stays there until you delete it.',
+            '"${notebook.name}" will stop syncing here. Other devices keep '
+            'their own copy.',
           ),
           actions: [
             TextButton(
@@ -307,7 +304,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       if (ok != true) return;
     }
     await _service.setNotebookLocalOnly(notebook.id, makeLocal);
-    if (!makeLocal && AuthService().isSignedIn) SyncService().repair();
+    if (!makeLocal) SyncService().reenableNotebookSync(notebook.id);
     if (mounted) setState(() {});
   }
 
