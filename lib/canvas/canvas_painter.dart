@@ -392,19 +392,17 @@ class CanvasPainter extends CustomPainter {
       ..strokeWidth = 1.5
       ..color = accentColor;
 
-    // Text boxes auto-size to their content, so they get no resize corners —
-    // only move (the box) and rotate. Everything else gets corner handles.
-    if (!controller.selectionIsTextOnly) {
-      for (final corner in [
-        rect.topLeft,
-        rect.topRight,
-        rect.bottomLeft,
-        rect.bottomRight,
-      ]) {
-        final r = Rect.fromCircle(center: corner, radius: 6);
-        canvas.drawRect(r, handleFill);
-        canvas.drawRect(r, handleStroke);
-      }
+    // Corner handles for every selection. For text they resize the box's wrap
+    // width only (the font size never changes); for everything else they scale.
+    for (final corner in [
+      rect.topLeft,
+      rect.topRight,
+      rect.bottomLeft,
+      rect.bottomRight,
+    ]) {
+      final r = Rect.fromCircle(center: corner, radius: 6);
+      canvas.drawRect(r, handleFill);
+      canvas.drawRect(r, handleStroke);
     }
     canvas.drawCircle(rotatePos, 7, handleFill);
     canvas.drawCircle(rotatePos, 7, handleStroke);

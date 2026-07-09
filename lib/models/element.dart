@@ -310,6 +310,11 @@ class TextElement extends CanvasElement {
   /// Paragraph alignment (whole box).
   TextAlignOption align;
 
+  /// User-set wrap width (from a resize drag). When null the box auto-sizes to
+  /// its content; when set the box wraps text at this width and only its height
+  /// follows the content. Resizing never changes the font size.
+  double? manualWidth;
+
   // Default/baseline style — used for a new empty box, as the toolbar's
   // starting style, and as a fallback when [runs] is empty.
   String fontFamily;
@@ -336,6 +341,7 @@ class TextElement extends CanvasElement {
     this.bold = false,
     this.italic = false,
     this.align = TextAlignOption.left,
+    this.manualWidth,
   }) : runs =
            runs ??
            (text.isEmpty
@@ -381,6 +387,7 @@ class TextElement extends CanvasElement {
     bold: bold,
     italic: italic,
     align: align,
+    manualWidth: manualWidth,
   )..zIndex = zIndex;
 
   @override
@@ -434,6 +441,7 @@ class TextElement extends CanvasElement {
     'bold': bold,
     'italic': italic,
     'align': align.name,
+    if (manualWidth != null) 'mw': manualWidth,
   };
 
   factory TextElement.fromJson(Map<String, dynamic> json) {
@@ -475,6 +483,7 @@ class TextElement extends CanvasElement {
         (a) => a.name == json['align'],
         orElse: () => TextAlignOption.left,
       ),
+      manualWidth: (json['mw'] as num?)?.toDouble(),
     )..zIndex = (json['zi'] as num?)?.toDouble() ?? 0;
   }
 }

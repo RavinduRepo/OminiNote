@@ -370,7 +370,15 @@ class CanvasController extends ChangeNotifier {
 
   // ── Tool & style state ─────────────────────────────────────────────────
 
-  CanvasTool tool = CanvasTool.pen;
+  CanvasTool tool = CanvasTool.text;
+
+  /// The one automatic tool switch: an S-Pen / stylus touching the canvas while
+  /// the Text tool is active switches to the Pen (draw) tool. Only from Text —
+  /// any deliberately-chosen tool is left alone — and there's no restore on
+  /// lift (finger/mouse never draw unless Pen was explicitly picked).
+  void handleStylusInput() {
+    if (tool == CanvasTool.text) setTool(CanvasTool.pen);
+  }
 
   // Per-tool style memory: pen, highlighter, and text each keep their own
   // color (and the two ink tools their own width) — switching tools restores
@@ -1061,13 +1069,13 @@ class CanvasController extends ChangeNotifier {
     if (rect == null) return SelectionHit.none;
 
     bool near(Offset p) => (p - screenPos).distance <= _handleHitRadius;
-    // Text boxes have no resize corners (they auto-size); only move + rotate.
-    if (!selectionIsTextOnly) {
-      if (near(rect.topLeft)) return SelectionHit.resizeTL;
-      if (near(rect.topRight)) return SelectionHit.resizeTR;
-      if (near(rect.bottomLeft)) return SelectionHit.resizeBL;
-      if (near(rect.bottomRight)) return SelectionHit.resizeBR;
-    }
+    // All selections (text included) get corner handles. For text the corner
+    // drag changes the box's wrap WIDTH only — never the font size (see
+    // _updateSelectionDrag).
+    if (near(rect.topLeft)) return SelectionHit.resizeTL;
+    if (near(rect.topRight)) return SelectionHit.resizeTR;
+    if (near(rect.bottomLeft)) return SelectionHit.resizeBL;
+    if (near(rect.bottomRight)) return SelectionHit.resizeBR;
     if (near(rect.topCenter - const Offset(0, 36))) return SelectionHit.rotate;
     if (rect.inflate(8).contains(screenPos)) return SelectionHit.move;
     return SelectionHit.none;
@@ -1083,6 +1091,36 @@ class CanvasController extends ChangeNotifier {
     _recomputeSelectionBounds();
     notifyListeners();
   }
+
+  /// Tap-to-select in the lasso tool: selects the single topmost element under
+  /// a screen point (stroke, image, text box, or attachment chip), or clears
+  /// the selection if the tap missed everything. Returns the hit element.
+  CanvasElement? selectAt(Offset screenPos) {
+    final canvasPos = screenToCanvas(screenPos);
+    final pageLayout = layout.pageAt(canvasPos);
+    if (pageLayout == null) {
+      clearSelection();
+      return null;
+    }
+    final page = pages[pageLayout.pageId]!;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    // Topmost first, so a tap grabs what's visually on top.
+    for (final el in zOrderedElements(page).reversed) {
+      if (_tapHitsElement(el, local)) {
+        selectSingle(pageLayout.pageId, el);
+        return el;
+      }
+    }
+    clearSelection();
+    return null;
+  }
+
+  bool _tapHitsElement(CanvasElement el, Offset local) => switch (el) {
+    StrokeElement() => _strokeHit(el, local),
+    TextElement(:final rect) => rect.inflate(6).contains(local),
+    ImageElement(:final rect) => rect.contains(local),
+    AttachmentElement(:final rect) => rect.inflate(4).contains(local),
+  };
 
   void _beginSelectionDrag(SelectionHit hit, Offset canvasPos) {
     _dragMode = hit;
@@ -1105,6 +1143,35 @@ class CanvasController extends ChangeNotifier {
       case SelectionHit.resizeTR:
       case SelectionHit.resizeBL:
       case SelectionHit.resizeBR:
+        // Text boxes resize by wrap WIDTH only (font size never changes); the
+        // height follows the re-wrapped content. A left-side handle also moves
+        // the left edge; a right-side handle keeps the left edge fixed.
+        if (selectionIsTextOnly && selection.length == 1) {
+          final el = selection.first as TextElement;
+          final page = pages[selectionPageId!];
+          if (page == null) break;
+          final localPos = canvasPos - pageLayout.rect.topLeft;
+          final leftSide = _dragMode == SelectionHit.resizeTL ||
+              _dragMode == SelectionHit.resizeBL;
+          const minW = 40.0;
+          double newLeft = el.rect.left;
+          double newWidth;
+          if (leftSide) {
+            final right = el.rect.right;
+            newLeft = localPos.dx.clamp(0.0, right - minW);
+            newWidth = right - newLeft;
+          } else {
+            newWidth =
+                (localPos.dx - el.rect.left).clamp(minW, page.width - el.rect.left);
+          }
+          el.manualWidth = newWidth;
+          el.rect = Rect.fromLTWH(newLeft, el.rect.top, newWidth, el.rect.height);
+          el.rect = autoTextRect(el, page.width - newLeft - 6);
+          _dragLast = canvasPos;
+          _recomputeSelectionBounds();
+          notifyListeners();
+          return;
+        }
         final anchor = switch (_dragMode) {
           SelectionHit.resizeTL => bounds.bottomRight,
           SelectionHit.resizeTR => bounds.bottomLeft,

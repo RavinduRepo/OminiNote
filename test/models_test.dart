@@ -141,6 +141,40 @@ void main() {
       expect(plainBack.linkId, isNull);
     });
 
+    test('TextElement manualWidth (resized box) survives json + deepCopy', () {
+      final resized = TextElement(
+        id: 'el_resized',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(10, 10, 150, 60),
+        color: const Color(0xFF000000),
+        text: 'wrapped text',
+        manualWidth: 150,
+      );
+      final decoded =
+          CanvasElement.fromJson(
+                jsonDecode(jsonEncode(resized.toJson())) as Map<String, dynamic>,
+              )
+              as TextElement;
+      expect(decoded.manualWidth, 150);
+      expect(resized.deepCopy().manualWidth, 150);
+
+      // Auto-sizing boxes omit the key and decode back to null.
+      final auto = TextElement(
+        id: 'el_auto',
+        deviceId: 'test_device',
+        rect: const Rect.fromLTWH(0, 0, 100, 40),
+        color: const Color(0xFF000000),
+        text: 'x',
+      );
+      expect(auto.toJson().containsKey('mw'), isFalse);
+      final autoBack =
+          CanvasElement.fromJson(
+                jsonDecode(jsonEncode(auto.toJson())) as Map<String, dynamic>,
+              )
+              as TextElement;
+      expect(autoBack.manualWidth, isNull);
+    });
+
     test('legacy flat text (no runs) upgrades to a single run', () {
       final decoded =
           CanvasElement.fromJson({

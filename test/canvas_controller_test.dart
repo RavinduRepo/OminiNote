@@ -120,7 +120,7 @@ void main() {
     });
 
     test('selecting a different tool never opens options', () {
-      expect(controller.tool, CanvasTool.pen);
+      expect(controller.tool, CanvasTool.text); // Text is the default tool
       expect(controller.toolOptionsOpen, isFalse);
 
       controller.setTool(CanvasTool.highlighter);
@@ -130,16 +130,16 @@ void main() {
     });
 
     test('tapping the already-active tool toggles options open, then closed', () {
-      controller.setTool(CanvasTool.pen); // already the default tool
-      expect(controller.tool, CanvasTool.pen);
+      controller.setTool(CanvasTool.text); // already the default tool
+      expect(controller.tool, CanvasTool.text);
       expect(controller.toolOptionsOpen, isTrue);
 
-      controller.setTool(CanvasTool.pen); // tap again
+      controller.setTool(CanvasTool.text); // tap again
       expect(controller.toolOptionsOpen, isFalse);
     });
 
     test('switching to a different tool while options are open closes them', () {
-      controller.setTool(CanvasTool.pen); // opens options
+      controller.setTool(CanvasTool.text); // opens options (already active)
       expect(controller.toolOptionsOpen, isTrue);
 
       controller.setTool(CanvasTool.lasso); // a genuinely different tool

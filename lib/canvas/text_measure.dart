@@ -251,7 +251,11 @@ Rect autoTextRect(TextElement el, double maxWidth) {
   )..layout();
 
   final cap = math.max(maxWidth - kTextBoxPad, el.fontSize);
-  final contentWidth = math.min(natural.width, cap);
+  // A user-resized box wraps at its chosen width; otherwise auto-size to the
+  // text's natural single-line width (capped at the page edge).
+  final contentWidth = el.manualWidth != null
+      ? (el.manualWidth! - kTextBoxPad).clamp(el.fontSize, cap)
+      : math.min(natural.width, cap);
 
   final wrapped = TextPainter(
     text: span,
@@ -262,7 +266,7 @@ Rect autoTextRect(TextElement el, double maxWidth) {
   return Rect.fromLTWH(
     el.rect.left,
     el.rect.top,
-    wrapped.width + kTextBoxPad,
+    el.manualWidth ?? wrapped.width + kTextBoxPad,
     wrapped.height + kTextBoxPad,
   );
 }

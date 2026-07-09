@@ -193,13 +193,14 @@ class RichTextController extends TextEditingController {
       suffix++;
     }
     final insertedCount = neo.length - p - suffix;
-    final inheritIndex = p > 0 ? p - 1 : p;
-    final base = (inheritIndex >= 0 && inheritIndex < s.length)
-        ? s[inheritIndex]
-        : defaults;
+    // Newly typed characters take the current typing style (`defaults`). The
+    // editor keeps `defaults` in sync with the caret's surroundings on every
+    // caret move (so mid-text typing matches context) and with an explicit
+    // style the user just picked (so "set color, then type" actually applies —
+    // inheriting from the previous char here would silently ignore that).
     return [
       ...s.sublist(0, p.clamp(0, s.length)),
-      for (var i = 0; i < insertedCount; i++) base.clone(),
+      for (var i = 0; i < insertedCount; i++) defaults.clone(),
       ...s.sublist((oldText.length - suffix).clamp(0, s.length)),
     ];
   }

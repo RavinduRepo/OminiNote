@@ -68,10 +68,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// made ("selection dies as soon as the finger/mouse lifts").
   bool _pointerInTextEditor = false;
 
-  // A text box grabbed in text mode: a tap edits it, a drag moves it.
-  TextElement? _grabbedText;
-  String? _grabbedPageId;
   bool _elementGrabbing = false; // guards the pan recognizer for touch grabs
+
+  // Last tap (for double-tap detection in the lasso tool: double-tap an
+  // attachment chip to open it, since a single tap now selects it).
+  Offset? _lastTapPos;
+  DateTime? _lastTapTime;
 
   // Touch pan/zoom bookkeeping.
   Offset _lastFocal = Offset.zero;
@@ -376,6 +378,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
     _downPosition = e.localPosition;
 
+    // S-Pen / stylus touching the canvas while in Text mode auto-switches to
+    // the Pen (draw) tool — the only automatic tool switch.
+    if (e.kind == PointerDeviceKind.stylus ||
+        e.kind == PointerDeviceKind.invertedStylus) {
+      c.handleStylusInput();
+    }
+
     // Mouse or finger can grab the scrollbar thumb. Touch also goes through
     // the pan recognizer, so the scale handlers below no-op while a scrollbar
     // drag is active.
@@ -386,20 +395,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
       return;
     }
 
-    // Text mode: grab a text box under the point — a tap edits it, a drag
-    // moves it (no lasso needed). Empty area is handled on tap-up (new box).
+    // Text tool: it only creates/edits text — it never moves a box (that's the
+    // Lasso tool's job). Taps are handled on pointer-up (edit existing / create
+    // new); a drag just pans. So nothing to grab here.
     if (c.tool == CanvasTool.text) {
-      final hit = _textAt(e.localPosition);
-      if (hit != null) {
-        _grabbedText = hit.$2;
-        _grabbedPageId = hit.$1;
-        _elementGrabbing = e.kind == PointerDeviceKind.touch;
-        c.selectSingle(hit.$1, hit.$2);
-        _toolGestureActive = c.startToolGesture(
-          e.localPosition,
-          e.pressure == 0 ? 0.5 : e.pressure,
-        );
-      }
       return;
     }
 
@@ -465,37 +464,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
     if (_toolGestureActive) {
       _toolGestureActive = false;
 
-      // Text-mode grab: tap edits, drag commits the move.
-      if (_grabbedText != null) {
-        final el = _grabbedText!;
-        final pageId = _grabbedPageId!;
-        _grabbedText = null;
-        _grabbedPageId = null;
-        _elementGrabbing = false;
-        if (moved) {
-          c.endToolGesture();
-        } else {
-          c.cancelToolGesture();
-          _startTextEdit(pageId, el, isNew: false);
-        }
-        return;
-      }
-
-      // Lasso mode: a tap on an attachment chip opens it; a tap on a text
-      // box edits it (a drag draws the lasso).
+      // Lasso tool, TAP (not drag): select the single topmost element under
+      // the point so it can be moved/resized. A drag draws the lasso circle or
+      // moves the current selection (handled by endToolGesture).
       if (c.tool == CanvasTool.lasso && !moved) {
-        final att = _attachmentAt(e.localPosition);
-        if (att != null && c.selection.isEmpty) {
-          c.cancelToolGesture();
-          _openAttachment(att);
-          return;
-        }
-        final hit = _textAt(e.localPosition);
-        if (hit != null) {
-          c.cancelToolGesture();
-          _startTextEdit(hit.$1, hit.$2, isNew: false);
-          return;
-        }
+        c.cancelToolGesture();
+        _lassoTap(e.localPosition, e.kind);
+        return;
       }
 
       c.endToolGesture();
@@ -505,20 +480,16 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // Taps that didn't start a gesture.
     if (!moved && e.kind != PointerDeviceKind.trackpad) {
       if (c.tool == CanvasTool.text) {
+        // In the text tool a tap on an attachment opens it (single tap);
+        // otherwise edit an existing box / create a new one.
         final att = _attachmentAt(e.localPosition);
         if (att != null) {
           _openAttachment(att);
           return;
         }
-        _handleTextTap(e.localPosition); // empty area → new text box
+        _handleTextTap(e.localPosition);
       } else if (c.tool == CanvasTool.lasso) {
-        final att = _attachmentAt(e.localPosition);
-        if (att != null && c.selection.isEmpty) {
-          _openAttachment(att);
-          return;
-        }
-        final hit = _textAt(e.localPosition);
-        if (hit != null) _startTextEdit(hit.$1, hit.$2, isNew: false);
+        _lassoTap(e.localPosition, e.kind);
       }
     }
   }
@@ -533,13 +504,39 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
     _fingerDrawPointer = null;
     _pointerInTextEditor = false;
-    _grabbedText = null;
-    _grabbedPageId = null;
     _elementGrabbing = false;
     _downPosition = null;
   }
 
+  /// Lasso-tool tap: select the single topmost element under [screenPos] (so it
+  /// can be moved/resized via the handles). Attachments open on a single tap
+  /// with a finger (mobile); with a mouse/pen a single tap selects the
+  /// attachment and a double tap opens it.
+  void _lassoTap(Offset screenPos, PointerDeviceKind kind) {
+    final c = _controller!;
+    final att = _attachmentAt(screenPos);
+    if (att != null) {
+      if (kind == PointerDeviceKind.touch) {
+        _openAttachment(att); // finger: single tap opens
+        return;
+      }
+      final now = DateTime.now();
+      final isDouble = _lastTapTime != null &&
+          _lastTapPos != null &&
+          now.difference(_lastTapTime!) < const Duration(milliseconds: 350) &&
+          (screenPos - _lastTapPos!).distance < 24;
+      _lastTapTime = now;
+      _lastTapPos = screenPos;
+      if (isDouble) {
+        _openAttachment(att);
+        return;
+      }
+    }
+    c.selectAt(screenPos);
+  }
+
   /// Topmost text element under a screen position, with its page id.
+  // ignore: unused_element
   (String, TextElement)? _textAt(Offset screenPos) {
     final c = _controller!;
     final canvasPos = c.screenToCanvas(screenPos);
@@ -1878,7 +1875,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
           child: Material(
             color: Colors.transparent,
             child: Container(
-              decoration: BoxDecoration(
+              // foregroundDecoration paints the border *over* the child without
+              // insetting it — so the TextField keeps the full box width and
+              // wraps at the same width the painter/autoTextRect measured. A
+              // bordered `decoration` (which insets by the border width) plus
+              // content padding made the live editor narrower than the box,
+              // wrapping the first line early then snapping back on commit.
+              foregroundDecoration: BoxDecoration(
                 border: Border.all(
                   color: Theme.of(context).colorScheme.primary,
                 ),
@@ -1899,7 +1902,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 },
                 decoration: const InputDecoration(
                   isDense: true,
-                  contentPadding: EdgeInsets.all(4),
+                  // Zero padding so the text area matches the box width exactly
+                  // (the painter draws text flush at the rect's top-left too).
+                  contentPadding: EdgeInsets.zero,
                   border: InputBorder.none,
                   filled: false,
                 ),
