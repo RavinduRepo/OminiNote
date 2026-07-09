@@ -24,6 +24,7 @@ import '../services/pdf_exporter.dart';
 import '../services/settings_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
+import 'page_organizer.dart';
 
 /// The Canvas: a freely pannable/zoomable surface of pages (blank or
 /// PDF-backed) with ink, text, and images. The app owns the viewport;
@@ -1235,73 +1236,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   Future<void> _showNavigator() async {
     final c = _controller!;
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: ListenableBuilder(
-          listenable: c,
-          builder: (context, _) {
-            final entries = c.layout.pages;
-            return ListView.builder(
-              itemCount: entries.length,
-              itemBuilder: (context, i) {
-                final l = entries[i];
-                final page = c.pages[l.pageId];
-                final isPdf = page?.source != null;
-                return ListTile(
-                  leading: Icon(
-                    isPdf ? Icons.picture_as_pdf_outlined : Icons.crop_portrait,
-                  ),
-                  title: Text('Page ${i + 1}'),
-                  subtitle: Text(
-                    'Row ${l.rowIndex + 1}'
-                    '${l.colIndex > 0 ? ' · position ${l.colIndex + 1}' : ''}'
-                    '${isPdf ? ' · PDF' : ''}',
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    c.jumpToPage(l.pageId);
-                  },
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (action) {
-                      switch (action) {
-                        case 'duplicate':
-                          c.duplicatePage(l.pageId);
-                        case 'copy':
-                          c.copyPageToClipboard(l.pageId);
-                          _toast('Page copied — paste it from Add ＋ in any '
-                              'canvas');
-                        case 'delete':
-                          if (!c.deletePage(l.pageId)) {
-                            _toast("Can't delete the only page");
-                          }
-                        case 'up':
-                          c.moveRow(l.rowIndex, -1);
-                        case 'down':
-                          c.moveRow(l.rowIndex, 1);
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(
-                        value: 'duplicate',
-                        child: Text('Duplicate'),
-                      ),
-                      PopupMenuItem(
-                        value: 'copy',
-                        child: Text('Copy page'),
-                      ),
-                      PopupMenuItem(value: 'up', child: Text('Move row up')),
-                      PopupMenuItem(
-                        value: 'down',
-                        child: Text('Move row down'),
-                      ),
-                      PopupMenuItem(value: 'delete', child: Text('Delete')),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => PageOrganizer(
+          controller: c,
+          onJump: (pageId) => c.jumpToPage(pageId),
         ),
       ),
     );

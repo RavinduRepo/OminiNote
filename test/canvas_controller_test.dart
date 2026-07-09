@@ -103,6 +103,66 @@ void main() {
     });
   });
 
+  group('CanvasController.reorderPages (preserve rows)', () {
+    CanvasController make() {
+      final pages = {
+        for (final id in ['a', 'b', 'c', 'd'])
+          id: CanvasPage(id: id, deviceId: 'test_device'),
+      };
+      final canvas = Canvas(
+        id: 's5',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Reorder test',
+        createdAt: DateTime(2026, 7, 9),
+        rows: [
+          PageRow(id: 'r1', pageIds: ['a']),
+          PageRow(id: 'r2', pageIds: ['b', 'c']), // a horizontal (multi-page) row
+          PageRow(id: 'r3', pageIds: ['d']),
+        ],
+      );
+      return CanvasController(canvas: canvas, pages: pages);
+    }
+
+    test('orderedPageIds flattens rows in document order', () {
+      expect(make().orderedPageIds, ['a', 'b', 'c', 'd']);
+    });
+
+    test('an undisturbed multi-page row stays grouped when reordered', () {
+      final c = make();
+      c.reorderPages(['a', 'd', 'b', 'c']); // move d up; b,c stay adjacent
+      expect(c.canvas.rows.map((r) => r.pageIds).toList(), [
+        ['a'],
+        ['d'],
+        ['b', 'c'], // preserved
+      ]);
+    });
+
+    test('pulling a page out of a multi-page row splits it', () {
+      final c = make();
+      c.reorderPages(['a', 'b', 'd', 'c']); // d between b and c
+      expect(c.canvas.rows.map((r) => r.pageIds).toList(), [
+        ['a'],
+        ['b'],
+        ['d'],
+        ['c'],
+      ]);
+    });
+
+    test('reorder is undoable', () {
+      final c = make();
+      c.reorderPages(['d', 'a', 'b', 'c']);
+      expect(c.orderedPageIds, ['d', 'a', 'b', 'c']);
+      c.undo();
+      expect(c.orderedPageIds, ['a', 'b', 'c', 'd']);
+      expect(c.canvas.rows.map((r) => r.pageIds).toList(), [
+        ['a'],
+        ['b', 'c'],
+        ['d'],
+      ]);
+    });
+  });
+
   group('CanvasController.setTool / toolOptionsOpen', () {
     late CanvasController controller;
 

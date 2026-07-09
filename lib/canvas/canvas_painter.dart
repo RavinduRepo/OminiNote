@@ -34,11 +34,14 @@ class CanvasPainter extends CustomPainter {
     canvas.save();
     canvas.transform(controller.viewportMatrix.storage);
 
-    for (final l in controller.layout.pages) {
+    final allPages = controller.layout.pages;
+    for (var i = 0; i < allPages.length; i++) {
+      final l = allPages[i];
       if (!l.rect.overlaps(visibleCanvasRect)) continue;
       final page = controller.pages[l.pageId];
       if (page == null) continue;
       _paintPage(canvas, l, page);
+      _paintPageNumber(canvas, l.rect, i + 1);
     }
 
     canvas.restore();
@@ -129,6 +132,36 @@ class CanvasPainter extends CustomPainter {
   }
 
   String? get _lassoPageId => controller.gesturePageId;
+
+  /// A soft, screen-only page number at the page's bottom-right (PDF-viewer
+  /// style). Sized inversely to zoom so it stays a constant on-screen size, and
+  /// never drawn into a PDF export (this is painter-only).
+  void _paintPageNumber(Canvas canvas, Rect rect, int number) {
+    final zoom = controller.zoom;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: '$number',
+        style: TextStyle(
+          fontSize: 10 / zoom,
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final padX = 6 / zoom, padY = 2 / zoom, margin = 6 / zoom;
+    final w = tp.width + padX * 2, h = tp.height + padY * 2;
+    final left = rect.right - margin - w;
+    final top = rect.bottom - margin - h;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(left, top, w, h),
+        Radius.circular(h / 2),
+      ),
+      Paint()..color = Colors.black.withValues(alpha: 0.42),
+    );
+    tp.paint(canvas, Offset(left + padX, top + padY));
+  }
 
   void _paintElement(Canvas canvas, CanvasElement el) {
     switch (el) {

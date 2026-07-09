@@ -2309,6 +2309,120 @@ class CanvasController extends ChangeNotifier {
     );
   }
 
+  /// Flat list of all page ids in document order (rows top→bottom, pages
+  /// left→right within a row). The page-organizer works on this order.
+  List<String> get orderedPageIds =>
+      [for (final row in canvas.rows) ...row.pageIds];
+
+  /// Reorders pages to match [newOrder] (a permutation of [orderedPageIds]).
+  /// Rows are preserved: pages that were in the same multi-page row and remain
+  /// adjacent stay grouped in one row; a page dragged away from its row becomes
+  /// its own single-page row. One undoable structural op.
+  void reorderPages(List<String> newOrder) {
+    // Which original row each page belonged to.
+    final rowOf = <String, String>{};
+    for (final row in canvas.rows) {
+      for (final id in row.pageIds) {
+        rowOf[id] = row.id;
+      }
+    }
+
+    List<PageRow> build() {
+      final rows = <PageRow>[];
+      for (final id in newOrder) {
+        final rid = rowOf[id];
+        final last = rows.isEmpty ? null : rows.last;
+        // Keep a page with its original row only while its siblings stay
+        // contiguous — so an undisturbed horizontal row survives intact.
+        if (last != null &&
+            rid != null &&
+            last.pageIds.isNotEmpty &&
+            rowOf[last.pageIds.last] == rid) {
+          last.pageIds.add(id);
+        } else {
+          rows.add(PageRow(id: _service.newId(), pageIds: [id]));
+        }
+      }
+      return rows;
+    }
+
+    final beforeSnapshot = [
+      for (final r in canvas.rows) PageRow(id: r.id, pageIds: [...r.pageIds]),
+    ];
+    final afterSnapshot = build();
+    if (_sameRows(beforeSnapshot, afterSnapshot)) return; // no-op
+
+    void restore(List<PageRow> snapshot) {
+      canvas.rows
+        ..clear()
+        ..addAll([
+          for (final r in snapshot) PageRow(id: r.id, pageIds: [...r.pageIds]),
+        ]);
+    }
+
+    _doOp(
+      _CanvasOp(
+        label: 'Reorder pages',
+        structural: true,
+        apply: () => restore(afterSnapshot),
+        revert: () => restore(beforeSnapshot),
+      ),
+    );
+  }
+
+  /// Replaces the canvas's row/column structure with [rows] (each inner list is
+  /// one row's page ids, left→right). Empty rows are dropped. Lets the page
+  /// organizer move pages freely between and within rows (creating/splitting
+  /// multi-page horizontal rows). One undoable structural op; no-op if
+  /// unchanged.
+  void setPageRows(List<List<String>> rows) {
+    final cleaned = [
+      for (final r in rows)
+        if (r.isNotEmpty) List<String>.from(r),
+    ];
+    if (cleaned.isEmpty) return;
+
+    final beforeSnapshot = [
+      for (final r in canvas.rows) PageRow(id: r.id, pageIds: [...r.pageIds]),
+    ];
+    final afterSnapshot = [
+      for (final r in cleaned) PageRow(id: _service.newId(), pageIds: r),
+    ];
+    if (_sameRows(beforeSnapshot, afterSnapshot)) return;
+
+    void restore(List<PageRow> snapshot) {
+      canvas.rows
+        ..clear()
+        ..addAll([
+          for (final r in snapshot) PageRow(id: r.id, pageIds: [...r.pageIds]),
+        ]);
+    }
+
+    _doOp(
+      _CanvasOp(
+        label: 'Rearrange pages',
+        structural: true,
+        apply: () => restore(afterSnapshot),
+        revert: () => restore(beforeSnapshot),
+      ),
+    );
+  }
+
+  /// The current structure as a list of rows of page ids (for the organizer).
+  List<List<String>> get pageRows =>
+      [for (final row in canvas.rows) [...row.pageIds]];
+
+  bool _sameRows(List<PageRow> a, List<PageRow> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].pageIds.length != b[i].pageIds.length) return false;
+      for (var j = 0; j < a[i].pageIds.length; j++) {
+        if (a[i].pageIds[j] != b[i].pageIds[j]) return false;
+      }
+    }
+    return true;
+  }
+
   void moveRow(int rowIndex, int direction) {
     final target = rowIndex + direction;
     if (rowIndex < 0 ||
