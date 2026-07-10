@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual "build only" run (Actions tab → Run workflow): builds every platform
+  # and uploads artifacts for testing, without creating a GitHub release.
+  workflow_dispatch:
 
 jobs:
   # ── Android APK ──────────────────────────────────────────────────────────────
@@ -177,6 +180,8 @@ jobs:
   # ── Create GitHub Release ─────────────────────────────────────────────────────
   release:
     needs: [android, linux, windows, macos]
+    # Only publish a release for real version tags; manual runs just build.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
