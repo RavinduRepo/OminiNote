@@ -9,7 +9,7 @@
 
 #define AppName "OminiNote"
 #define AppExe "omininote.exe"
-#define AppVersion "1.0.0"
+#define AppVersion "1.2.0"
 #define AppPublisher "OminiNote"
 
 [Setup]
