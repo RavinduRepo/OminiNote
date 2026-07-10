@@ -128,13 +128,20 @@ jobs:
           --dart-define=WEB_CLIENT_ID=${{ secrets.WEB_CLIENT_ID }}
           --dart-define=WEB_CLIENT_SECRET=${{ secrets.WEB_CLIENT_SECRET }}
 
-      - name: Package Windows build
+      - name: Build Windows installer (Inno Setup, registers .omninote + omninote://)
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows\omininote.iss
+
+      - name: Package portable Windows build
         run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath omininote-windows-x64.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-artifact
-          path: omininote-windows-x64.zip
+          path: |
+            omininote-windows-setup.exe
+            omininote-windows-x64.zip
 
   # ── macOS ─────────────────────────────────────────────────────────────────────
   macos:
@@ -185,6 +192,7 @@ jobs:
             omininote-android.apk
             omininote-android.aab
             omininote-linux-x64.tar.gz
+            omininote-windows-setup.exe
             omininote-windows-x64.zip
             omininote-macos.zip
           generate_release_notes: true

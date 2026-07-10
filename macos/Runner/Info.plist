@@ -28,5 +28,58 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- Open .omninote notebook bundles with the app. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>OminiNote notebook</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.omininote.notebook</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>omninote</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.omininote.notebook</string>
+			<key>UTTypeDescription</key>
+			<string>OminiNote notebook</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>omninote</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<!-- omninote:// share links. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.omininote.link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>omninote</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

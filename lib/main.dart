@@ -111,6 +111,9 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
         }
         return null;
       });
+      // Tell the native runner we're ready, so any file/link opened before
+      // Flutter started (cold launch) is flushed to us now.
+      channel.invokeMethod('ready');
     }
   }
 
