@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'screens/desktop_shell_screen.dart';
@@ -13,9 +14,26 @@ import 'services/sync_service.dart';
 import 'theme/app_theme.dart';
 import 'utils/notebook_share_ui.dart';
 
-void main() async {
+/// A `.omninote` file path or `omninote://` URI the desktop OS launched us with
+/// (Linux/Windows forward argv to the Dart entrypoint). Consumed once by the app
+/// root. macOS delivers opens via an `openFile`/`openURLs` event instead (see
+/// the method channel in [_NoteAppState]).
+String? _initialDesktopOpen;
+
+void main(List<String> args) async {
   // Ensures hardware bindings are initialized for rendering
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Desktop open-with: the OS may launch us with a file path or omninote:// URI
+  // as a command-line argument (double-click a .omninote / tap a link).
+  if (Platform.isLinux || Platform.isWindows) {
+    for (final a in args) {
+      if (a.startsWith('omninote://') || a.toLowerCase().endsWith('.omninote')) {
+        _initialDesktopOpen = a;
+        break;
+      }
+    }
+  }
 
   // pdfrx is used engine-only (page rendering, no PdfViewer) — needs an
   // explicit init when documents are opened directly.
@@ -66,15 +84,42 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   /// share sheet) — routes it into the notebook-import flow. Desktop open-with
   /// needs native-runner wiring and is handled with the installer packaging.
   void _setupIncomingFiles() {
-    if (!(Platform.isAndroid || Platform.isIOS)) return;
-    // Cold start: the app was launched by tapping the file.
-    ReceiveSharingIntent.instance.getInitialMedia().then((files) {
-      if (files.isNotEmpty) _handleIncoming(files);
-      ReceiveSharingIntent.instance.reset();
-    });
-    // Warm: the app was already running.
-    _intentSub =
-        ReceiveSharingIntent.instance.getMediaStream().listen(_handleIncoming);
+    if (Platform.isAndroid || Platform.isIOS) {
+      // Cold start: the app was launched by tapping the file.
+      ReceiveSharingIntent.instance.getInitialMedia().then((files) {
+        if (files.isNotEmpty) _handleIncoming(files);
+        ReceiveSharingIntent.instance.reset();
+      });
+      // Warm: the app was already running.
+      _intentSub = ReceiveSharingIntent.instance
+          .getMediaStream()
+          .listen(_handleIncoming);
+      return;
+    }
+    // Desktop cold-start: Linux/Windows forwarded the file path / omninote://
+    // URI as a launch argument (captured in main()).
+    final initial = _initialDesktopOpen;
+    _initialDesktopOpen = null;
+    if (initial != null) _handleDesktopOpen(initial);
+    // macOS delivers opens via an openFile/openURLs event; the Swift runner
+    // pushes them over this channel (also covers desktop warm-start there).
+    if (Platform.isMacOS) {
+      const channel = MethodChannel('omninote/open');
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'open' && call.arguments is String) {
+          _handleDesktopOpen(call.arguments as String);
+        }
+        return null;
+      });
+    }
+  }
+
+  void _handleDesktopOpen(String item) {
+    if (item.startsWith('omninote://')) {
+      _handleLink(item);
+    } else {
+      _importFromPath(item);
+    }
   }
 
   void _handleIncoming(List<SharedMediaFile> files) {
