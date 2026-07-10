@@ -80,6 +80,9 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _shareNotebook(Notebook notebook) =>
       shareNotebookCopy(context, notebook);
 
+  Future<void> _shareNotebookLink(Notebook notebook) =>
+      shareNotebookLink(context, notebook);
+
   Future<void> _renameNotebook(Notebook notebook) async {
     final name = await _promptForName(
       title: 'Rename notebook',
@@ -243,6 +246,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               onColor: () => _colorNotebook(notebook),
                               onExport: () => _exportNotebookPdf(notebook),
                               onShare: () => _shareNotebook(notebook),
+                              onShareLink: () => _shareNotebookLink(notebook),
                               onSyncTo: () => _pickSyncTarget(notebook),
                               onDelete: () => _deleteNotebook(notebook),
                             ),
@@ -268,6 +272,7 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onColor;
   final VoidCallback onExport;
   final VoidCallback onShare;
+  final VoidCallback onShareLink;
   final VoidCallback onSyncTo;
   final VoidCallback onDelete;
 
@@ -278,6 +283,7 @@ class _NotebookRow extends StatelessWidget {
     required this.onColor,
     required this.onExport,
     required this.onShare,
+    required this.onShareLink,
     required this.onSyncTo,
     required this.onDelete,
   });
@@ -355,6 +361,7 @@ class _NotebookRow extends StatelessWidget {
                 onColor: onColor,
                 onExport: onExport,
                 onShare: onShare,
+                onShareLink: onShareLink,
                 onSyncTo: onSyncTo,
                 onDelete: onDelete,
               ),
@@ -371,6 +378,7 @@ class _RowMenu extends StatelessWidget {
   final VoidCallback onColor;
   final VoidCallback onExport;
   final VoidCallback onShare;
+  final VoidCallback onShareLink;
   final VoidCallback onSyncTo;
   final VoidCallback onDelete;
   const _RowMenu({
@@ -378,6 +386,7 @@ class _RowMenu extends StatelessWidget {
     required this.onColor,
     required this.onExport,
     required this.onShare,
+    required this.onShareLink,
     required this.onSyncTo,
     required this.onDelete,
   });
@@ -392,6 +401,7 @@ class _RowMenu extends StatelessWidget {
         if (value == 'color') onColor();
         if (value == 'export') onExport();
         if (value == 'share') onShare();
+        if (value == 'sharelink') onShareLink();
         if (value == 'sync') onSyncTo();
         if (value == 'delete') onDelete();
       },
@@ -433,6 +443,16 @@ class _RowMenu extends StatelessWidget {
               Icon(Icons.ios_share, size: 18),
               SizedBox(width: 10),
               Text('Send a copy'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'sharelink',
+          child: Row(
+            children: [
+              Icon(Icons.link, size: 18),
+              SizedBox(width: 10),
+              Text('Share link'),
             ],
           ),
         ),

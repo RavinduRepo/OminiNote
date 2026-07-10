@@ -1,9 +1,12 @@
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/notebook.dart';
+import '../services/auth_service.dart';
+import '../services/drive_service.dart';
 import '../services/notebook_bundle_service.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
@@ -53,6 +56,97 @@ Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
       behavior: SnackBarBehavior.floating,
     ));
   }
+}
+
+/// Shares a notebook as an `omninote://` **link**: hosts the bundle on a
+/// connected account's Drive ("anyone with the link"), then shares
+/// `omninote://import?id=<fileId>`. Needs a signed-in account (falls back to a
+/// hint to use "Send a copy" otherwise). It's a copy at share time — later edits
+/// don't change what the link delivers.
+Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final accounts = AuthService().accounts.value;
+  if (accounts.isEmpty) {
+    messenger.showSnackBar(const SnackBar(
+      content: Text('Sign in to share a link — or use “Send a copy”.'),
+      behavior: SnackBarBehavior.floating,
+    ));
+    return;
+  }
+  // Host it on the notebook's own account if connected, else the first account.
+  final target = notebook.syncTarget ?? AuthService().defaultAccountId;
+  final accountId = (target != null && accounts.any((a) => a.id == target))
+      ? target
+      : accounts.first.id;
+
+  _showProgress(context, 'Creating link…');
+  try {
+    final bytes = await _bundle.exportBundle(notebook.id);
+    final fileId = await DriveManager.forAccount(accountId)
+        .uploadSharedBundle(_bundleFileName(notebook.name), bytes);
+    if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+    if (fileId == null) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Couldn\'t create the link.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    await SharePlus.instance.share(ShareParams(
+      text: 'omninote://import?id=$fileId',
+      subject: notebook.name,
+    ));
+  } catch (e) {
+    if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+    messenger.showSnackBar(SnackBar(
+      content: Text('Couldn\'t create the link: $e'),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+}
+
+/// Handles a tapped `omninote://import?id=…` link: downloads the public bundle
+/// over HTTPS and imports it (account picker). Returns the imported notebook.
+Future<Notebook?> importNotebookFromLink(BuildContext context, Uri uri) async {
+  final id = uri.queryParameters['id'];
+  if (id == null || id.isEmpty) return null;
+  final messenger = ScaffoldMessenger.of(context);
+
+  _showProgress(context, 'Downloading notebook…');
+  List<int>? bytes;
+  try {
+    final resp = await http.get(Uri.parse(
+        'https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t'));
+    if (resp.statusCode == 200) bytes = resp.bodyBytes;
+  } catch (_) {}
+  if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+
+  if (bytes == null) {
+    messenger.showSnackBar(const SnackBar(
+      content: Text('Couldn\'t download the shared notebook.'),
+      behavior: SnackBarBehavior.floating,
+    ));
+    return null;
+  }
+  if (!context.mounted) return null;
+  return importBundleBytes(context, bytes);
+}
+
+void _showProgress(BuildContext context, String label) {
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (context) => AlertDialog(
+      content: Row(children: [
+        const SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2.5)),
+        const SizedBox(width: 18),
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+      ]),
+    ),
+  );
 }
 
 /// Picks a `.omninote` file, asks which account to sync it to, and imports it as

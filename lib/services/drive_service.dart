@@ -243,6 +243,35 @@ class DriveService {
     return created.headRevisionId;
   }
 
+  /// Uploads a share bundle to `omininote/shared/` and makes it public
+  /// ("anyone with the link" can read), returning its Drive file id — used for
+  /// the `omninote://` share link. It's kept OUT of the synced tree (its path
+  /// isn't index-tracked), so the sync loop ignores it. The recipient downloads
+  /// it over plain HTTPS: a `drive.file`-scoped app can't see another user's
+  /// shared file through the API, but a public link needs no auth.
+  Future<String?> uploadSharedBundle(String name, List<int> bytes) async {
+    final root = await rootFolderId;
+    final folder = await _findOrCreateFolder('shared', root);
+    final media = gd.Media(Stream.value(bytes), bytes.length,
+        contentType: 'application/octet-stream');
+    final created = await _drive.files.create(
+      gd.File()
+        ..name = name
+        ..parents = [folder],
+      uploadMedia: media,
+      $fields: 'id',
+    );
+    final id = created.id;
+    if (id == null) return null;
+    await _drive.permissions.create(
+      gd.Permission()
+        ..type = 'anyone'
+        ..role = 'reader',
+      id,
+    );
+    return id;
+  }
+
   // ── Downloads ──────────────────────────────────────────────────────────────
 
   Future<List<int>?> downloadById(String fileId) async {

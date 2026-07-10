@@ -79,11 +79,25 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
 
   void _handleIncoming(List<SharedMediaFile> files) {
     if (files.isEmpty) return;
+    // A tapped omninote:// share link arrives as a URL "media" entry.
+    if (files.first.path.startsWith('omninote://')) {
+      _handleLink(files.first.path);
+      return;
+    }
     final f = files.firstWhere(
       (m) => m.path.toLowerCase().endsWith('.omninote'),
       orElse: () => files.first,
     );
     _importFromPath(f.path);
+  }
+
+  void _handleLink(String uriStr) {
+    final uri = Uri.tryParse(uriStr);
+    if (uri == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _navigatorKey.currentContext;
+      if (ctx != null) importNotebookFromLink(ctx, uri);
+    });
   }
 
   Future<void> _importFromPath(String path) async {

@@ -1243,6 +1243,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               _exportNotebookPdf(notebook);
                             case 'share':
                               shareNotebookCopy(context, notebook);
+                            case 'sharelink':
+                              shareNotebookLink(context, notebook);
                             case 'sync':
                               _pickSyncTarget(notebook);
                             case 'delete':
@@ -1265,6 +1267,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           const PopupMenuItem(
                             value: 'share',
                             child: Text('Send a copy'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'sharelink',
+                            child: Text('Share link'),
                           ),
                           const PopupMenuItem(
                             value: 'sync',
