@@ -144,8 +144,17 @@ class NotebookService {
     return nb.deletedAt == null ? nb : null;
   }
 
-  Future<Notebook> createNotebook(String name) async {
-    final notebook = Notebook(id: newId(), deviceId: SettingsService().deviceId, name: name, createdAt: DateTime.now());
+  /// Creates a notebook bound to [syncTarget] (an account id, or null for
+  /// "unassigned / local"). Phase 2: the account is chosen explicitly at
+  /// creation — there is no implicit default.
+  Future<Notebook> createNotebook(String name, {String? syncTarget}) async {
+    final notebook = Notebook(
+      id: newId(),
+      deviceId: SettingsService().deviceId,
+      name: name,
+      createdAt: DateTime.now(),
+      syncTarget: syncTarget,
+    );
     final data = await _readIndex();
     data[notebook.id] = notebook.toJson();
     await _writeAtomic(notebooksFile, jsonEncode(data));
@@ -175,31 +184,135 @@ class NotebookService {
     await saveNotebook(nb);
   }
 
+  /// Binds a notebook to a Google account for sync (Phase 2). [accountId] is the
+  /// account's `sub`; `null` means "the default account". Synced (bumps rev via
+  /// [saveNotebook]) so both devices agree on where the notebook lives.
+  Future<void> setNotebookSyncTarget(String notebookId, String? accountId) async {
+    final nb = await getNotebook(notebookId);
+    if (nb == null) return;
+    nb.syncTarget = accountId;
+    await saveNotebook(nb);
+  }
+
+  /// **Move** a notebook to a *different* account by re-keying it to a fresh id.
+  /// This is the load-bearing fix for cross-account collisions: the same
+  /// notebook id must never live on two accounts' Drives, or edits/deletes bleed
+  /// across accounts and the binding flip-flops. So a move:
+  ///   1. copies the whole file subtree `notebooks/<old>/` → `notebooks/<new>/`,
+  ///   2. rewrites each section's `notebookId` to the new id (fresh rev),
+  ///   3. adds a new index entry (new id, `syncTarget = destAccountId`),
+  ///   4. **tombstones the old entry** (keeping its old `syncTarget`) so the
+  ///      source account propagates a delete and other devices drop the old id.
+  /// Returns the new notebook id, or null if the notebook is gone.
+  ///
+  /// The caller MUST have fully synced the notebook down from its source account
+  /// first (so the copy is the complete cloud+local union — no data loss).
+  Future<String?> rekeyNotebookForMove(
+      String oldId, String destAccountId) async {
+    final data = await _readIndex();
+    final oldJson = data[oldId] as Map<String, dynamic>?;
+    if (oldJson == null) return null;
+    final oldNb = Notebook.fromJson(oldJson);
+    final newNotebookId = newId();
+
+    // **Deep re-id.** Give every section AND canvas a fresh id, so the moved
+    // notebook shares NO identity with the original. This is load-bearing: the
+    // open-canvas live-merge (`SyncService._notifyOpenCanvas`) routes pulled
+    // pages to a listener **keyed by canvas id** — if the moved copy kept the
+    // same canvas ids, a device signed into both accounts would relay a page
+    // pulled from one account into the *other* account's open canvas, bridging
+    // edits/deletes across accounts. New ids at every level break that bridge.
+    // (Page ids can stay — page files live under the now-unique canvas paths.)
+    final sectionIdMap = <String, String>{};
+    for (final oldSecId in oldNb.allSectionIds) {
+      final sec = await getSection(oldId, oldSecId);
+      if (sec == null) continue;
+      final newSecId = newId();
+      final canvasIdMap = <String, String>{};
+      for (final oldCanvasId in sec.allCanvasIds) {
+        canvasIdMap[oldCanvasId] = await _duplicateCanvasDir(
+            oldId, oldSecId, oldCanvasId, newNotebookId, newSecId);
+      }
+      await _writeAtomic(
+        _sectionFile(newNotebookId, newSecId),
+        jsonEncode(
+          Section(
+            id: newSecId,
+            deviceId: SettingsService().deviceId,
+            notebookId: newNotebookId,
+            name: sec.name,
+            createdAt: sec.createdAt,
+            color: sec.color,
+            nodes: sec.nodes.map((n) => _remapClone(n, canvasIdMap)).toList(),
+          ).toJson(),
+        ),
+      );
+      sectionIdMap[oldSecId] = newSecId;
+    }
+
+    // New index entry (remapped section tree, bound to the destination account).
+    final newNb = Notebook(
+      id: newNotebookId,
+      deviceId: SettingsService().deviceId,
+      name: oldNb.name,
+      createdAt: oldNb.createdAt,
+      color: oldNb.color,
+      syncTarget: destAccountId,
+      nodes: oldNb.nodes.map((n) => _remapClone(n, sectionIdMap)).toList(),
+    );
+    data[newNotebookId] = newNb.toJson();
+
+    // Tombstone the old id (its syncTarget stays the *source* account, so the
+    // source account's notebooks.json carries the delete to other devices).
+    oldNb.deletedAt = DateTime.now();
+    oldNb.bumpRev(SettingsService().deviceId);
+    data[oldId] = oldNb.toJson();
+
+    await writeAtomicPublic(notebooksFile, jsonEncode(data));
+    return newNotebookId;
+  }
+
+  /// Every synced file on disk under one notebook, as forward-slash relative
+  /// paths — used to mark a re-keyed notebook's whole subtree for upload.
+  Future<List<String>> listSyncedRelPathsForNotebook(String notebookId) async {
+    final out = <String>[];
+    final dir = Directory('${appDir.path}/notebooks/$notebookId');
+    if (await dir.exists()) {
+      await for (final e in dir.list(recursive: true, followLinks: false)) {
+        if (e is! File) continue;
+        final rel = relPathOf(e.path);
+        if (rel != null) out.add(rel);
+      }
+    }
+    return out;
+  }
+
   /// Marks a notebook local-only (or not) on **this device only**. Device-local
   /// (settings.json), never synced — see [SettingsService.localOnlyNotebooks].
   Future<void> setNotebookLocalOnly(String notebookId, bool local) =>
       SettingsService().setNotebookLocalOnly(notebookId, local);
 
-  /// Removes local copies of all **synced** notebooks (keeps local-only ones),
-  /// WITHOUT tombstoning them — so signing back into the same account simply
-  /// re-downloads them, and no accidental delete propagates to Drive. Used on
-  /// sign-out to make account switching clean and delete-safe. Returns the
-  /// number of notebooks removed. Uses non-syncing writes (no dirty marks).
-  Future<int> purgeLocalSyncedNotebooks() async {
+  /// Removes local copies of notebooks that sync to [accountId] (keeping
+  /// local-only ones and other accounts' notebooks), **without tombstoning** —
+  /// so removing that account is clean and re-adding it later re-downloads them.
+  /// Used when removing one account of several. Returns how many were removed.
+  Future<int> purgeLocalNotebooksForAccount(
+      String accountId, String? defaultAccountId) async {
     final localOnly = SettingsService().localOnlyNotebooks;
     final data = await _readIndex();
     final kept = <String, dynamic>{};
     var removed = 0;
     for (final entry in data.entries) {
-      if (localOnly.contains(entry.key)) {
-        kept[entry.key] = entry.value;
-        continue;
+      final json = entry.value as Map<String, dynamic>;
+      final target = (json['syncTarget'] as String?) ?? defaultAccountId;
+      if (target == accountId && !localOnly.contains(entry.key)) {
+        final dir = Directory('${appDir.path}/notebooks/${entry.key}');
+        if (await dir.exists()) await dir.delete(recursive: true);
+        removed++;
+        continue; // drop from the local index (non-tombstone)
       }
-      final dir = Directory('${appDir.path}/notebooks/${entry.key}');
-      if (await dir.exists()) await dir.delete(recursive: true);
-      removed++;
+      kept[entry.key] = entry.value;
     }
-    // Write the trimmed index without notifying sync (no tombstone, no upload).
     await writeAtomicPublic(notebooksFile, jsonEncode(kept));
     return removed;
   }
@@ -1046,6 +1159,46 @@ class NotebookService {
       filtered[e.key] = e.value;
     }
     return jsonEncode(filtered);
+  }
+
+  /// A notebook's effective sync target (Phase 2): its explicit `syncTarget`, or
+  /// [defaultAccountId] when null. Local-only isn't considered here — that's a
+  /// separate per-device override applied by the sync layer.
+  static String? effectiveSyncTarget(Notebook nb, String? defaultAccountId) =>
+      nb.syncTarget ?? defaultAccountId;
+
+  /// The per-account `notebooks.json` to upload to [accountId]'s Drive: only
+  /// notebooks whose **effective** target is [accountId] (explicit `syncTarget`,
+  /// or null ⇒ [defaultAccountId]), minus this device's local-only ones. This
+  /// generalizes [syncedIndexJson] — each account's Drive sees only its own
+  /// notebooks, the same way local-only ones are withheld from every account.
+  Future<String> syncedIndexJsonFor(
+    String accountId, {
+    String? defaultAccountId,
+  }) async {
+    final data = await _readIndex();
+    final localOnly = SettingsService().localOnlyNotebooks;
+    final filtered = <String, dynamic>{};
+    for (final e in data.entries) {
+      if (localOnly.contains(e.key)) continue;
+      final json = e.value as Map<String, dynamic>;
+      final target = (json['syncTarget'] as String?) ?? defaultAccountId;
+      if (target == accountId) filtered[e.key] = e.value;
+    }
+    return jsonEncode(filtered);
+  }
+
+  /// The effective sync-target account id of the notebook owning [notebookId]
+  /// (explicit `syncTarget`, or [defaultAccountId] when null / notebook gone).
+  /// Lets the sync layer route a file to its notebook's account.
+  Future<String?> syncTargetOfNotebook(
+    String notebookId, {
+    String? defaultAccountId,
+  }) async {
+    final data = await _readIndex();
+    final json = data[notebookId] as Map<String, dynamic>?;
+    if (json == null) return defaultAccountId;
+    return (json['syncTarget'] as String?) ?? defaultAccountId;
   }
 
   /// The notebook id inside a synced relPath (`notebooks/<id>/...`), or null for

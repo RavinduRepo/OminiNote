@@ -13,6 +13,14 @@ class Notebook {
   String name;
   final DateTime createdAt;
   int? color; // ARGB; null → deterministic identity color
+
+  /// Which Google account this notebook syncs to (Phase 2), as the account's
+  /// OIDC `sub`. **Synced** in notebooks.json so both devices agree. `null` is
+  /// treated as "the default account" at routing time — so existing notebooks
+  /// need no eager rewrite. Orthogonal to the device-local *local-only* set
+  /// (`SettingsService.localOnlyNotebooks`), which overrides this per-device.
+  String? syncTarget;
+
   final List<TreeNode> nodes; // leaves = section ids
 
   Notebook({
@@ -25,6 +33,7 @@ class Notebook {
     required this.name,
     required this.createdAt,
     this.color,
+    this.syncTarget,
     List<TreeNode>? nodes,
   })  : updatedAt = updatedAt ?? DateTime.now(),
         nodes = nodes ?? [];
@@ -50,6 +59,7 @@ class Notebook {
         'name': name,
         'createdAt': createdAt.toIso8601String(),
         'color': color,
+        'syncTarget': syncTarget,
         'nodes': nodes.map((n) => n.toJson()).toList(),
         // Derived flat list, kept for any back-compat reader.
         'sectionIds': allSectionIds,
@@ -69,6 +79,7 @@ class Notebook {
         name: json['name'],
         createdAt: DateTime.parse(json['createdAt']),
         color: (json['color'] as num?)?.toInt(),
+        syncTarget: json['syncTarget'] as String?,
         nodes: TreeOps.parse(
           json['nodes'],
           legacyIds: List<String>.from(json['sectionIds'] ?? []),

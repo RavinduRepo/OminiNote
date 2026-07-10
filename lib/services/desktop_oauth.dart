@@ -103,16 +103,51 @@ class DesktopOAuth {
     }
   }
 
-  /// Fetches the signed-in user's email using an access token.
-  static Future<String?> fetchEmail(String accessToken) async {
+  /// Exchanges an authorization code for tokens. Used for the Android A-hybrid
+  /// path: a `serverAuthCode` from `google_sign_in` (issued to the **Web** OAuth
+  /// client) is exchanged with that client's id/secret for an access +
+  /// **refresh** token we then own and refresh directly like desktop.
+  ///
+  /// Gotcha: for a `serverAuthCode` obtained via `google_sign_in`, [redirectUri]
+  /// **must be an empty string** — passing a real URI makes Google reject the
+  /// exchange with `redirect_uri_mismatch`.
+  static Future<Map<String, dynamic>?> exchangeAuthCode({
+    required String clientId,
+    required String clientSecret,
+    required String code,
+    String redirectUri = '',
+    String? codeVerifier,
+  }) async {
+    try {
+      final body = {
+        'client_id': clientId,
+        'client_secret': clientSecret,
+        'code': code,
+        'grant_type': 'authorization_code',
+        'redirect_uri': redirectUri,
+      };
+      if (codeVerifier != null) body['code_verifier'] = codeVerifier;
+      final resp = await http.post(Uri.parse(_tokenUrl), body: body);
+      if (resp.statusCode == 200) {
+        return jsonDecode(resp.body) as Map<String, dynamic>;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Fetches the signed-in user's profile using an access token: the stable
+  /// `sub` (used across devices as the account id), plus email/name/picture for
+  /// display. Returns null on failure.
+  static Future<Map<String, dynamic>?> fetchUserInfo(String accessToken) async {
     try {
       final resp = await http.get(
         Uri.parse('https://www.googleapis.com/oauth2/v3/userinfo'),
         headers: {'Authorization': 'Bearer $accessToken'},
       );
       if (resp.statusCode == 200) {
-        final j = jsonDecode(resp.body) as Map<String, dynamic>;
-        return j['email'] as String?;
+        return jsonDecode(resp.body) as Map<String, dynamic>;
       }
     } catch (_) {}
     return null;

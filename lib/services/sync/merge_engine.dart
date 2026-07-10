@@ -126,6 +126,58 @@ class MergeEngine {
     );
   }
 
+  /// Phase 2 per-account variant. Each account's Drive holds a `notebooks.json`
+  /// with only **that account's** notebooks, so [remote] is a *subset* of the
+  /// full local index. This reconciles only the ids the account is responsible
+  /// for — [ownedIds] (its local notebooks) plus [remote]'s ids — and leaves
+  /// every other entry (other accounts', local-only) exactly as local. Ids in
+  /// [excludeIds] (this device's local-only) are preserved untouched even if
+  /// they appear in [remote].
+  ///
+  /// Crucially, untouched entries do **not** set `changedLocal`/`localContributed`.
+  /// The plain union merge would flag every foreign notebook as "local has
+  /// something remote lacks" on every pull → a perpetual re-push loop; scoping
+  /// the comparison to the account's own notebooks stops that.
+  static MergeResult mergeNotebooksIndexScoped(
+    String? local,
+    String remote, {
+    required Set<String> ownedIds,
+    Set<String> excludeIds = const {},
+  }) {
+    final Map<String, dynamic> localMap = _decodeMap(local);
+    final Map<String, dynamic> remoteMap = _decodeMap(remote);
+
+    final merged = <String, dynamic>{...localMap}; // preserve everything local
+    var localContributed = false;
+    var changedLocal = false;
+
+    final ids = <String>{...ownedIds, ...remoteMap.keys}
+      ..removeAll(excludeIds);
+    for (final id in ids) {
+      final l = localMap[id] as Map<String, dynamic>?;
+      final r = remoteMap[id] as Map<String, dynamic>?;
+      if (l == null && r == null) continue;
+      if (l == null) {
+        merged[id] = r;
+        changedLocal = true; // account's Drive has a notebook we lack
+      } else if (r == null) {
+        merged[id] = l;
+        localContributed = true; // ours, the account's Drive lacks it → push
+      } else {
+        final localWins = _envelopeWins(l, r);
+        merged[id] = localWins ? l : r;
+        if (localWins && !_sameEnvelope(l, r)) localContributed = true;
+        if (!localWins && !_sameEnvelope(l, r)) changedLocal = true;
+      }
+    }
+
+    return MergeResult(
+      content: jsonEncode(merged),
+      changedLocal: changedLocal,
+      localContributed: localContributed,
+    );
+  }
+
   // ── section.json / canvas.json (single doc LWW) ──────────────────────────
 
   static MergeResult _mergeSingleDoc(String? local, String remote) {

@@ -7,6 +7,7 @@ import 'package:omininote/models/element.dart';
 import 'package:omininote/models/notebook.dart';
 import 'package:omininote/models/section.dart';
 import 'package:omininote/models/tree.dart';
+import 'package:omininote/services/notebook_service.dart';
 
 void main() {
   group('Element serialization round-trips', () {
@@ -473,6 +474,47 @@ void main() {
       expect(decoded.allSectionIds, ['s1', 's2']);
       expect(decoded.color, 0xFF3B7DD8);
       expect(decoded.nodes.every((n) => n is LeafNode), isTrue);
+    });
+
+    test('syncTarget round-trips; null → default account, explicit wins', () {
+      // Explicit target survives serialization.
+      final bound = Notebook(
+        id: 'n1',
+        deviceId: 'test_device',
+        name: 'Bound',
+        createdAt: DateTime(2026, 1, 2),
+        syncTarget: 'sub-account-A',
+      );
+      final decoded = Notebook.fromJson(
+        jsonDecode(jsonEncode(bound.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded.syncTarget, 'sub-account-A');
+      expect(NotebookService.effectiveSyncTarget(decoded, 'default-X'),
+          'sub-account-A');
+
+      // Null target falls back to the default account (no eager migration).
+      final unbound = Notebook(
+        id: 'n2',
+        deviceId: 'test_device',
+        name: 'Unbound',
+        createdAt: DateTime(2026, 1, 2),
+      );
+      final decodedUnbound = Notebook.fromJson(
+        jsonDecode(jsonEncode(unbound.toJson())) as Map<String, dynamic>,
+      );
+      expect(decodedUnbound.syncTarget, isNull);
+      expect(NotebookService.effectiveSyncTarget(decodedUnbound, 'default-X'),
+          'default-X');
+      expect(NotebookService.effectiveSyncTarget(decodedUnbound, null), isNull);
+
+      // A legacy notebook with no syncTarget key decodes to null.
+      final legacy = Notebook.fromJson({
+        'id': 'n3',
+        'name': 'Legacy',
+        'createdAt': DateTime(2026, 1, 2).toIso8601String(),
+        'sectionIds': <String>[],
+      });
+      expect(legacy.syncTarget, isNull);
     });
 
     test('nested folders (super-sections in super-sections) survive', () {

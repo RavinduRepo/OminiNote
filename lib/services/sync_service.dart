@@ -26,23 +26,34 @@ class CanvasSyncListener {
   const CanvasSyncListener({required this.onPage, required this.onStructure});
 }
 
-/// Orchestrates two-way sync between local storage and Google Drive.
+/// Per-account sync state. Phase 2 runs one of these per connected account, each
+/// with its own [DriveService] (own Drive root, index, changes token) and its
+/// own in-flight guards — so one account's pull/resync never blocks another's.
+class _AccountSync {
+  final String accountId;
+  bool pulling = false;
+  bool resyncing = false;
+  Timer? resyncDebounce;
+  _AccountSync(this.accountId);
+
+  DriveService get drive => DriveManager.forAccount(accountId);
+}
+
+/// Orchestrates two-way sync between local storage and Google Drive, **per
+/// account** (Phase 2). Each notebook syncs to its `syncTarget` account (or the
+/// default when null); each account's Drive tree mirrors the subset of local
+/// storage that belongs to it. Every file carries a `(rev, updatedAt,
+/// deviceId)` envelope reconciled by the [MergeEngine].
 ///
-/// The Drive tree mirrors local storage. Each file carries a `(rev, updatedAt,
-/// deviceId)` envelope; the [MergeEngine] reconciles remote and local versions
-/// so nothing is silently lost:
-///
-/// * **Bootstrap / repair** ([fullResync]) — on sign-in (and via "Repair
-///   sync") the whole Drive tree is listed and reconciled with local both ways.
-///   This is what lets a fresh device download everything and an existing
-///   device contribute what Drive lacks, without clobbering either side.
+/// * **Bootstrap / repair** ([repair]) lists+reconciles each account's whole
+///   Drive tree both ways.
 /// * **Push** — every local atomic write marks a relative path dirty in a
-///   persistent journal (`sync_journal.json`); dirty files are debounced and
-///   uploaded with retry + backoff. The journal survives process death.
-/// * **Pull** — the Drive Changes API is polled every 30 s. Known files are
-///   downloaded and merged in place; an unknown file id (something a *new*
-///   device created) triggers a debounced [fullResync]. Our own uploads are
-///   skipped via `headRevisionId` echo suppression.
+///   persistent journal; a debounced drain routes each file to *its notebook's
+///   account's* Drive. `notebooks.json` is uploaded to every account, filtered
+///   to that account's own notebooks.
+/// * **Pull** — each account's Drive Changes API is polled (one timer iterates
+///   all accounts). Known files are merged in place; unknown ids are resolved
+///   via their parent chain. Our own uploads are echo-suppressed by head.
 class SyncService {
   static final SyncService _instance = SyncService._internal();
   factory SyncService() => _instance;
@@ -55,7 +66,7 @@ class SyncService {
   /// reload their lists / pages.
   final ValueNotifier<int> dataVersion = ValueNotifier(0);
 
-  // Persistent dirty journal: relative paths awaiting upload.
+  // Persistent dirty journal: relative paths awaiting upload (across accounts).
   final Set<String> _dirty = {};
   File? _journalFile;
 
@@ -68,128 +79,224 @@ class SyncService {
   void unregisterCanvasListener(String canvasId) =>
       _canvasListeners.remove(canvasId);
 
+  // Per-account sync state, keyed by account id (Google `sub`).
+  final Map<String, _AccountSync> _accountSyncs = {};
+
   Timer? _pushDebounce;
   Timer? _pollTimer;
-  Timer? _resyncDebounce;
   bool _pushing = false;
-  bool _pulling = false;
-  bool _resyncing = false;
 
-  // 15 s: changes.list is a cheap delta call; halving the worst-case
-  // cross-device latency is worth the extra poll.
   static const _kPollInterval = Duration(seconds: 15);
   static const _kPushDebounce = Duration(milliseconds: 1500);
+
+  String? get _defaultId => AuthService().defaultAccountId;
+  List<String> _connectedAccountIds() =>
+      AuthService().accounts.value.map((a) => a.id).toList();
 
   // ── Init / dispose ──────────────────────────────────────────────────────────
 
   Future<void> init() async {
     await _loadJournal();
     lastSyncAt.value = SettingsService().lastSyncAt;
-    AuthService().account.addListener(_onAuthChanged);
-    if (AuthService().isSignedIn) unawaited(_onSignedIn());
+    AuthService().accounts.addListener(_onAccountsChangedListener);
+    if (AuthService().isSignedIn) unawaited(_onAccountsChanged());
   }
 
   void dispose() {
     _pushDebounce?.cancel();
     _pollTimer?.cancel();
-    _resyncDebounce?.cancel();
-    AuthService().account.removeListener(_onAuthChanged);
+    for (final as in _accountSyncs.values) {
+      as.resyncDebounce?.cancel();
+    }
+    AuthService().accounts.removeListener(_onAccountsChangedListener);
   }
 
-  void _onAuthChanged() {
-    if (AuthService().isSignedIn) {
-      unawaited(_onSignedIn());
-    } else {
+  void _onAccountsChangedListener() => unawaited(_onAccountsChanged());
+
+  /// Reconciles the running per-account sync units with the current account
+  /// list: tears down removed accounts, brings up new ones, (re)starts polling.
+  Future<void> _onAccountsChanged() async {
+    final current = _connectedAccountIds().toSet();
+
+    // Teardown accounts that went away: stop their timers and clean up their
+    // Drive index + changes token so a re-add bootstraps fresh (rather than
+    // resuming against stale mappings or leaving orphan index files). Reset
+    // before dropping the instance, since forAccount would otherwise recreate it.
+    for (final id in _accountSyncs.keys.toList()) {
+      if (current.contains(id)) continue;
+      _accountSyncs.remove(id)!.resyncDebounce?.cancel();
+      await DriveManager.forAccount(id).resetIndex();
+      await SettingsService().removeDriveChangesToken(id);
+      DriveManager.remove(id);
+    }
+
+    // Bring up newly-added accounts.
+    for (final id in current) {
+      if (_accountSyncs.containsKey(id)) continue;
+      final as = _AccountSync(id);
+      _accountSyncs[id] = as;
+      unawaited(_bringUpAccount(as));
+    }
+
+    if (current.isEmpty) {
       _pollTimer?.cancel();
       status.value = SyncStatus.idle;
+    } else {
+      _startPolling();
     }
   }
 
-  Future<void> _onSignedIn() async {
-    // A sign-in is a fresh start: any in-flight guard is from a prior session
-    // (whose ops failed when the account went away). Force a clean slate so a
-    // stuck flag can't block this session's pulls/resyncs.
-    _pulling = false;
-    _resyncing = false;
-    _pushing = false;
-    await DriveService().init();
-    // Bootstrap (full download+merge) only when this install has never synced —
-    // i.e. no changes token yet, or no local Drive index to poll against.
-    // Otherwise resume from the stored token: cheap incremental catch-up plus a
-    // journal replay of anything edited while offline.
-    final needsBootstrap = SettingsService().driveChangesToken.isEmpty ||
-        !DriveService().hasIndex;
-    if (needsBootstrap) {
-      await fullResync();
-    } else {
-      await _doPull();
-      if (_dirty.isNotEmpty) unawaited(_flushPush());
+  Future<void> _bringUpAccount(_AccountSync as) async {
+    // Fresh session for this account: clear any stale guard.
+    as.pulling = false;
+    as.resyncing = false;
+    await as.drive.init();
+
+    // One-time migration of the pre-multi-account single changes token to the
+    // default account (its drive_index.json is adopted in DriveService).
+    if (as.accountId == _defaultId &&
+        SettingsService().driveChangesTokenFor(as.accountId).isEmpty &&
+        SettingsService().legacyDriveChangesToken.isNotEmpty) {
+      await SettingsService().setDriveChangesTokenFor(
+          as.accountId, SettingsService().legacyDriveChangesToken);
+      await SettingsService().clearLegacyDriveChangesToken();
     }
-    _startPolling();
+
+    // Bootstrap only when this account has never synced on this install.
+    final needsBootstrap =
+        SettingsService().driveChangesTokenFor(as.accountId).isEmpty ||
+            !as.drive.hasIndex;
+    if (needsBootstrap) {
+      await _fullResync(as);
+    } else {
+      await _doPull(as);
+    }
+    if (_dirty.isNotEmpty) _armPush();
   }
 
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(_kPollInterval, (_) => _doPull());
+    _pollTimer = Timer.periodic(_kPollInterval, (_) => _pollAll());
+  }
+
+  Future<void> _pollAll() async {
+    for (final as in _accountSyncs.values.toList()) {
+      await _doPull(as);
+    }
   }
 
   // ── Public triggers ─────────────────────────────────────────────────────────
 
-  /// Manual "Sync now": push pending, then pull deltas.
+  /// Manual "Sync now": push pending, then pull deltas for every account.
   Future<void> syncNow() async {
     if (!AuthService().isSignedIn) return;
     await _flushPush();
-    await _doPull();
+    await _pollAll();
   }
 
-  /// "Repair sync" — full two-way reconcile against the whole Drive tree.
-  Future<void> repair() => fullResync();
+  /// "Repair sync" — full two-way reconcile of every account's Drive tree.
+  Future<void> repair() => _fullResyncAll();
+
+  Future<void> _fullResyncAll() async {
+    for (final as in _accountSyncs.values.toList()) {
+      await _fullResync(as);
+    }
+  }
 
   /// True when edits haven't yet reached Drive (used to warn on sign-out).
   bool get hasPendingUploads => _dirty.isNotEmpty;
 
-  /// Re-connects a notebook that was local-only: forgets the reconciled heads
-  /// of its files (which were listed but never applied while disconnected) and
-  /// runs a full resync to pull + merge whatever changed on other devices. The
-  /// resync is *guaranteed* to run even if one is currently in flight (a plain
-  /// [repair] would be dropped by the `_resyncing` guard).
+  /// Re-connects a notebook that was local-only on this device: forgets the
+  /// reconciled heads of its files on **its account's** Drive and resyncs that
+  /// account so anything missed while disconnected is pulled + merged.
   Future<void> reenableNotebookSync(String notebookId) async {
     if (!AuthService().isSignedIn) return;
-    await DriveService().forgetNotebookHeads(notebookId);
-    if (_resyncing) {
-      _scheduleResync(); // one is running — queue a follow-up
+    final target = await NotebookService()
+        .syncTargetOfNotebook(notebookId, defaultAccountId: _defaultId);
+    final as = target == null ? null : _accountSyncs[target];
+    if (as == null) return;
+    await as.drive.forgetNotebookHeads(notebookId);
+    if (as.resyncing) {
+      _scheduleResync(as);
     } else {
-      unawaited(fullResync());
+      unawaited(_fullResync(as));
     }
   }
 
-  /// Prepares for sign-out: stops sync, resets the Drive index + changes token
-  /// so a later sign-in (possibly a different account) bootstraps fresh. When
-  /// [purgeSynced] is true, also removes local copies of synced notebooks
-  /// (keeping local-only ones) so switching accounts is clean and no accidental
-  /// delete propagates. Returns how many notebooks were purged.
-  Future<int> prepareSignOut({required bool purgeSynced}) async {
-    _pushDebounce?.cancel();
-    _pollTimer?.cancel();
-    _resyncDebounce?.cancel();
-    // Clear in-flight guards: a sync interrupted by sign-out must not leave a
-    // flag stuck true, or the next sign-in's pull/resync is blocked forever
-    // (push is unaffected — the "my edits go up but theirs never come down"
-    // bug). The interrupted ops fail cleanly (account/token gone).
-    _pulling = false;
-    _resyncing = false;
-    _pushing = false;
-    status.value = SyncStatus.idle;
-    var removed = 0;
-    if (purgeSynced) {
-      _dirty.clear();
-      await _saveJournal();
-      removed = await NotebookService().purgeLocalSyncedNotebooks();
+  /// **Moves** a notebook to [destAccountId] without data loss. A notebook id
+  /// must never live on two accounts' Drives (or edits/deletes bleed across
+  /// accounts), so this: (1) fully syncs the notebook DOWN from its current
+  /// account so the local copy is the complete cloud+local union, then
+  /// (2) re-keys it to a new id bound to the destination and tombstones the old
+  /// id on the source, then (3) pushes the new subtree + index. Returns
+  /// `(ok, error, newId)`; on a sync-down failure it refuses rather than lose
+  /// cloud-only pages.
+  Future<({bool ok, String? error, String? newId})> moveNotebookToAccount(
+      String notebookId, String destAccountId) async {
+    if (!AuthService().isSignedIn) {
+      return (ok: false, error: 'Not signed in.', newId: null);
     }
-    await DriveService().resetIndex();
-    await SettingsService().setDriveChangesToken('');
+    final source = await NotebookService()
+        .syncTargetOfNotebook(notebookId, defaultAccountId: _defaultId);
+    if (source == destAccountId) {
+      return (ok: true, error: null, newId: notebookId); // already there
+    }
+
+    // 1. Fully pull the notebook from its source account first so nothing that
+    //    only exists in the cloud is dropped by the re-key.
+    if (source != null) {
+      final as = _accountSyncs[source];
+      if (as == null) {
+        return (
+          ok: false,
+          error: 'Sign into the notebook\'s current account to move it.',
+          newId: null
+        );
+      }
+      final complete = await _syncDownNotebook(notebookId, as);
+      if (!complete) {
+        return (
+          ok: false,
+          error: 'Couldn\'t fetch all of this notebook\'s cloud data — check '
+              'your connection and try again.',
+          newId: null
+        );
+      }
+    }
+
+    // 2. Re-key locally (copy subtree, tombstone old, bind new to destination).
+    final newId =
+        await NotebookService().rekeyNotebookForMove(notebookId, destAccountId);
+    if (newId == null) return (ok: false, error: 'Move failed.', newId: null);
+
+    // 3. Queue the new subtree + index for upload and push now.
+    final rels = await NotebookService().listSyncedRelPathsForNotebook(newId);
+    _dirty.addAll(rels);
+    _dirty.add('notebooks.json');
+    await _saveJournal();
     _bumpData();
-    return removed;
+    unawaited(_flushPush());
+    return (ok: true, error: null, newId: newId);
+  }
+
+  /// Downloads every `notebooks/<notebookId>/**` file the account's Drive has
+  /// that we lack (or that changed), so the local copy is complete before a
+  /// move. Returns false on network failure (caller must abort the move).
+  Future<bool> _syncDownNotebook(String notebookId, _AccountSync as) async {
+    try {
+      final remote = await as.drive.listAllFiles();
+      final prefix = 'notebooks/$notebookId/';
+      for (final e in remote.entries) {
+        if (!e.key.startsWith(prefix)) continue;
+        await _pullFile(as, e.key, e.value);
+      }
+      return true;
+    } on SocketException {
+      return false;
+    } catch (e) {
+      debugPrint('syncDownNotebook error: $e');
+      return false;
+    }
   }
 
   /// Flush pending uploads immediately (e.g. when the app is backgrounded).
@@ -213,6 +320,10 @@ class SyncService {
     _dirty.add(rel);
     unawaited(_saveJournal());
     if (!AuthService().isSignedIn) return;
+    _armPush();
+  }
+
+  void _armPush() {
     _pushDebounce?.cancel();
     _pushDebounce = Timer(_kPushDebounce, _flushPush);
   }
@@ -221,24 +332,50 @@ class SyncService {
     if (_pushing || !AuthService().isSignedIn || _dirty.isEmpty) return;
     _pushing = true;
     status.value = SyncStatus.syncing;
+    // Persist the journal in batches, not after every file: the journal can be
+    // large, and an `await _saveJournal()` (a flushed ~100 KB write) per file
+    // made a big backlog drain at a crawl and starved live edits. A crash
+    // between batches only re-uploads a few already-synced files (idempotent).
+    var sinceSave = 0;
+    Future<void> batchedSave() async {
+      if (++sinceSave >= 25) {
+        sinceSave = 0;
+        await _saveJournal();
+      }
+    }
+
     try {
-      // Local-only notebooks never leave the device: skip their content files
-      // and strip them from the uploaded notebooks.json.
       final localOnly = NotebookService().localOnlyNotebookIds();
+      final defaultId = _defaultId;
+      final connected = _connectedAccountIds().toSet();
       // Snapshot so concurrent edits during the drain aren't lost.
       final pending = List<String>.from(_dirty);
       for (final rel in pending) {
+        if (rel == 'notebooks.json') {
+          // Upload each account's own (filtered) index to its own Drive.
+          for (final id in connected) {
+            final content = await NotebookService()
+                .syncedIndexJsonFor(id, defaultAccountId: defaultId);
+            await DriveManager.forAccount(id).uploadJson(rel, content);
+          }
+          _dirty.remove(rel);
+          await batchedSave();
+          continue;
+        }
         final nbId = NotebookService().notebookIdOfRelPath(rel);
         if (nbId != null && localOnly.contains(nbId)) {
           _dirty.remove(rel); // content of a local-only notebook — never upload
           continue;
         }
-        if (rel == 'notebooks.json') {
-          // Upload the index with local-only notebooks filtered out.
-          await DriveService()
-              .uploadJson(rel, await NotebookService().syncedIndexJson());
+        final target = await NotebookService()
+            .syncTargetOfNotebook(nbId ?? '', defaultAccountId: defaultId);
+        if (target == null || !connected.contains(target)) {
+          // No connected account owns this file (e.g. bound to an account not
+          // signed in here). Defer to that account's next resync, which pushes
+          // local files its Drive lacks; drop from the journal to avoid a tight
+          // retry loop. The file stays on disk.
           _dirty.remove(rel);
-          await _saveJournal();
+          await batchedSave();
           continue;
         }
         final file = NotebookService().fileForRelPath(rel);
@@ -246,9 +383,9 @@ class SyncService {
           _dirty.remove(rel);
           continue;
         }
-        await _uploadWithRetry(rel, file);
+        await _uploadWithRetry(target, rel, file);
         _dirty.remove(rel);
-        await _saveJournal();
+        await batchedSave();
       }
       _finishOk();
     } on SocketException {
@@ -262,18 +399,23 @@ class SyncService {
       // An edit that landed mid-drain wasn't in the snapshot — re-arm so it
       // isn't stranded (only after a clean drain, to avoid a tight retry loop).
       if (_dirty.isNotEmpty && status.value == SyncStatus.idle) {
-        _pushDebounce?.cancel();
-        _pushDebounce = Timer(_kPushDebounce, _flushPush);
+        _armPush();
       }
     }
   }
 
-  Future<void> _uploadWithRetry(String rel, File file, {int attempt = 0}) async {
+  Future<void> _uploadWithRetry(
+    String accountId,
+    String rel,
+    File file, {
+    int attempt = 0,
+  }) async {
     try {
+      final drive = DriveManager.forAccount(accountId);
       if (_isAsset(rel)) {
-        await DriveService().uploadBinary(rel, await file.readAsBytes());
+        await drive.uploadBinary(rel, await file.readAsBytes());
       } else {
-        await DriveService().uploadJson(rel, await file.readAsString());
+        await drive.uploadJson(rel, await file.readAsString());
       }
     } catch (e) {
       if (e is SocketException) rethrow;
@@ -281,71 +423,69 @@ class SyncService {
       // Exponential backoff with jitter: ~2,4,8,16 s.
       final base = (2 << attempt) * 1000;
       await Future.delayed(Duration(milliseconds: base + Random().nextInt(500)));
-      await _uploadWithRetry(rel, file, attempt: attempt + 1);
+      await _uploadWithRetry(accountId, rel, file, attempt: attempt + 1);
     }
   }
 
   // ── Pull (incremental) ────────────────────────────────────────────────────────
 
-  Future<void> _doPull() async {
-    if (!AuthService().isSignedIn || _pulling || _resyncing) return;
-    final token = SettingsService().driveChangesToken;
+  Future<void> _doPull(_AccountSync as) async {
+    if (!AuthService().isSignedIn || as.pulling || as.resyncing) return;
+    final token = SettingsService().driveChangesTokenFor(as.accountId);
     if (token.isEmpty) {
-      await fullResync();
+      await _fullResync(as);
       return;
     }
-    _pulling = true;
+    as.pulling = true;
     status.value = SyncStatus.syncing;
     try {
-      final res = await DriveService().pollChanges(token);
+      final res = await as.drive.pollChanges(token);
       var changed = false;
       for (final c in res.changes) {
         if (c.mimeType == 'application/vnd.google-apps.folder') continue;
-        if (await _applyChange(c)) changed = true;
+        if (await _applyChange(as, c)) changed = true;
       }
-      await SettingsService().setDriveChangesToken(res.nextPageToken);
+      await SettingsService()
+          .setDriveChangesTokenFor(as.accountId, res.nextPageToken);
       _finishOk();
       if (changed) _bumpData();
-      if (_dirty.isNotEmpty) _markDirty(_dirty.first); // re-arm push
+      if (_dirty.isNotEmpty) _armPush();
     } on SocketException {
       status.value = SyncStatus.offline;
     } catch (e) {
       if (_isGone(e)) {
-        _pulling = false;
-        await fullResync();
+        as.pulling = false;
+        await _fullResync(as);
         return;
       }
       debugPrint('Sync pull error: $e');
       status.value = SyncStatus.error;
     } finally {
-      _pulling = false;
+      as.pulling = false;
     }
   }
 
-  Future<bool> _applyChange(DriveChange c) async {
+  Future<bool> _applyChange(_AccountSync as, DriveChange c) async {
     if (c.removed) return false; // deletions propagate via structural merge
-    var rel = DriveService().relPathForFileId(c.fileId);
+    var rel = as.drive.relPathForFileId(c.fileId);
     if (rel == null) {
-      // A file this device has never seen — created on another device.
-      // Resolve just this file via its parent chain (a couple of cheap
-      // files.get calls) instead of forcing a full-tree resync; the old
-      // resync-only path was heavy, raced with further changes, and losing it
-      // meant the file never arrived until a manual "Repair sync".
-      final resolved = await DriveService().resolveFileId(c.fileId);
+      // A file this account has never seen — created on another device.
+      final resolved = await as.drive.resolveFileId(c.fileId);
       if (resolved == null) {
-        _scheduleResync(); // genuinely can't place it — fall back
+        _scheduleResync(as); // genuinely can't place it — fall back
         return false;
       }
-      rel = DriveService().relPathForFileId(c.fileId);
+      rel = as.drive.relPathForFileId(c.fileId);
       if (rel == null) return false;
     }
     if (!NotebookService.isSyncedRelPath(rel)) return false;
     // Echo suppression: skip our own most-recent upload.
     if (c.headRevisionId != null &&
-        DriveService().headForPath(rel) == c.headRevisionId) {
+        as.drive.headForPath(rel) == c.headRevisionId) {
       return false;
     }
     return _pullFile(
+      as,
       rel,
       RemoteFile(
         id: c.fileId,
@@ -355,41 +495,48 @@ class SyncService {
     );
   }
 
-  // ── Full resync (bootstrap / repair / 410 recovery) ──────────────────────────
+  // ── Full resync (bootstrap / repair / 410 recovery) — one account ───────────
 
-  Future<void> fullResync() async {
-    if (!AuthService().isSignedIn || _resyncing) return;
-    _resyncing = true;
+  Future<void> _fullResync(_AccountSync as) async {
+    if (!AuthService().isSignedIn || as.resyncing) return;
+    as.resyncing = true;
     status.value = SyncStatus.syncing;
     try {
-      // Take the changes baseline BEFORE listing: anything pushed by another
-      // device while this (possibly long) resync runs is then re-delivered by
-      // the next poll. Taking it after the listing silently skipped those
-      // changes forever — the "have to press Repair again" loop.
-      final tok = await DriveService().getChangesStartToken();
+      // Take the changes baseline BEFORE listing so changes pushed during a slow
+      // resync are re-delivered by the next poll.
+      final tok = await as.drive.getChangesStartToken();
 
-      final remote = await DriveService().listAllFiles();
+      final remote = await as.drive.listAllFiles();
       final localPaths = await NotebookService().listSyncedRelPaths();
+      final defaultId = _defaultId;
+      final localOnly = NotebookService().localOnlyNotebookIds();
 
       var changed = false;
       for (final entry in remote.entries) {
-        if (await _pullFile(entry.key, entry.value)) changed = true;
+        if (await _pullFile(as, entry.key, entry.value)) changed = true;
       }
-      // Anything local that Drive lacks gets pushed.
+      // Push local files this account OWNS that its Drive lacks.
       for (final rel in localPaths) {
-        if (!remote.containsKey(rel)) _dirty.add(rel);
+        if (remote.containsKey(rel)) continue;
+        if (rel == 'notebooks.json') {
+          _dirty.add(rel); // uploaded per-account (filtered) by the push drain
+          continue;
+        }
+        final nbId = NotebookService().notebookIdOfRelPath(rel);
+        if (nbId != null && localOnly.contains(nbId)) continue;
+        final target = await NotebookService()
+            .syncTargetOfNotebook(nbId ?? '', defaultAccountId: defaultId);
+        if (target == as.accountId) _dirty.add(rel);
       }
       await _saveJournal();
 
-      await SettingsService().setDriveChangesToken(tok);
+      await SettingsService().setDriveChangesTokenFor(as.accountId, tok);
 
-      _resyncing = false;
+      as.resyncing = false;
       await _flushPush();
       _finishOk();
       if (changed) _bumpData();
-      // Best point to sweep old tombstones: everything just reconciled, so
-      // what's left tombstoned+expired really is old news everywhere this
-      // device can see.
+      // Sweep old tombstones once everything just reconciled.
       unawaited(NotebookService().runGarbageCollection());
     } on SocketException {
       status.value = SyncStatus.offline;
@@ -397,104 +544,106 @@ class SyncService {
       debugPrint('Sync resync error: $e');
       status.value = SyncStatus.error;
     } finally {
-      _resyncing = false;
+      as.resyncing = false;
     }
   }
 
-  void _scheduleResync() {
-    _resyncDebounce?.cancel();
-    _resyncDebounce = Timer(const Duration(seconds: 3), fullResync);
+  void _scheduleResync(_AccountSync as) {
+    as.resyncDebounce?.cancel();
+    as.resyncDebounce =
+        Timer(const Duration(seconds: 3), () => _fullResync(as));
   }
 
-  // ── Reconcile one file from Drive → local ────────────────────────────────────
+  // ── Reconcile one file from an account's Drive → local ──────────────────────
 
-  /// Downloads [rf] and merges it into the local file at [rel]. Returns true if
-  /// local disk changed. Records the head for echo suppression and marks the
-  /// path dirty when the merge produced something Drive still lacks.
-  Future<bool> _pullFile(String rel, RemoteFile rf) async {
+  Future<bool> _pullFile(_AccountSync as, String rel, RemoteFile rf) async {
     final file = NotebookService().fileForRelPath(rel);
+    final drive = as.drive;
 
-    // A local-only notebook is disconnected from sync on this device: never
-    // apply pulled content for it (blocks the download direction). Re-enabling
-    // sync triggers a fullResync to catch up on anything missed.
+    // A local-only notebook is disconnected on this device — never apply pulled
+    // content for it (blocks the download direction). Re-enabling triggers a
+    // resync to catch up.
     final nbId = NotebookService().notebookIdOfRelPath(rel);
-    if (nbId != null && NotebookService().localOnlyNotebookIds().contains(nbId)) {
+    if (nbId != null &&
+        NotebookService().localOnlyNotebookIds().contains(nbId)) {
       return false;
     }
 
     if (_isAsset(rel)) {
       // Content-addressed & immutable: fetch only if we don't have it.
       if (await file.exists()) {
-        DriveService().recordRemote(rel, rf.id, rf.headRevisionId);
+        drive.recordRemote(rel, rf.id, rf.headRevisionId);
         return false;
       }
-      final bytes = await DriveService().downloadById(rf.id);
+      final bytes = await drive.downloadById(rf.id);
       if (bytes == null) return false;
       await NotebookService().writeAtomicBytesPublic(file, bytes);
-      DriveService().recordRemote(rel, rf.id, rf.headRevisionId);
+      drive.recordRemote(rel, rf.id, rf.headRevisionId);
       return true;
     }
 
-    // Unchanged since we last reconciled it (same head, file on disk): skip
-    // the download. Makes fullResync/Repair proportional to what actually
-    // changed instead of re-downloading the entire tree every time.
+    // Unchanged since we last reconciled it (same head, file on disk): skip.
     if (rf.headRevisionId != null &&
-        DriveService().headForPath(rel) == rf.headRevisionId &&
+        drive.headForPath(rel) == rf.headRevisionId &&
         await file.exists()) {
       return false;
     }
 
-    final remoteText = await DriveService().downloadJsonById(rf.id);
+    final remoteText = await drive.downloadJsonById(rf.id);
     if (remoteText == null) return false;
     final localText = await file.exists() ? await file.readAsString() : null;
 
-    final result = MergeEngine.reconcile(rel, localText, remoteText);
-    DriveService().recordRemote(rel, rf.id, rf.headRevisionId);
-
-    // The pulled notebooks.json must not touch notebooks this device has
-    // disconnected — restore their local entries over the merge result.
-    var content = result.content;
-    var changedLocal = result.changedLocal;
+    final MergeResult result;
     if (rel == 'notebooks.json') {
-      content = _preserveLocalOnly(localText, content);
-      changedLocal = content != (localText ?? '');
+      // Per-account scoped merge: the account's Drive holds only its own
+      // notebooks, so reconcile just those and preserve every other entry.
+      result = _mergeIndexForAccount(as.accountId, localText, remoteText);
+    } else {
+      result = MergeEngine.reconcile(rel, localText, remoteText);
     }
+    drive.recordRemote(rel, rf.id, rf.headRevisionId);
 
-    if (changedLocal) {
-      await NotebookService().writeAtomicPublic(file, content);
+    if (result.changedLocal) {
+      await NotebookService().writeAtomicPublic(file, result.content);
     }
     if (result.localContributed) {
       _markDirty(rel);
     }
-    _notifyOpenCanvas(rel, content);
-    return changedLocal;
+    _notifyOpenCanvas(rel, result.content);
+    return result.changedLocal;
   }
 
-  /// Overrides every local-only notebook's entry in [mergedContent] with its
-  /// local version (or removes it if absent locally), so a pulled notebooks.json
-  /// can't change a notebook this device has disconnected from sync.
-  String _preserveLocalOnly(String? localText, String mergedContent) {
+  /// Scoped `notebooks.json` merge for [accountId]: the ids this account owns
+  /// (its local notebooks whose effective target is [accountId]) are reconciled
+  /// with the account's subset-remote; local-only ids are excluded; all other
+  /// entries (other accounts') are preserved untouched.
+  MergeResult _mergeIndexForAccount(
+    String accountId,
+    String? localText,
+    String remoteText,
+  ) {
+    final defaultId = _defaultId;
     final localOnly = NotebookService().localOnlyNotebookIds();
-    if (localOnly.isEmpty) return mergedContent;
-    final merged = jsonDecode(mergedContent) as Map<String, dynamic>;
-    final local = localText == null
+    final localMap = localText == null
         ? <String, dynamic>{}
         : jsonDecode(localText) as Map<String, dynamic>;
-    for (final id in localOnly) {
-      if (local.containsKey(id)) {
-        merged[id] = local[id];
-      } else {
-        merged.remove(id);
-      }
+    final ownedIds = <String>{};
+    for (final e in localMap.entries) {
+      if (localOnly.contains(e.key)) continue;
+      final t = ((e.value as Map<String, dynamic>)['syncTarget'] as String?) ??
+          defaultId;
+      if (t == accountId) ownedIds.add(e.key);
     }
-    return jsonEncode(merged);
+    return MergeEngine.mergeNotebooksIndexScoped(
+      localText,
+      remoteText,
+      ownedIds: ownedIds,
+      excludeIds: localOnly,
+    );
   }
 
-  /// Routes a pulled file to the open canvas's live listener (if any), so the
-  /// in-memory controller merges the change instead of its next autosave
-  /// clobbering the merged file on disk with stale state.
+  /// Routes a pulled file to the open canvas's live listener (if any).
   void _notifyOpenCanvas(String rel, String mergedContent) {
-    // rel: notebooks/<nb>/sections/<sec>/canvases/<cid>/(canvas.json|pages/<pid>.json)
     final m = RegExp(r'/canvases/([^/]+)/(canvas\.json|pages/[^/]+\.json)$')
         .firstMatch(rel);
     if (m == null) return;

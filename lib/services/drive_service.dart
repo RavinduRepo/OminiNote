@@ -17,10 +17,31 @@ import 'auth_service.dart';
 /// and the `headRevisionId` of the version we last saw. The head is used for
 /// echo suppression (skip re-downloading our own uploads), and the reverse
 /// `fileId → path` map lets the Changes-API poller locate incoming edits.
+/// Registry of per-account [DriveService] instances. Phase 2 makes Drive
+/// account-scoped: each connected account has its own `omininote/` root, its own
+/// `drive_index_<accountId>.json`, its own folder cache, and its own changes
+/// token — so several accounts sync independently and in parallel. Instances are
+/// cached by account id (the Google `sub`) and created lazily.
+class DriveManager {
+  DriveManager._();
+  static final Map<String, DriveService> _instances = {};
+
+  /// The Drive client for [accountId], creating (but not initializing) it on
+  /// first use. Call [DriveService.init] before using it.
+  static DriveService forAccount(String accountId) =>
+      _instances.putIfAbsent(accountId, () => DriveService(accountId));
+
+  /// Drops a removed account's Drive client (its index file is cleared
+  /// separately via [DriveService.resetIndex]).
+  static void remove(String accountId) => _instances.remove(accountId);
+
+  static Iterable<DriveService> get all => _instances.values;
+}
+
 class DriveService {
-  static final DriveService _instance = DriveService._internal();
-  factory DriveService() => _instance;
-  DriveService._internal();
+  /// The Google account (`sub`) this Drive tree belongs to.
+  final String accountId;
+  DriveService(this.accountId);
 
   static const _kRootFolderName = 'omininote';
   static const _kAppMimeFolder = 'application/vnd.google-apps.folder';
@@ -53,33 +74,19 @@ class DriveService {
 
   Future<void> init() async {
     if (_initialized) {
-      await _buildClient();
+      _buildClient();
       return;
     }
     _initialized = true;
     await _loadIndex();
-    await _buildClient();
-    AuthService().account.addListener(_onAccountChanged);
+    _buildClient();
   }
 
-  void _onAccountChanged() {
-    _api = null;
-    _rootFolderId = null;
-    _folderIds.clear();
-    _folderPathById.clear();
-    if (AuthService().isSignedIn) {
-      _buildClient().catchError((_) {});
-    }
-  }
-
-  Future<void> _buildClient() async {
-    if (!AuthService().isSignedIn) return;
-    try {
-      final client = _AuthedClient();
-      _api = gd.DriveApi(client);
-    } catch (_) {
-      // Not authorized for Drive scope.
-    }
+  void _buildClient() {
+    // The client is lazy — it fetches this account's auth headers per request,
+    // so a not-yet-connected account just fails individual calls (handled by
+    // the sync layer) rather than needing a signed-in gate here.
+    _api = gd.DriveApi(_AuthedClient(accountId));
   }
 
   gd.DriveApi get _drive {
@@ -491,7 +498,19 @@ class DriveService {
   Future<void> _loadIndex() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
-      _indexFile = File('${dir.path}/drive_index.json');
+      _indexFile = File('${dir.path}/drive_index_$accountId.json');
+      if (!await _indexFile!.exists()) {
+        // One-time migration: the pre-multi-account single `drive_index.json`
+        // belongs to the default account. Adopt it so that account resumes
+        // incrementally instead of re-bootstrapping the whole tree.
+        final legacy = File('${dir.path}/drive_index.json');
+        if (await legacy.exists() &&
+            AuthService().defaultAccountId == accountId) {
+          try {
+            await legacy.rename(_indexFile!.path);
+          } catch (_) {}
+        }
+      }
       if (await _indexFile!.exists()) {
         final map = jsonDecode(await _indexFile!.readAsString())
             as Map<String, dynamic>;
@@ -520,21 +539,27 @@ class DriveService {
     await _saveIndex();
   }
 
-  /// Clears the path↔fileId↔head index (and its file). Used on sign-out so a
-  /// later sign-in — possibly to a different account — bootstraps fresh instead
-  /// of resuming against the previous account's Drive mappings.
+  /// Clears the path↔fileId↔head index (and deletes its file). Used when an
+  /// account is removed / signs out, so a later re-add bootstraps fresh instead
+  /// of resuming against stale Drive mappings.
   Future<void> resetIndex() async {
+    _saveDebounce?.cancel();
     _index.clear();
+    _fileIdToPath.clear();
     _rootFolderId = null;
     _folderIds.clear();
     _folderPathById.clear();
-    await _saveIndex();
+    try {
+      if (_indexFile != null && await _indexFile!.exists()) {
+        await _indexFile!.delete();
+      }
+    } catch (_) {}
   }
 
   Future<void> _saveIndex() async {
     try {
-      _indexFile ??=
-          File('${(await getApplicationDocumentsDirectory()).path}/drive_index.json');
+      _indexFile ??= File(
+          '${(await getApplicationDocumentsDirectory()).path}/drive_index_$accountId.json');
       final map = _index.map(
         (k, v) => MapEntry(k, {'id': v.id, 'head': v.head}),
       );
@@ -591,14 +616,17 @@ class DriveException implements Exception {
 
 // ── HTTP client that injects a fresh auth header per request ──────────────────
 
-/// Fetches auth headers from [AuthService] on every request, so a proactively
-/// refreshed desktop access token is always used (headers aren't cached).
+/// Fetches auth headers for its specific account on every request, so a
+/// proactively refreshed access token is always used (headers aren't cached)
+/// and each account's Drive calls carry that account's token.
 class _AuthedClient extends http.BaseClient {
+  final String accountId;
+  _AuthedClient(this.accountId);
   final http.Client _inner = http.Client();
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    final headers = await AuthService().getAuthHeaders();
+    final headers = await AuthService().getAuthHeaders(accountId);
     request.headers.addAll(headers);
     return _inner.send(request);
   }

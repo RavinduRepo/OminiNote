@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import '../models/notebook.dart';
 import '../services/notebook_service.dart';
-import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/refreshable_empty.dart';
 import '../utils/pdf_export_ui.dart';
+import '../utils/sync_target_ui.dart';
 import 'note_search.dart';
 import 'notebook_screen.dart';
 import 'settings_screen.dart';
@@ -49,7 +49,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _createNotebook() async {
     final name = await _promptForName(title: 'New notebook');
     if (name == null || name.isEmpty) return;
-    await _notebookService.createNotebook(name);
+    if (!mounted) return;
+    final target = await chooseNewNotebookAccount(context);
+    if (target == null) return; // cancelled the account picker
+    final nb =
+        await _notebookService.createNotebook(name, syncTarget: target.accountId);
+    if (target.localOnly) {
+      await _notebookService.setNotebookLocalOnly(nb.id, true);
+    }
     _loadNotebooks();
   }
 
@@ -59,35 +66,9 @@ class _HomeScreenState extends State<HomeScreen> {
     await runTreeExport(context, items: items, fileName: notebook.name);
   }
 
-  Future<void> _toggleSync(Notebook notebook) async {
-    final makeLocal = !SettingsService().isNotebookLocalOnly(notebook.id);
-    if (makeLocal) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Keep only on this device?'),
-          content: Text(
-            '"${notebook.name}" will stop syncing here. Other devices keep '
-            'their own copy.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Make local-only'),
-            ),
-          ],
-        ),
-      );
-      if (ok != true) return;
-    }
-    await _notebookService.setNotebookLocalOnly(notebook.id, makeLocal);
-    // Re-enabling: catch up on anything missed while disconnected.
-    if (!makeLocal) SyncService().reenableNotebookSync(notebook.id);
-    _loadNotebooks();
+  Future<void> _pickSyncTarget(Notebook notebook) async {
+    final changed = await showSyncTargetPicker(context, notebook);
+    if (changed && mounted) _loadNotebooks();
   }
 
   Future<void> _renameNotebook(Notebook notebook) async {
@@ -230,7 +211,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               onRename: () => _renameNotebook(notebook),
                               onColor: () => _colorNotebook(notebook),
                               onExport: () => _exportNotebookPdf(notebook),
-                              onToggleSync: () => _toggleSync(notebook),
+                              onSyncTo: () => _pickSyncTarget(notebook),
                               onDelete: () => _deleteNotebook(notebook),
                             ),
                           ),
@@ -254,7 +235,7 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
   final VoidCallback onExport;
-  final VoidCallback onToggleSync;
+  final VoidCallback onSyncTo;
   final VoidCallback onDelete;
 
   const _NotebookRow({
@@ -263,7 +244,7 @@ class _NotebookRow extends StatelessWidget {
     required this.onRename,
     required this.onColor,
     required this.onExport,
-    required this.onToggleSync,
+    required this.onSyncTo,
     required this.onDelete,
   });
 
@@ -339,8 +320,7 @@ class _NotebookRow extends StatelessWidget {
                 onRename: onRename,
                 onColor: onColor,
                 onExport: onExport,
-                onToggleSync: onToggleSync,
-                isLocalOnly: SettingsService().isNotebookLocalOnly(notebook.id),
+                onSyncTo: onSyncTo,
                 onDelete: onDelete,
               ),
             ],
@@ -355,15 +335,13 @@ class _RowMenu extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
   final VoidCallback onExport;
-  final VoidCallback onToggleSync;
-  final bool isLocalOnly;
+  final VoidCallback onSyncTo;
   final VoidCallback onDelete;
   const _RowMenu({
     required this.onRename,
     required this.onColor,
     required this.onExport,
-    required this.onToggleSync,
-    required this.isLocalOnly,
+    required this.onSyncTo,
     required this.onDelete,
   });
 
@@ -376,7 +354,7 @@ class _RowMenu extends StatelessWidget {
         if (value == 'rename') onRename();
         if (value == 'color') onColor();
         if (value == 'export') onExport();
-        if (value == 'sync') onToggleSync();
+        if (value == 'sync') onSyncTo();
         if (value == 'delete') onDelete();
       },
       itemBuilder: (context) => [
@@ -410,16 +388,13 @@ class _RowMenu extends StatelessWidget {
             ],
           ),
         ),
-        PopupMenuItem(
+        const PopupMenuItem(
           value: 'sync',
           child: Row(
             children: [
-              Icon(
-                isLocalOnly ? Icons.cloud_upload_outlined : Icons.cloud_off_outlined,
-                size: 18,
-              ),
-              const SizedBox(width: 10),
-              Text(isLocalOnly ? 'Enable cloud sync' : 'Make local-only'),
+              Icon(Icons.sync_outlined, size: 18),
+              SizedBox(width: 10),
+              Text('Sync to…'),
             ],
           ),
         ),

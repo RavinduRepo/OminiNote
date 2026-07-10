@@ -7,7 +7,6 @@ import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
 import '../services/search_service.dart';
-import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
@@ -15,6 +14,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../utils/pdf_export_ui.dart';
+import '../utils/sync_target_ui.dart';
 import 'canvas_screen.dart';
 import 'note_search.dart';
 import 'settings_screen.dart';
@@ -262,7 +262,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Future<void> _createNotebook() async {
     final name = await _prompt(title: 'New notebook', hint: 'Notebook name');
     if (name == null || name.isEmpty) return;
-    final notebook = await _service.createNotebook(name);
+    if (!mounted) return;
+    final target = await chooseNewNotebookAccount(context);
+    if (target == null) return; // cancelled the account picker
+    final notebook =
+        await _service.createNotebook(name, syncTarget: target.accountId);
+    if (target.localOnly) {
+      await _service.setNotebookLocalOnly(notebook.id, true);
+    }
     _sectionMaps[notebook.id] = {};
     if (!mounted) return;
     setState(() {
@@ -278,34 +285,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     await runTreeExport(context, items: items, fileName: notebook.name);
   }
 
-  Future<void> _toggleSync(Notebook notebook) async {
-    final makeLocal = !SettingsService().isNotebookLocalOnly(notebook.id);
-    if (makeLocal) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Keep only on this device?'),
-          content: Text(
-            '"${notebook.name}" will stop syncing here. Other devices keep '
-            'their own copy.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Make local-only'),
-            ),
-          ],
-        ),
-      );
-      if (ok != true) return;
-    }
-    await _service.setNotebookLocalOnly(notebook.id, makeLocal);
-    if (!makeLocal) SyncService().reenableNotebookSync(notebook.id);
-    if (mounted) setState(() {});
+  Future<void> _pickSyncTarget(Notebook notebook) async {
+    final changed = await showSyncTargetPicker(context, notebook);
+    if (changed && mounted) setState(() {});
   }
 
   Future<void> _exportSectionPdf(Section section) async {
@@ -1233,7 +1215,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                             case 'export':
                               _exportNotebookPdf(notebook);
                             case 'sync':
-                              _toggleSync(notebook);
+                              _pickSyncTarget(notebook);
                             case 'delete':
                               _deleteNotebook(notebook);
                           }
@@ -1251,12 +1233,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                             value: 'export',
                             child: Text('Export to PDF'),
                           ),
-                          PopupMenuItem(
+                          const PopupMenuItem(
                             value: 'sync',
-                            child: Text(
-                                SettingsService().isNotebookLocalOnly(notebook.id)
-                                    ? 'Enable cloud sync'
-                                    : 'Make local-only'),
+                            child: Text('Sync to…'),
                           ),
                           PopupMenuItem(
                             value: 'delete',

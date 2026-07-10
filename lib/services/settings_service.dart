@@ -58,9 +58,17 @@ class SettingsService {
   /// Used in lock files so other devices know who holds a lock.
   late String deviceId;
 
-  /// Drive Changes API page token — persisted across restarts so we only
-  /// pull deltas, not the full Drive.
-  String driveChangesToken = '';
+  /// Drive Changes API page token **per account** (accountId → token) —
+  /// persisted so each account pulls only its own deltas. Phase 2 made sync
+  /// account-scoped (was a single [driveChangesToken] before).
+  Map<String, String> _driveChangesTokens = {};
+
+  /// Pre-multi-account single changes token, kept only to migrate into
+  /// [_driveChangesTokens] for the default account on first Phase-2 launch.
+  String legacyDriveChangesToken = '';
+
+  String driveChangesTokenFor(String accountId) =>
+      _driveChangesTokens[accountId] ?? '';
 
   /// Timestamp of the last successful sync, or null if never synced.
   DateTime? lastSyncAt;
@@ -144,7 +152,14 @@ class SettingsService {
         ? data['deviceId'] as String
         : const Uuid().v4();
 
-    driveChangesToken = (data['driveChangesToken'] as String?) ?? '';
+    legacyDriveChangesToken = (data['driveChangesToken'] as String?) ?? '';
+    if (data['driveChangesTokens'] is Map) {
+      _driveChangesTokens = Map<String, String>.from(
+        (data['driveChangesTokens'] as Map).map(
+          (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
+        ),
+      );
+    }
     final lastSyncStr = data['lastSyncAt'] as String?;
     lastSyncAt = lastSyncStr != null ? DateTime.tryParse(lastSyncStr) : null;
     if (data['localOnlyNotebooks'] is List) {
@@ -209,9 +224,21 @@ class SettingsService {
     await _persist();
   }
 
-  Future<void> setDriveChangesToken(String token) async {
-    if (driveChangesToken == token) return;
-    driveChangesToken = token;
+  Future<void> setDriveChangesTokenFor(String accountId, String token) async {
+    if (_driveChangesTokens[accountId] == token) return;
+    _driveChangesTokens[accountId] = token;
+    await _persist();
+  }
+
+  Future<void> removeDriveChangesToken(String accountId) async {
+    if (_driveChangesTokens.remove(accountId) == null) return;
+    await _persist();
+  }
+
+  /// Clears the legacy single changes token once migrated to an account.
+  Future<void> clearLegacyDriveChangesToken() async {
+    if (legacyDriveChangesToken.isEmpty) return;
+    legacyDriveChangesToken = '';
     await _persist();
   }
 
@@ -229,7 +256,8 @@ class SettingsService {
         'autoPageColor': autoPageColor.value,
         'defaultPageBackground': defaultPageBackground.value.toJson(),
         'deviceId': deviceId,
-        'driveChangesToken': driveChangesToken,
+        'driveChangesToken': legacyDriveChangesToken,
+        'driveChangesTokens': _driveChangesTokens,
         'lastSyncAt': lastSyncAt?.toIso8601String(),
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'canvasViewports': _canvasViewports,

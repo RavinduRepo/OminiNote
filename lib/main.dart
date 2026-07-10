@@ -5,7 +5,6 @@ import 'screens/desktop_shell_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/note_search.dart';
 import 'services/auth_service.dart';
-import 'services/drive_service.dart';
 import 'services/notebook_service.dart';
 import 'services/settings_service.dart';
 import 'services/sync_service.dart';
@@ -26,10 +25,10 @@ void main() async {
   // too, not gated on sign-in. Fire-and-forget so launch isn't slowed down.
   unawaited(NotebookService().runGarbageCollection());
 
-  // Auth + sync: restore silent sign-in, prime the Drive client, then start
-  // the sync loop (journal replay is fast; network work runs unawaited).
+  // Auth + sync: restore connected accounts, then start the sync loop
+  // (per-account Drive clients are created + inited by SyncService as it brings
+  // each account up; journal replay is fast; network work runs unawaited).
   await AuthService().init();
-  await DriveService().init();
   SyncService().init(); // Don't await — performs network operations.
 
   runApp(const NoteApp());

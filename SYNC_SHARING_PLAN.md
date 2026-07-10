@@ -7,14 +7,28 @@ target**. Tracked here; update as phases land.
 
 - ✅ **Phase 0 — per-device local-only** — done & shipped.
 - ✅ **Phase 1 — sign-out safety** — done & shipped (closes the ★ must-have).
-- ⏭️ **Phase 2 — multi-account (simultaneous)** — **NEXT** (not started). See the
-  breakdown at the bottom.
-- ⬜ **Phase 3 — link sharing** — not started.
+- ✅ **Phase 2 — multi-account (simultaneous)** — **done & three-device-verified**
+  (A-hybrid). 2a auth foundation, 2b model `syncTarget`, 2c per-account
+  Drive/Sync routing + scoped index merge + picker, and a **2e account-model
+  redesign** driven by real bugs: no default account (**account chosen at
+  creation**), **"Sync to a different account" = MOVE with sync-down + deep
+  re-id** (new notebook/section/canvas ids so a moved notebook shares no identity
+  — else the canvas-id-keyed live-merge bridged edits across accounts), and
+  **per-account removal** (all accounts equal, purge-this-account's-copies).
+  Key auth fix: **`forceCodeForRefreshToken: true`** so multiple devices can use
+  the same account (no `disconnect()`/revoke). Perf fix: batched sync-journal
+  saves.
+- ⬜ **Phase 3 — link sharing** — not started (next).
 
-**Resume here (Phase 2):** the big piece is making auth/Drive/Sync
-account-scoped. Start with the sub-plan in "Phase 2 breakdown" below and confirm
-the auth approach before writing code — it's real surgery on `AuthService` (one
-account today) and `DriveService` (one root + one index today).
+**Known follow-ups (not blocking):** the open-canvas VIEW doesn't refresh when
+its notebook is moved/tombstoned (stale controller edits the orphaned old copy —
+no cross-account bleed, just confusing). See `KNOWN_ISSUES.md` "Multi-account
+sync" for the move's inherent lagging-device caveat + orphaned-old-Drive-content.
+
+**Resume for Phase 3 (link sharing):** foundation is done — each notebook knows
+its account (`syncTarget`) and Drive is account-scoped. Ship "send a copy" first
+(no scope risk); live-collab needs the Google Picker / a `drive` scope upgrade
+(see the constraint section below).
 
 ```
           Notebook.syncTarget   ← foundation (small model change)
@@ -89,33 +103,89 @@ separate, *synced* property — added then.
 ## Phase 2 breakdown (start here next session)
 
 Goal: be signed into several Google accounts at once; each notebook syncs to its
-chosen account (or local-only). Current code assumes **one** account everywhere.
+chosen account (or local-only). Current code assumes **one** account everywhere
+(singletons: `AuthService`/`DriveService`/`SyncService` each hold one account,
+one Drive root, one `drive_index.json`, one changes token, one poll timer).
 
-**Confirm first (decisions before code):**
-- How to add a 2nd+ account: Android `google_sign_in` supports multiple; desktop
-  PKCE stores one refresh token today → need a **token set per account** in
-  `flutter_secure_storage` (keyed by account id).
-- Where a notebook's account lives: `Notebook.syncTarget = <account-id>`
-  (**synced** in notebooks.json, so the binding is consistent across devices) —
-  distinct from Phase 0's device-local local-only set.
+### Auth approach — DECIDED: A-hybrid
 
-**Work items (rough order):**
-1. `AuthService`: from one `account` to a **list of accounts** + a "default"
-   (for new notebooks). Per-account token storage/refresh. Keep the single
-   `account` API working (compat) or migrate call sites.
-2. `DriveService`: from one root+index to **per-account instances** (each its own
-   `omininote/` root folder + `drive_index_<acct>.json` + changes token). Likely
-   a `DriveService` per account, keyed by account id.
-3. `SyncService`: route each dirty relPath / pulled file to **its notebook's
-   account's** DriveService. `notebooks.json` gets split/filtered per account
-   (each account's Drive only sees its own notebooks — like the local-only
-   filter, generalized).
-4. Model + UI: `Notebook.syncTarget = <account-id>`; a per-notebook **"Sync to…"**
-   picker (accounts + Local-only); Settings shows the list of connected accounts
-   with add/remove.
-5. Migration: existing notebooks (syncTarget null) → the first/default account.
+Both devices must own a **refresh token per account** (`google_sign_in` v6 only
+tracks one "current user", so it can't keep two accounts' tokens live for
+simultaneous background sync). A-hybrid gets there while keeping native UX:
 
-**Watch-outs:** the changes-poll + index are per-account now (multiple pollers);
-echo-suppression + `_pulling/_resyncing` guards must be per-account too, or one
-account's sync blocks another. Test the same edge cases as Phase 1 (sign-out of
-one account while others stay).
+- **Android:** `google_sign_in` with `serverClientId: WEB_CLIENT_ID` shows the
+  native picker and returns a **`serverAuthCode`**; exchange it once at
+  `oauth2.googleapis.com/token` with `WEB_CLIENT_ID` + `WEB_CLIENT_SECRET`,
+  `grant_type=authorization_code`, and **`redirect_uri=''`** (empty string — the
+  classic serverAuthCode-exchange gotcha) → `refresh_token`. Thereafter refresh
+  directly like desktop; never depend on `google_sign_in`'s current-user.
+- **Desktop:** unchanged — Desktop client (`GOOGLE_CLIENT_ID`/`SECRET`) loopback.
+- **Credentials:** all already in `.dart_defines.json` — no new Google Cloud
+  client needed. (Considered & rejected: **A** = loopback everywhere, dropped the
+  native Android picker + forced re-consent; **B** = keep single-current-user,
+  fails the simultaneous-sync goal on Android.)
+
+### Account identity
+
+Key accounts by the Google **`sub`** (stable across devices for the same Google
+account), not email (email can change). Desktop currently fetches only `email`
+from userinfo → also read `sub`. Store `{sub, email, displayName, photoUrl}`;
+`syncTarget` holds the `sub`.
+
+### Sub-stages (each independently testable on the two-device rig)
+
+**2a — Auth foundation (no routing yet).** `AuthService`: `account` →
+`accounts: List<Account>` + `defaultAccountId` (used for new notebooks).
+Per-account refresh-token storage in `flutter_secure_storage` keyed by `sub`
+(desktop key `omninote_drive_refresh_token` → `..._<sub>`; migrate the existing
+one). `getAuthHeaders(accountId)` refreshes that account independently (the
+per-account collapse-concurrent-refresh guard too). Settings "Account" section
+→ **list** (email/avatar + status + Remove) with **Add account**. *All sync still
+targets the default account this stage — pure auth-layer change.*
+
+**2b — Model + plumbing (no UI yet).** Add `Notebook.syncTarget = <accountId>?`
+(synced in `notebooks.json`; **null is treated as "the default account"** at
+read time — no eager mass-rewrite migration needed). `NotebookService`:
+`setNotebookSyncTarget` (bumps rev so it propagates), `effectiveSyncTarget(nb) =
+syncTarget ?? defaultAccountId`, and `syncedIndexJsonFor(accountId)` (filter the
+index to that account's notebooks). **Precedence:** device local-only
+(settings.json, per-device) **always wins** over `syncTarget` on this device.
+*The **"Sync to…" picker moved to 2c** — a picker without routing is a confusing
+half-state (pick account B, but sync still goes to default until 2c). So the
+existing local-only toggle stays untouched in 2b; the picker ships with routing.*
+
+**Reorg vs original plan:** the desktop refresh-token key migration is in **2a**
+(done); `drive_index.json → drive_index_<acct>.json` and
+`driveChangesToken → driveChangesTokens Map` move to **2c** (they only matter
+once Drive is split per-account).
+
+**2c — Per-account Drive + Sync routing + the picker (the big surgery).**
+- The per-notebook **"Sync to…"** picker `[Local-only, Account A, Account B, …]`
+  on Home + desktop sidebar (replaces the binary local-only toggle) — ships here
+  so it's always backed by working routing.
+- `DriveService` → **per-account instances** behind a registry keyed by
+  accountId; each owns its root, `drive_index_<acct>.json`, folder cache, changes
+  token. `_AuthedClient` binds to its account (`getAuthHeaders(accountId)`) — it
+  has *no* account identity today, that's the seam.
+- `SyncService` routes each dirty relPath to `syncTargetOf(notebookId)`'s
+  DriveService (need a fast in-memory `notebookId → syncTarget` lookup).
+  **Per-account** poll timers + guards (`_pulling`/`_resyncing`/`_pushing`) — one
+  account's sync must never block another's.
+- `notebooks.json`: **per-account on Drive** (each account's Drive sees only its
+  own notebooks) but **one file locally**. Generalize `syncedIndexJson` →
+  `syncedIndexJsonFor(accountId)` (filter by syncTarget); generalize
+  `_preserveLocalOnly` → a **scoped merge** that reconciles only that account's
+  subset and preserves every other account's / local-only entry (the current
+  union-merge assumes remote is the *whole* picture — naively applying a per-
+  account subset would drop other accounts' notebooks). Stamp `syncTarget=X` on
+  notebooks pulled from account X's index.
+
+**2d — Safety + tests.** Per-account "Remove account" reuses Phase-1 sign-out
+safety (unsynced warning + purge that account's local copies, keep others).
+Re-verify every Phase-1 edge case **per account** (removing one account mustn't
+stall another's poller/guards). Extend `merge_engine_test` for the scoped-index
+merge. Two-device verification (Linux desktop + Android over USB) per change.
+
+**Migration checklist (2b):** desktop refresh token, `drive_index.json`,
+`driveChangesToken`, notebooks' null `syncTarget` — all four migrate to the
+default account on first launch after upgrade.

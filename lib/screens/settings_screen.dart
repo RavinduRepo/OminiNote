@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/canvas_page.dart';
 import '../services/auth_service.dart';
+import '../services/notebook_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
@@ -150,16 +151,173 @@ class SettingsScreen extends StatelessWidget {
 class _AccountSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder(
-      valueListenable: AuthService().account,
-      builder: (context, account, _) {
-        if (account == null) {
+    return ValueListenableBuilder<List<Account>>(
+      valueListenable: AuthService().accounts,
+      builder: (context, accounts, _) {
+        if (accounts.isEmpty) {
           return _SignedOutRow();
         }
-        return _SignedInRow(account: account);
+        return Column(
+          children: [
+            for (var i = 0; i < accounts.length; i++) ...[
+              if (i > 0) const Divider(height: 1, indent: 16, endIndent: 16),
+              _AccountRow(account: accounts[i]),
+            ],
+            const Divider(height: 1, indent: 16, endIndent: 16),
+            const _AddAccountTile(),
+            _AccountsCaption(multiple: accounts.length > 1),
+          ],
+        );
       },
     );
   }
+}
+
+/// Explains the (default-free) account model: each notebook is bound to a
+/// chosen account, and accounts are removed independently.
+class _AccountsCaption extends StatelessWidget {
+  final bool multiple;
+  const _AccountsCaption({required this.multiple});
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+      child: Text(
+        multiple
+            ? 'Each notebook syncs to the account you pick for it — chosen when '
+                'you create it, or later via a notebook’s “Sync to…”. Removing an '
+                'account affects only its own notebooks.'
+            : 'New notebooks sync to this account. Add another to sync different '
+                'notebooks to different accounts.',
+        style: TextStyle(fontSize: 12, color: palette.textDim, height: 1.35),
+      ),
+    );
+  }
+}
+
+/// "Add account" affordance below the connected-accounts list. Reuses the same
+/// interactive add-account flow, showing a spinner while it runs.
+class _AddAccountTile extends StatelessWidget {
+  const _AddAccountTile();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return ValueListenableBuilder<bool>(
+      valueListenable: AuthService().signingIn,
+      builder: (context, busy, _) => ListTile(
+        leading: busy
+            ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Icon(Icons.add, color: palette.accent),
+        title: Text(
+          'Add account',
+          style: TextStyle(
+              color: palette.accent, fontWeight: FontWeight.w600, fontSize: 14),
+        ),
+        onTap: busy
+            ? null
+            : () async {
+                final added = await AuthService().addAccount();
+                if (added == null && context.mounted) {
+                  final err = AuthService().lastError.value ?? 'Sign-in failed';
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(err),
+                    behavior: SnackBarBehavior.floating,
+                  ));
+                }
+              },
+      ),
+    );
+  }
+}
+
+/// Confirms removing a **secondary** account (the default account uses the
+/// fuller [_signOutFlow]). In Phase 2a nothing syncs to a secondary account yet,
+/// so this just drops its credentials; per-account purge safety lands in 2d.
+/// Removes one account with per-account safety: warns about unsynced changes and
+/// optionally deletes local copies of **that account's** notebooks (keeping
+/// other accounts' and local-only ones). Removing an account resets only its own
+/// Drive index + changes token (via the accounts-changed teardown) and never
+/// touches the other accounts.
+Future<void> _removeAccountFlow(BuildContext context, Account account) async {
+  final label = account.email?.isNotEmpty == true
+      ? account.email!
+      : (account.displayName ?? 'this account');
+  final pending = SyncService().hasPendingUploads;
+  var removeLocal = false;
+  final go = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setLocal) => AlertDialog(
+        title: const Text('Remove account?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Disconnect $label from this device? Its notebooks stop '
+                'syncing here.'),
+            if (pending) ...[
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      size: 18, color: Colors.orange),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Some changes haven\'t synced yet. They stay on this '
+                      'device but won\'t upload until you reconnect.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: removeLocal,
+              onChanged: pending
+                  ? null
+                  : (v) => setLocal(() => removeLocal = v ?? false),
+              title: const Text('Remove downloaded notebooks'),
+              subtitle: Text(
+                pending
+                    ? 'Sync first to enable this.'
+                    : 'Deletes local copies of this account\'s notebooks (keeps '
+                        'other accounts\' and local-only ones). They re-download '
+                        'if you add the account again.',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (go != true) return;
+  if (removeLocal) {
+    await NotebookService().purgeLocalNotebooksForAccount(
+        account.id, AuthService().defaultAccountId);
+  }
+  await AuthService().removeAccount(account.id);
 }
 
 class _SignedOutRow extends StatelessWidget {
@@ -225,86 +383,18 @@ class _SignedOutRow extends StatelessWidget {
   }
 }
 
-/// Sign-out with safety: warns about unsynced changes and offers to remove
-/// local copies of synced notebooks (clean account switch, no accidental
-/// delete propagation). Local-only notebooks are always kept.
-Future<void> _signOutFlow(BuildContext context, String email) async {
-  final pending = SyncService().hasPendingUploads;
-  var removeLocal = false;
-  final go = await showDialog<bool>(
-    context: context,
-    builder: (context) => StatefulBuilder(
-      builder: (context, setLocal) => AlertDialog(
-        title: const Text('Sign out?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Sign out of ${email.isEmpty ? 'this account' : email}?'),
-            if (pending) ...[
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(Icons.warning_amber_rounded,
-                      size: 18, color: Colors.orange),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Some changes haven\'t synced to Drive yet. They stay on '
-                      'this device, but won\'t upload until you sign back in.',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            const SizedBox(height: 8),
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: removeLocal,
-              onChanged: pending
-                  ? null
-                  : (v) => setLocal(() => removeLocal = v ?? false),
-              title: const Text('Remove downloaded notebooks'),
-              subtitle: Text(
-                pending
-                    ? 'Sync first to enable this.'
-                    : 'Keeps local-only notebooks. Synced ones re-download when '
-                        'you sign back in.',
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Sign out'),
-          ),
-        ],
-      ),
-    ),
-  );
-  if (go != true) return;
-  await SyncService().prepareSignOut(purgeSynced: removeLocal);
-  await AuthService().signOut();
-}
-
-class _SignedInRow extends StatelessWidget {
-  final dynamic account; // GoogleSignInAccount
-  const _SignedInRow({required this.account});
+/// One connected account. All accounts are equal — each gets its own "Remove"
+/// with per-account safety.
+class _AccountRow extends StatelessWidget {
+  final Account account;
+  const _AccountRow({required this.account});
 
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
-    final photoUrl = account.photoUrl as String?;
-    final displayName = account.displayName as String? ?? '';
-    final email = account.email as String? ?? '';
+    final photoUrl = account.photoUrl;
+    final displayName = account.displayName ?? '';
+    final email = account.email ?? '';
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -331,20 +421,22 @@ class _SignedInRow extends StatelessWidget {
               children: [
                 Text(
                   displayName.isNotEmpty ? displayName : email,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                       fontSize: 15, fontWeight: FontWeight.w600),
                 ),
                 if (displayName.isNotEmpty)
                   Text(
                     email,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 12.5, color: palette.textDim),
                   ),
               ],
             ),
           ),
           TextButton(
-            onPressed: () => _signOutFlow(context, email),
-            child: const Text('Sign out'),
+            onPressed: () => _removeAccountFlow(context, account),
+            child: const Text('Remove'),
           ),
         ],
       ),
