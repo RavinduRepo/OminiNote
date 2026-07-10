@@ -180,8 +180,10 @@ jobs:
   # ── Create GitHub Release ─────────────────────────────────────────────────────
   release:
     needs: [android, linux, windows, macos]
-    # Only publish a release for real version tags; manual runs just build.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Publish for real version tags. always() so a single platform failing (e.g.
+    # macOS while its bundle id / signing isn't sorted) still releases the
+    # platforms that succeeded, rather than blocking the whole release.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -193,6 +195,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          # Missing files (from a failed platform job) are skipped, not fatal.
+          fail_on_unmatched_files: false
           files: |
             omininote-android.apk
             omininote-android.aab
