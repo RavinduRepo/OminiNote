@@ -8,6 +8,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/refreshable_empty.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
+import '../utils/notebook_share_ui.dart';
 import 'note_search.dart';
 import 'notebook_screen.dart';
 import 'settings_screen.dart';
@@ -70,6 +71,14 @@ class _HomeScreenState extends State<HomeScreen> {
     final changed = await showSyncTargetPicker(context, notebook);
     if (changed && mounted) _loadNotebooks();
   }
+
+  Future<void> _importNotebook() async {
+    final nb = await importNotebookCopy(context);
+    if (nb != null && mounted) _loadNotebooks();
+  }
+
+  Future<void> _shareNotebook(Notebook notebook) =>
+      shareNotebookCopy(context, notebook);
 
   Future<void> _renameNotebook(Notebook notebook) async {
     final name = await _promptForName(
@@ -156,11 +165,33 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () => openNoteSearch(context),
           ),
           // Single, consistent add entry point across all list screens: the
-          // app-bar "+" (the old FAB overlapped the last row's ⋮ menu).
-          IconButton(
+          // app-bar "+" (the old FAB overlapped the last row's ⋮ menu). A menu
+          // so a fresh notebook or an imported one both start here.
+          PopupMenuButton<String>(
             icon: const Icon(Icons.add),
-            tooltip: 'New notebook',
-            onPressed: _createNotebook,
+            tooltip: 'Add',
+            onSelected: (v) {
+              if (v == 'new') _createNotebook();
+              if (v == 'import') _importNotebook();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'new',
+                child: Row(children: [
+                  Icon(Icons.note_add_outlined, size: 18),
+                  SizedBox(width: 10),
+                  Text('New notebook'),
+                ]),
+              ),
+              PopupMenuItem(
+                value: 'import',
+                child: Row(children: [
+                  Icon(Icons.file_download_outlined, size: 18),
+                  SizedBox(width: 10),
+                  Text('Import notebook…'),
+                ]),
+              ),
+            ],
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -211,6 +242,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               onRename: () => _renameNotebook(notebook),
                               onColor: () => _colorNotebook(notebook),
                               onExport: () => _exportNotebookPdf(notebook),
+                              onShare: () => _shareNotebook(notebook),
                               onSyncTo: () => _pickSyncTarget(notebook),
                               onDelete: () => _deleteNotebook(notebook),
                             ),
@@ -235,6 +267,7 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
   final VoidCallback onExport;
+  final VoidCallback onShare;
   final VoidCallback onSyncTo;
   final VoidCallback onDelete;
 
@@ -244,6 +277,7 @@ class _NotebookRow extends StatelessWidget {
     required this.onRename,
     required this.onColor,
     required this.onExport,
+    required this.onShare,
     required this.onSyncTo,
     required this.onDelete,
   });
@@ -320,6 +354,7 @@ class _NotebookRow extends StatelessWidget {
                 onRename: onRename,
                 onColor: onColor,
                 onExport: onExport,
+                onShare: onShare,
                 onSyncTo: onSyncTo,
                 onDelete: onDelete,
               ),
@@ -335,12 +370,14 @@ class _RowMenu extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onColor;
   final VoidCallback onExport;
+  final VoidCallback onShare;
   final VoidCallback onSyncTo;
   final VoidCallback onDelete;
   const _RowMenu({
     required this.onRename,
     required this.onColor,
     required this.onExport,
+    required this.onShare,
     required this.onSyncTo,
     required this.onDelete,
   });
@@ -354,6 +391,7 @@ class _RowMenu extends StatelessWidget {
         if (value == 'rename') onRename();
         if (value == 'color') onColor();
         if (value == 'export') onExport();
+        if (value == 'share') onShare();
         if (value == 'sync') onSyncTo();
         if (value == 'delete') onDelete();
       },
@@ -385,6 +423,16 @@ class _RowMenu extends StatelessWidget {
               Icon(Icons.picture_as_pdf_outlined, size: 18),
               SizedBox(width: 10),
               Text('Export to PDF'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'share',
+          child: Row(
+            children: [
+              Icon(Icons.ios_share, size: 18),
+              SizedBox(width: 10),
+              Text('Send a copy'),
             ],
           ),
         ),

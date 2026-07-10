@@ -15,6 +15,7 @@ import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
+import '../utils/notebook_share_ui.dart';
 import 'canvas_screen.dart';
 import 'note_search.dart';
 import 'settings_screen.dart';
@@ -288,6 +289,13 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       _expanded.add(notebook.id);
       _sidebarCollapsed = false;
     });
+  }
+
+  Future<void> _importNotebook() async {
+    final nb = await importNotebookCopy(context);
+    if (nb == null || !mounted) return;
+    await _loadAll();
+    if (mounted) setState(() => _expanded.add(nb.id));
   }
 
   Future<void> _exportNotebookPdf(Notebook notebook) async {
@@ -1004,10 +1012,17 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             tooltip: 'Search (Ctrl/Cmd+K)',
             onPressed: () => openNoteSearch(context, onReveal: _revealSearchResult),
           ),
-          IconButton(
+          PopupMenuButton<String>(
             icon: const Icon(Icons.add, size: 20),
-            tooltip: 'New notebook',
-            onPressed: _createNotebook,
+            tooltip: 'Add',
+            onSelected: (v) {
+              if (v == 'new') _createNotebook();
+              if (v == 'import') _importNotebook();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'new', child: Text('New notebook')),
+              PopupMenuItem(value: 'import', child: Text('Import notebook…')),
+            ],
           ),
           const SyncStatusIcon(),
           IconButton(
@@ -1226,6 +1241,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               _colorNotebook(notebook);
                             case 'export':
                               _exportNotebookPdf(notebook);
+                            case 'share':
+                              shareNotebookCopy(context, notebook);
                             case 'sync':
                               _pickSyncTarget(notebook);
                             case 'delete':
@@ -1244,6 +1261,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           const PopupMenuItem(
                             value: 'export',
                             child: Text('Export to PDF'),
+                          ),
+                          const PopupMenuItem(
+                            value: 'share',
+                            child: Text('Send a copy'),
                           ),
                           const PopupMenuItem(
                             value: 'sync',

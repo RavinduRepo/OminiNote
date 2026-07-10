@@ -299,6 +299,19 @@ class SyncService {
     }
   }
 
+  /// Queues a whole notebook's file subtree + the index for upload and pushes
+  /// now — used after importing a notebook bundle (its files were written
+  /// directly, not through the dirty-marking save path).
+  Future<void> uploadNotebook(String notebookId) async {
+    if (!AuthService().isSignedIn) return;
+    final rels =
+        await NotebookService().listSyncedRelPathsForNotebook(notebookId);
+    _dirty.addAll(rels);
+    _dirty.add('notebooks.json');
+    await _saveJournal();
+    unawaited(_flushPush());
+  }
+
   /// Flush pending uploads immediately (e.g. when the app is backgrounded).
   Future<void> flushPending() => _flushPush();
 

@@ -210,28 +210,50 @@ class NotebookService {
   Future<String?> rekeyNotebookForMove(
       String oldId, String destAccountId) async {
     final data = await _readIndex();
-    final oldJson = data[oldId] as Map<String, dynamic>?;
-    if (oldJson == null) return null;
-    final oldNb = Notebook.fromJson(oldJson);
-    final newNotebookId = newId();
+    if (data[oldId] == null) return null;
 
-    // **Deep re-id.** Give every section AND canvas a fresh id, so the moved
-    // notebook shares NO identity with the original. This is load-bearing: the
-    // open-canvas live-merge (`SyncService._notifyOpenCanvas`) routes pulled
-    // pages to a listener **keyed by canvas id** — if the moved copy kept the
-    // same canvas ids, a device signed into both accounts would relay a page
-    // pulled from one account into the *other* account's open canvas, bridging
-    // edits/deletes across accounts. New ids at every level break that bridge.
-    // (Page ids can stay — page files live under the now-unique canvas paths.)
+    final newNotebookId =
+        await _deepReidNotebookCopy(data, oldId, syncTarget: destAccountId);
+
+    // Tombstone the old id (its syncTarget stays the *source* account, so the
+    // source account's notebooks.json carries the delete to other devices).
+    final oldNb = Notebook.fromJson(data[oldId] as Map<String, dynamic>);
+    oldNb.deletedAt = DateTime.now();
+    oldNb.bumpRev(SettingsService().deviceId);
+    data[oldId] = oldNb.toJson();
+
+    await writeAtomicPublic(notebooksFile, jsonEncode(data));
+    return newNotebookId;
+  }
+
+  /// Deep-clones the notebook [srcId] (which must be on disk and present in the
+  /// index [data]) into a fresh copy with **new notebook + section + canvas
+  /// ids**, bound to [syncTarget], optionally renamed to [name]. Adds the new
+  /// entry to [data] (the caller persists) and leaves the source untouched.
+  /// Returns the new notebook id.
+  ///
+  /// New ids at every level are load-bearing: the open-canvas live-merge
+  /// (`SyncService._notifyOpenCanvas`) routes pulled pages to a listener keyed
+  /// by canvas id, so two notebooks sharing a canvas id would bridge edits
+  /// across accounts on a device signed into both. (Page ids can stay — page
+  /// files live under the now-unique canvas paths.) Shared by move + import.
+  Future<String> _deepReidNotebookCopy(
+    Map<String, dynamic> data,
+    String srcId, {
+    required String? syncTarget,
+    String? name,
+  }) async {
+    final srcNb = Notebook.fromJson(data[srcId] as Map<String, dynamic>);
+    final newNotebookId = newId();
     final sectionIdMap = <String, String>{};
-    for (final oldSecId in oldNb.allSectionIds) {
-      final sec = await getSection(oldId, oldSecId);
+    for (final oldSecId in srcNb.allSectionIds) {
+      final sec = await getSection(srcId, oldSecId);
       if (sec == null) continue;
       final newSecId = newId();
       final canvasIdMap = <String, String>{};
       for (final oldCanvasId in sec.allCanvasIds) {
         canvasIdMap[oldCanvasId] = await _duplicateCanvasDir(
-            oldId, oldSecId, oldCanvasId, newNotebookId, newSecId);
+            srcId, oldSecId, oldCanvasId, newNotebookId, newSecId);
       }
       await _writeAtomic(
         _sectionFile(newNotebookId, newSecId),
@@ -249,27 +271,51 @@ class NotebookService {
       );
       sectionIdMap[oldSecId] = newSecId;
     }
-
-    // New index entry (remapped section tree, bound to the destination account).
     final newNb = Notebook(
       id: newNotebookId,
       deviceId: SettingsService().deviceId,
-      name: oldNb.name,
-      createdAt: oldNb.createdAt,
-      color: oldNb.color,
-      syncTarget: destAccountId,
-      nodes: oldNb.nodes.map((n) => _remapClone(n, sectionIdMap)).toList(),
+      name: name ?? srcNb.name,
+      createdAt: srcNb.createdAt,
+      color: srcNb.color,
+      syncTarget: syncTarget,
+      nodes: srcNb.nodes.map((n) => _remapClone(n, sectionIdMap)).toList(),
     );
     data[newNotebookId] = newNb.toJson();
-
-    // Tombstone the old id (its syncTarget stays the *source* account, so the
-    // source account's notebooks.json carries the delete to other devices).
-    oldNb.deletedAt = DateTime.now();
-    oldNb.bumpRev(SettingsService().deviceId);
-    data[oldId] = oldNb.toJson();
-
-    await writeAtomicPublic(notebooksFile, jsonEncode(data));
     return newNotebookId;
+  }
+
+  /// Installs a just-unzipped **staging** notebook (its files already written to
+  /// `notebooks/<stagingId>/`) as a brand-new notebook with fresh ids bound to
+  /// [syncTarget], then removes the staging copy. [indexJson] is the bundle's
+  /// original index entry — its section tree references the staged section ids.
+  /// Used by notebook **import** (send-a-copy). Returns the new notebook.
+  Future<Notebook?> installImportedNotebook(
+    String stagingId,
+    Map<String, dynamic> indexJson, {
+    String? syncTarget,
+  }) async {
+    final data = await _readIndex();
+    // A staging index entry so the deep re-id can walk the section tree.
+    final staged = Notebook.fromJson(indexJson);
+    data[stagingId] = Notebook(
+      id: stagingId,
+      deviceId: SettingsService().deviceId,
+      name: staged.name,
+      createdAt: staged.createdAt,
+      color: staged.color,
+      nodes: staged.nodes,
+    ).toJson();
+
+    final newNotebookId =
+        await _deepReidNotebookCopy(data, stagingId, syncTarget: syncTarget);
+
+    data.remove(stagingId);
+    await writeAtomicPublic(notebooksFile, jsonEncode(data));
+    try {
+      final dir = Directory('${appDir.path}/notebooks/$stagingId');
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {}
+    return getNotebook(newNotebookId);
   }
 
   /// Every synced file on disk under one notebook, as forward-slash relative
