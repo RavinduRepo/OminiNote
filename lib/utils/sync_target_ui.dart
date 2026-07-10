@@ -93,7 +93,6 @@ Future<bool> showSyncTargetPicker(
             _OptionTile(
               icon: Icons.cloud_done_outlined,
               label: a.email ?? a.displayName ?? a.id,
-              sublabel: a.id == defaultId ? 'Default account' : null,
               selected: !wasLocalOnly && effectiveTarget == a.id,
               onTap: () => Navigator.pop(context, a.id),
             ),
