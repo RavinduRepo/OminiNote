@@ -77,6 +77,14 @@ Future<Notebook?> importNotebookCopy(BuildContext context) async {
   if (bytes == null) return null;
 
   if (!context.mounted) return null;
+  return importBundleBytes(context, bytes);
+}
+
+/// Imports already-loaded bundle [bytes] as a new notebook: asks which account,
+/// installs it (fresh ids), kicks its upload, and refreshes open lists. Shared
+/// by the file-picker import and the "open a .omninote file with the app" path.
+Future<Notebook?> importBundleBytes(
+    BuildContext context, List<int> bytes) async {
   final target = await chooseNewNotebookAccount(context);
   if (target == null || !context.mounted) return null; // cancelled
 
@@ -89,6 +97,11 @@ Future<Notebook?> importNotebookCopy(BuildContext context) async {
     } else {
       await SyncService().uploadNotebook(nb.id);
     }
+    SyncService().notifyDataChanged(); // reload any open list screen
+    messenger.showSnackBar(SnackBar(
+      content: Text('Imported “${nb.name}”'),
+      behavior: SnackBarBehavior.floating,
+    ));
     return nb;
   } catch (e) {
     messenger.showSnackBar(SnackBar(

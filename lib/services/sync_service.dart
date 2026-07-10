@@ -312,6 +312,10 @@ class SyncService {
     unawaited(_flushPush());
   }
 
+  /// Bumps the data-changed signal so open list screens reload — used after a
+  /// notebook is created outside the normal sync path (e.g. an import).
+  void notifyDataChanged() => _bumpData();
+
   /// Flush pending uploads immediately (e.g. when the app is backgrounded).
   Future<void> flushPending() => _flushPush();
 

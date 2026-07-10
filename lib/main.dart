@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'screens/desktop_shell_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/note_search.dart';
@@ -9,6 +11,7 @@ import 'services/notebook_service.dart';
 import 'services/settings_service.dart';
 import 'services/sync_service.dart';
 import 'theme/app_theme.dart';
+import 'utils/notebook_share_ui.dart';
 
 void main() async {
   // Ensures hardware bindings are initialized for rendering
@@ -42,16 +45,59 @@ class NoteApp extends StatefulWidget {
 }
 
 class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
+  final _navigatorKey = GlobalKey<NavigatorState>();
+  StreamSubscription<List<SharedMediaFile>>? _intentSub;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _setupIncomingFiles();
   }
 
   @override
   void dispose() {
+    _intentSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// Handles a `.omninote` file opened/shared with the app (Android open-with /
+  /// share sheet) — routes it into the notebook-import flow. Desktop open-with
+  /// needs native-runner wiring and is handled with the installer packaging.
+  void _setupIncomingFiles() {
+    if (!(Platform.isAndroid || Platform.isIOS)) return;
+    // Cold start: the app was launched by tapping the file.
+    ReceiveSharingIntent.instance.getInitialMedia().then((files) {
+      if (files.isNotEmpty) _handleIncoming(files);
+      ReceiveSharingIntent.instance.reset();
+    });
+    // Warm: the app was already running.
+    _intentSub =
+        ReceiveSharingIntent.instance.getMediaStream().listen(_handleIncoming);
+  }
+
+  void _handleIncoming(List<SharedMediaFile> files) {
+    if (files.isEmpty) return;
+    final f = files.firstWhere(
+      (m) => m.path.toLowerCase().endsWith('.omninote'),
+      orElse: () => files.first,
+    );
+    _importFromPath(f.path);
+  }
+
+  Future<void> _importFromPath(String path) async {
+    List<int> bytes;
+    try {
+      bytes = await File(path).readAsBytes();
+    } catch (_) {
+      return;
+    }
+    // Run after a frame so the navigator/context is available (cold start).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _navigatorKey.currentContext;
+      if (ctx != null) importBundleBytes(ctx, bytes);
+    });
   }
 
   @override
@@ -77,6 +123,7 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
         return MaterialApp(
           title: 'Omininote',
           debugShowCheckedModeBanner: false,
+          navigatorKey: _navigatorKey,
           theme: AppTheme.light(),
           darkTheme: AppTheme.dark(),
           themeMode: themeMode,

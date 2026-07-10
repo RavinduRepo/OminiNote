@@ -26,6 +26,36 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Open / import a .omninote notebook bundle. A .omninote is a ZIP;
+                 file managers / chat apps hand out opaque content:// URIs (no
+                 filename), reporting the type as application/zip or, for the
+                 unknown extension, application/octet-stream — so we match those
+                 types for direct "Open with". (A path-pattern filter can't work
+                 when the URI has no filename.) The app appears for other
+                 zip/unknown files too; the bundle is validated on import and a
+                 wrong file is rejected with a message. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:mimeType="application/zip"/>
+                <data android:mimeType="application/octet-stream"/>
+            </intent-filter>
+            <!-- Also match by filename when a URI does expose it (some pickers). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.omninote"/>
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.omninote"/>
+            </intent-filter>
+            <!-- Share a bundle to the app (very reliable). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/zip"/>
+                <data android:mimeType="application/octet-stream"/>
+            </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

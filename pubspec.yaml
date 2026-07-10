@@ -48,6 +48,10 @@ dependencies:
   html: ^0.15.6
   archive: ^4.0.9
   share_plus: ^12.0.2
+  # Pinned: 1.9.0 hard-codes compileSdk 37 (only a preview android-37 SDK exists
+  # today) and breaks the Android build. 1.8.1 uses stable compileSdk 34 and has
+  # the same Dart API (ReceiveSharingIntent.instance.getInitialMedia/getMediaStream).
+  receive_sharing_intent: 1.8.1
 
 dev_dependencies:
   flutter_test:
