@@ -20,10 +20,12 @@ target**. Tracked here; update as phases land.
   saves.
 - ⬜ **Phase 3 — link sharing** — not started (next).
 
-**Known follow-ups (not blocking):** the open-canvas VIEW doesn't refresh when
-its notebook is moved/tombstoned (stale controller edits the orphaned old copy —
-no cross-account bleed, just confusing). See `KNOWN_ISSUES.md` "Multi-account
-sync" for the move's inherent lagging-device caveat + orphaned-old-Drive-content.
+**Open-canvas refresh:** fixed — a pushed `CanvasScreen` listens to
+`SyncService.dataVersion` and pops (with a message) when its notebook is
+tombstoned/moved away; the desktop shell clears its selection in `_loadAll`
+(`CanvasScreen` gets an `embedded` flag so it doesn't self-pop when hosted).
+**Remaining caveats (not blocking)** in `KNOWN_ISSUES.md` "Multi-account sync":
+the move's inherent lagging-unsynced-device edge + orphaned old-Drive content.
 
 **Resume for Phase 3 (link sharing):** foundation is done — each notebook knows
 its account (`syncTarget`) and Drive is account-scoped. Ship "send a copy" first

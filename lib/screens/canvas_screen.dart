@@ -22,6 +22,7 @@ import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/pdf_exporter.dart';
 import '../services/settings_service.dart';
+import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
 import 'page_organizer.dart';
@@ -42,11 +43,18 @@ class CanvasScreen extends StatefulWidget {
   /// Optional page to jump to once loaded (e.g. opening a bookmark from search).
   final String? initialPageId;
 
+  /// True when embedded directly in a host (the desktop split-view) rather than
+  /// pushed as its own route. When embedded, this screen does NOT pop itself if
+  /// its notebook disappears (moved/deleted elsewhere) — the host clears its own
+  /// selection instead; popping would dismiss the wrong route.
+  final bool embedded;
+
   const CanvasScreen({
     super.key,
     required this.canvas,
     this.onCanvasRenamed,
     this.initialPageId,
+    this.embedded = false,
   });
 
   @override
@@ -104,6 +112,33 @@ class _CanvasScreenState extends State<CanvasScreen> {
   void initState() {
     super.initState();
     _load();
+    // Close this view if its notebook is moved to another account or deleted on
+    // another device (its notebooks.json entry is tombstoned here). Only when
+    // pushed as its own route — the desktop host clears its selection instead.
+    if (!widget.embedded) {
+      SyncService().dataVersion.addListener(_onSyncData);
+    }
+  }
+
+  bool _closing = false;
+
+  Future<void> _onSyncData() async {
+    if (_closing || !mounted) return;
+    final nb = await _service.getNotebook(widget.canvas.notebookId);
+    if (nb != null || _closing || !mounted) return; // still here — nothing to do
+    _closing = true;
+    // The whole notebook is gone (moved/deleted), so the section + notebook
+    // screens beneath this canvas are stale too — pop all the way back to the
+    // notebooks list, not just one level.
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    if (navigator.canPop()) {
+      navigator.popUntil((route) => route.isFirst);
+      messenger.showSnackBar(const SnackBar(
+        content: Text('This notebook was moved or deleted on another device.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
   }
 
   Future<void> _load() async {
@@ -330,6 +365,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   @override
   void dispose() {
+    if (!widget.embedded) {
+      SyncService().dataVersion.removeListener(_onSyncData);
+    }
     _canvasFocus.dispose();
     _controller?.dispose(); // flushes pending saves
     super.dispose();

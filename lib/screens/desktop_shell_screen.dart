@@ -210,7 +210,18 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       _sectionMaps[nb.id] = await _service.getSectionMap(nb.id);
     }
     if (!mounted) return;
-    setState(() => _notebooks = notebooks);
+    // If the open canvas's notebook was moved/deleted elsewhere (its entry is
+    // now gone/tombstoned), clear the selection so the stale canvas closes.
+    final openNbId = _selectedCanvas?.notebookId;
+    final notebookGone =
+        openNbId != null && !notebooks.any((n) => n.id == openNbId);
+    setState(() {
+      _notebooks = notebooks;
+      if (notebookGone) {
+        _selectedCanvas = null;
+        _selectedSection = null;
+      }
+    });
   }
 
   Future<void> _reloadNotebook(String notebookId) async {
@@ -727,6 +738,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       return CanvasScreen(
         key: ValueKey(canvas.id),
         canvas: canvas,
+        embedded: true,
         onCanvasRenamed: _reloadSelectedSection,
         initialPageId: _pendingJumpPageId,
       );
