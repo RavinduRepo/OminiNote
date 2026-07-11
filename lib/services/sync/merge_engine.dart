@@ -91,6 +91,33 @@ class MergeEngine {
   static bool _isPagePath(String relPath) =>
       relPath.contains('/pages/') && relPath.endsWith('.json');
 
+  // ── Purge override (grow-only, terminal) ─────────────────────────────────
+
+  /// Once either side of a doc merge carries `purgedAt`, the merged doc keeps
+  /// it (earliest if both) and stays deleted — purge is terminal, so a restore
+  /// racing a purge loses deterministically regardless of the LWW tuple.
+  /// Returns null when the winner already reflects the purge (no override
+  /// needed); callers must flag both `changedLocal` and `localContributed`
+  /// when an override is returned, so the corrected doc propagates both ways.
+  static Map<String, dynamic>? _withPurgeOverride(
+    Map<String, dynamic> winner,
+    Map<String, dynamic>? l,
+    Map<String, dynamic>? r,
+  ) {
+    final lp = l?['purgedAt'] as num?;
+    final rp = r?['purgedAt'] as num?;
+    if (lp == null && rp == null) return null;
+    final purged =
+        (lp != null && rp != null) ? (lp < rp ? lp : rp) : (lp ?? rp)!;
+    if (winner['purgedAt'] == purged && winner['deletedAt'] != null) {
+      return null;
+    }
+    final out = Map<String, dynamic>.from(winner);
+    out['purgedAt'] = purged;
+    out['deletedAt'] = (winner['deletedAt'] as num?) ?? purged;
+    return out;
+  }
+
   // ── notebooks.json (union map) ───────────────────────────────────────────
 
   static MergeResult mergeNotebooksIndex(String? local, String remote) {
@@ -113,9 +140,16 @@ class MergeEngine {
         localContributed = true; // we have a notebook remote lacks
       } else {
         final localWins = _envelopeWins(l, r);
-        merged[id] = localWins ? l : r;
-        if (localWins && !_sameEnvelope(l, r)) localContributed = true;
-        if (!localWins && !_sameEnvelope(l, r)) changedLocal = true;
+        final winner = localWins ? l : r;
+        final purged = _withPurgeOverride(winner, l, r);
+        merged[id] = purged ?? winner;
+        if (purged != null) {
+          localContributed = true;
+          changedLocal = true;
+        } else {
+          if (localWins && !_sameEnvelope(l, r)) localContributed = true;
+          if (!localWins && !_sameEnvelope(l, r)) changedLocal = true;
+        }
       }
     }
 
@@ -165,9 +199,16 @@ class MergeEngine {
         localContributed = true; // ours, the account's Drive lacks it → push
       } else {
         final localWins = _envelopeWins(l, r);
-        merged[id] = localWins ? l : r;
-        if (localWins && !_sameEnvelope(l, r)) localContributed = true;
-        if (!localWins && !_sameEnvelope(l, r)) changedLocal = true;
+        final winner = localWins ? l : r;
+        final purged = _withPurgeOverride(winner, l, r);
+        merged[id] = purged ?? winner;
+        if (purged != null) {
+          localContributed = true;
+          changedLocal = true;
+        } else {
+          if (localWins && !_sameEnvelope(l, r)) localContributed = true;
+          if (!localWins && !_sameEnvelope(l, r)) changedLocal = true;
+        }
       }
     }
 
@@ -198,6 +239,15 @@ class MergeEngine {
       );
     }
     final localWins = _envelopeWins(l, r);
+    final winner = localWins ? l : r;
+    final purged = _withPurgeOverride(winner, l, r);
+    if (purged != null) {
+      return MergeResult(
+        content: jsonEncode(purged),
+        changedLocal: true,
+        localContributed: true,
+      );
+    }
     return MergeResult(
       content: localWins ? local : remote,
       changedLocal: !localWins,

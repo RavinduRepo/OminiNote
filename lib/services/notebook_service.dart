@@ -1306,6 +1306,10 @@ class NotebookService {
       final json = entry.value as Map<String, dynamic>;
       notebookNames[entry.key] = json['name'] as String? ?? 'Notebook';
       final deletedAt = json['deletedAt'];
+      if (json['purgedAt'] != null) {
+        deletedNotebookIds.add(entry.key);
+        continue; // permanently purged — only the marker remains, hide it
+      }
       if (deletedAt is num) {
         deletedNotebookIds.add(entry.key);
         out.add(BinItem(
@@ -1335,7 +1339,7 @@ class NotebookService {
         final secJson = await _readJsonFile(File('${secDir.path}/section.json'));
         final secDeleted = secJson?['deletedAt'];
         final secName = secJson?['name'] as String? ?? 'Section';
-        if (secDeleted is num) {
+        if (secDeleted is num && secJson?['purgedAt'] == null) {
           out.add(BinItem(
             type: BinItemType.section,
             name: secName,
@@ -1354,7 +1358,7 @@ class NotebookService {
           final cvJson =
               await _readJsonFile(File('${cvDir.path}/canvas.json'));
           final cvDeleted = cvJson?['deletedAt'];
-          if (cvDeleted is! num) continue;
+          if (cvDeleted is! num || cvJson?['purgedAt'] != null) continue;
           out.add(BinItem(
             type: BinItemType.canvas,
             name: cvJson?['name'] as String? ?? 'Canvas',
@@ -1389,7 +1393,7 @@ class NotebookService {
       case BinItemType.notebook:
         final data = await _readIndex();
         final json = data[item.notebookId] as Map<String, dynamic>?;
-        if (json == null) return;
+        if (json == null || json['purgedAt'] != null) return;
         final nb = Notebook.fromJson(json);
         nb.deletedAt = null;
         nb.bumpRev(SettingsService().deviceId);
@@ -1399,7 +1403,7 @@ class NotebookService {
       case BinItemType.section:
         final json = await _readJsonFile(
             _sectionFile(item.notebookId, item.sectionId!));
-        if (json == null) return;
+        if (json == null || json['purgedAt'] != null) return;
         final sec = Section.fromJson(json);
         sec.deletedAt = null;
         await saveSection(sec); // bumps rev
@@ -1412,7 +1416,7 @@ class NotebookService {
       case BinItemType.canvas:
         final json = await _readJsonFile(File(
             '${canvasDir(item.notebookId, item.sectionId!, item.canvasId!).path}/canvas.json'));
-        if (json == null) return;
+        if (json == null || json['purgedAt'] != null) return;
         final c = Canvas.fromJson(json);
         c.deletedAt = null;
         await saveCanvas(c); // bumps rev
@@ -1424,24 +1428,173 @@ class NotebookService {
     }
   }
 
-  /// Immediately, physically deletes a binned item from local disk (Drive
-  /// keeps its tombstoned copy — harmless; see GC notes).
+  // ── Purge (stage 2 — permanent, all devices + Drive) ────────────────────
+  //
+  // A purge upgrades an existing tombstone to a *terminal* `purgedAt` marker:
+  // the heavy content subtree is hard-deleted from local disk and Drive, and
+  // only the tiny marker doc survives (the notebooks.json entry / a stripped
+  // section.json / canvas.json). The marker is grow-only in merges — once any
+  // device purges, a racing restore or a stale live copy loses — and it is
+  // never GC'd, which is what makes the purge stick forever. Other devices
+  // apply the purge when they pull the marker (SyncService calls the
+  // `apply*PurgeLocally` methods below).
+
+  /// Local cache of purged path-prefixes (`nbId`, `nbId/secId`,
+  /// `nbId/secId/cvId`) used by SyncService's push/pull filters. Device-local
+  /// (`purged_index.json`, not synced — [isSyncedRelPath] excludes it);
+  /// repopulated during every GC walk.
+  Set<String>? _purgedPaths;
+  File get _purgedIndexFile => File('${appDir.path}/purged_index.json');
+
+  Future<Set<String>> purgedPaths() async {
+    if (_purgedPaths != null) return _purgedPaths!;
+    final json = await _readJsonFile(_purgedIndexFile);
+    _purgedPaths = {...List<String>.from(json?['purged'] ?? const [])};
+    return _purgedPaths!;
+  }
+
+  Future<void> _addPurgedPath(String path) async {
+    final set = await purgedPaths();
+    if (!set.add(path)) return;
+    await _writeAtomic(
+        _purgedIndexFile, jsonEncode({'purged': set.toList()..sort()}));
+  }
+
+  /// True when [rel] is *content under a purged item* — the sync layer must
+  /// neither upload nor download it. The surviving marker files themselves
+  /// (`section.json` / `canvas.json` of the purged item) return false: they
+  /// are how the purge propagates. Pure; unit-tested.
+  static bool isPurgedContentPath(String rel, Set<String> purged) {
+    if (purged.isEmpty || !rel.startsWith('notebooks/')) return false;
+    final parts = rel.split('/');
+    if (parts.length < 2) return false;
+    final nb = parts[1];
+    if (purged.contains(nb)) return true; // notebook marker lives outside
+    if (parts.length >= 4 && parts[2] == 'sections') {
+      final sec = '$nb/${parts[3]}';
+      if (purged.contains(sec)) {
+        return !(parts.length == 5 && parts[4] == 'section.json');
+      }
+      if (parts.length >= 6 && parts[4] == 'canvases') {
+        final cv = '$sec/${parts[5]}';
+        if (purged.contains(cv)) {
+          return !(parts.length == 7 && parts[6] == 'canvas.json');
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Permanently deletes a binned item everywhere: writes the terminal marker
+  /// (which syncs to every device), wipes local content now, and queues the
+  /// Drive-side folder deletion. Not undoable.
   Future<void> purgeBinItem(BinItem item) async {
     switch (item.type) {
       case BinItemType.notebook:
-        final data = await _readIndex();
-        data.remove(item.notebookId);
-        await _writeAtomic(notebooksFile, jsonEncode(data));
-        final dir = Directory('${appDir.path}/notebooks/${item.notebookId}');
-        if (await dir.exists()) await dir.delete(recursive: true);
+        await purgeNotebook(item.notebookId);
       case BinItemType.section:
-        final dir = sectionDir(item.notebookId, item.sectionId!);
-        if (await dir.exists()) await dir.delete(recursive: true);
+        await purgeSection(item.notebookId, item.sectionId!);
       case BinItemType.canvas:
-        final dir =
-            canvasDir(item.notebookId, item.sectionId!, item.canvasId!);
-        if (await dir.exists()) await dir.delete(recursive: true);
+        await purgeCanvas(item.notebookId, item.sectionId!, item.canvasId!);
     }
+  }
+
+  Future<void> purgeNotebook(String notebookId) async {
+    final data = await _readIndex();
+    // Local-only notebooks have no Drive copy and no other-device presence —
+    // a plain local removal is the whole purge (today's pre-marker behavior).
+    if (localOnlyNotebookIds().contains(notebookId)) {
+      data.remove(notebookId);
+      await _writeAtomic(notebooksFile, jsonEncode(data));
+      final dir = Directory('${appDir.path}/notebooks/$notebookId');
+      if (await dir.exists()) await dir.delete(recursive: true);
+      return;
+    }
+    final json = data[notebookId] as Map<String, dynamic>?;
+    if (json != null) {
+      final nb = Notebook.fromJson(json);
+      nb.deletedAt ??= DateTime.now();
+      nb.purgedAt ??= DateTime.now();
+      nb.nodes.clear(); // content is gone; keep the marker tiny
+      nb.bumpRev(SettingsService().deviceId);
+      data[notebookId] = nb.toJson();
+      await _writeAtomic(notebooksFile, jsonEncode(data)); // journals upload
+    }
+    await applyNotebookPurgeLocally(notebookId);
+  }
+
+  Future<void> purgeSection(String notebookId, String sectionId) async {
+    if (localOnlyNotebookIds().contains(notebookId)) {
+      final dir = sectionDir(notebookId, sectionId);
+      if (await dir.exists()) await dir.delete(recursive: true);
+      return;
+    }
+    final json = await _readJsonFile(_sectionFile(notebookId, sectionId));
+    if (json != null) {
+      final sec = Section.fromJson(json);
+      sec.deletedAt ??= DateTime.now();
+      sec.purgedAt ??= DateTime.now();
+      sec.nodes.clear();
+      await saveSection(sec); // bumps rev + journals the marker upload
+    }
+    await applySectionPurgeLocally(notebookId, sectionId);
+  }
+
+  Future<void> purgeCanvas(
+      String notebookId, String sectionId, String canvasId) async {
+    if (localOnlyNotebookIds().contains(notebookId)) {
+      final dir = canvasDir(notebookId, sectionId, canvasId);
+      if (await dir.exists()) await dir.delete(recursive: true);
+      return;
+    }
+    final json = await _readJsonFile(
+        File('${canvasDir(notebookId, sectionId, canvasId).path}/canvas.json'));
+    if (json != null) {
+      final c = Canvas.fromJson(json);
+      c.deletedAt ??= DateTime.now();
+      c.purgedAt ??= DateTime.now();
+      c.rows.clear();
+      c.attachments.clear();
+      c.bookmarks.clear();
+      await saveCanvas(c);
+    }
+    await applyCanvasPurgeLocally(notebookId, sectionId, canvasId);
+  }
+
+  /// Local half of a purge — also called by SyncService when a pulled marker
+  /// carries `purgedAt` (that's how a purge on device A lands on device B).
+  /// Wipes the content subtree, records the purged prefix for the sync
+  /// filters, and hands the (idempotent) Drive folder deletions to sync.
+  Future<void> applyNotebookPurgeLocally(String notebookId) async {
+    final dir = Directory('${appDir.path}/notebooks/$notebookId');
+    if (await dir.exists()) await dir.delete(recursive: true);
+    await _addPurgedPath(notebookId);
+    SyncService()
+        .onItemPurged(notebookId, ['notebooks/$notebookId']);
+  }
+
+  Future<void> applySectionPurgeLocally(
+      String notebookId, String sectionId) async {
+    final dir =
+        Directory('${sectionDir(notebookId, sectionId).path}/canvases');
+    if (await dir.exists()) await dir.delete(recursive: true);
+    await _addPurgedPath('$notebookId/$sectionId');
+    SyncService().onItemPurged(
+        notebookId, ['notebooks/$notebookId/sections/$sectionId/canvases']);
+  }
+
+  Future<void> applyCanvasPurgeLocally(
+      String notebookId, String sectionId, String canvasId) async {
+    final base = canvasDir(notebookId, sectionId, canvasId).path;
+    for (final sub in ['pages', 'assets']) {
+      final dir = Directory('$base/$sub');
+      if (await dir.exists()) await dir.delete(recursive: true);
+    }
+    await _addPurgedPath('$notebookId/$sectionId/$canvasId');
+    final relBase =
+        'notebooks/$notebookId/sections/$sectionId/canvases/$canvasId';
+    SyncService()
+        .onItemPurged(notebookId, ['$relBase/pages', '$relBase/assets']);
   }
 
   // ── Garbage collection (purge tombstones older than the bin window) ─────
@@ -1450,37 +1603,34 @@ class NotebookService {
   /// GC sweep removes them permanently.
   static const Duration _kGcMaxAge = Duration(days: 30);
 
-  /// Physically deletes tombstoned notebooks/sections/canvases/pages whose
-  /// `deletedAt` is older than [maxAge], and drops old erase/delete-object
-  /// tombstone *entries* from otherwise-live pages (the content they mark is
-  /// long gone either way; only the tiny bookkeeping record is dropped).
+  /// Purges tombstoned notebooks/sections/canvases whose `deletedAt` is older
+  /// than [maxAge] — through the same terminal-marker purge as the bin's
+  /// "delete permanently" (content wiped locally *and* Drive-side, tiny
+  /// marker kept forever) — deletes expired tombstoned pages, and drops old
+  /// erase/delete-object tombstone *entries* from otherwise-live pages.
   ///
-  /// Local-disk only — does not delete the Drive-side copy (Drive's folder
-  /// API isn't relPath-indexed the way files are, so a safe remote purge is a
-  /// separate concern; see KNOWN_ISSUES). Purging only locally is harmless:
-  /// at worst a later full resync re-downloads a tombstone file that was
-  /// purged early, which wastes a little disk, not correctness.
+  /// Already-purged markers are left untouched (they're what keeps a purge
+  /// durable against stale devices), but their purged-path prefixes are
+  /// re-recorded so the sync filters' local cache self-heals each launch.
   Future<void> runGarbageCollection({Duration maxAge = _kGcMaxAge}) async {
     final cutoff = DateTime.now().subtract(maxAge);
     final data = await _readIndex();
-    var indexChanged = false;
-    final purgeNotebookIds = <String>[];
 
-    for (final entry in data.entries) {
+    for (final entry in data.entries.toList()) {
       final json = entry.value as Map<String, dynamic>;
+      if (json['purgedAt'] != null) {
+        // Marker stays; make sure local content is gone + cache knows.
+        final dir = Directory('${appDir.path}/notebooks/${entry.key}');
+        if (await dir.exists()) await dir.delete(recursive: true);
+        await _addPurgedPath(entry.key);
+        continue;
+      }
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        purgeNotebookIds.add(entry.key);
+        await purgeNotebook(entry.key);
         continue;
       }
       await _gcSectionsUnder(entry.key, cutoff);
     }
-    for (final id in purgeNotebookIds) {
-      data.remove(id);
-      indexChanged = true;
-      final dir = Directory('${appDir.path}/notebooks/$id');
-      if (await dir.exists()) await dir.delete(recursive: true);
-    }
-    if (indexChanged) await _writeAtomic(notebooksFile, jsonEncode(data));
   }
 
   bool _tombstoneExpired(dynamic deletedAtField, DateTime cutoff) {
@@ -1503,8 +1653,14 @@ class NotebookService {
       } catch (_) {
         continue;
       }
+      if (json['purgedAt'] != null) {
+        final cvDir = Directory('${entity.path}/canvases');
+        if (await cvDir.exists()) await cvDir.delete(recursive: true);
+        await _addPurgedPath('$notebookId/$sectionId');
+        continue; // marker stays
+      }
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        await entity.delete(recursive: true);
+        await purgeSection(notebookId, sectionId);
         continue;
       }
       await _gcCanvasesUnder(notebookId, sectionId, cutoff);
@@ -1522,6 +1678,7 @@ class NotebookService {
     if (!await dir.exists()) return;
     await for (final entity in dir.list(followLinks: false)) {
       if (entity is! Directory) continue;
+      final canvasId = _basename(entity.path);
       final file = File('${entity.path}/canvas.json');
       if (!await file.exists()) continue;
       Map<String, dynamic> json;
@@ -1530,8 +1687,16 @@ class NotebookService {
       } catch (_) {
         continue;
       }
+      if (json['purgedAt'] != null) {
+        for (final sub in ['pages', 'assets']) {
+          final d = Directory('${entity.path}/$sub');
+          if (await d.exists()) await d.delete(recursive: true);
+        }
+        await _addPurgedPath('$notebookId/$sectionId/$canvasId');
+        continue; // marker stays
+      }
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        await entity.delete(recursive: true);
+        await purgeCanvas(notebookId, sectionId, canvasId);
         continue;
       }
       await _gcPagesUnder(entity.path, cutoff);

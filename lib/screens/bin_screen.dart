@@ -44,14 +44,14 @@ class _BinScreenState extends State<BinScreen> {
     }
   }
 
-  Future<void> _purge(BinItem item) async {
+  Future<bool> _confirmPurge(String what) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete forever?'),
         content: Text(
-          '"${item.name}" will be permanently deleted from this device. '
-          'This cannot be undone.',
+          '$what will be permanently deleted from all devices and '
+          'Google Drive. This cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -68,8 +68,22 @@ class _BinScreenState extends State<BinScreen> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    return confirmed == true;
+  }
+
+  Future<void> _purge(BinItem item) async {
+    if (!await _confirmPurge('"${item.name}"')) return;
     await _service.purgeBinItem(item);
+    await _load();
+  }
+
+  Future<void> _emptyBin() async {
+    final items = _items;
+    if (items == null || items.isEmpty) return;
+    if (!await _confirmPurge('All ${items.length} item(s)')) return;
+    for (final item in items) {
+      await _service.purgeBinItem(item);
+    }
     await _load();
   }
 
@@ -78,7 +92,17 @@ class _BinScreenState extends State<BinScreen> {
     final palette = Theme.of(context).extension<AppPalette>()!;
     final items = _items;
     return Scaffold(
-      appBar: AppBar(title: const Text('Recycle bin')),
+      appBar: AppBar(
+        title: const Text('Recycle bin'),
+        actions: [
+          if (items != null && items.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.delete_sweep_outlined),
+              tooltip: 'Empty bin',
+              onPressed: _emptyBin,
+            ),
+        ],
+      ),
       body: items == null
           ? const Center(child: CircularProgressIndicator())
           : items.isEmpty

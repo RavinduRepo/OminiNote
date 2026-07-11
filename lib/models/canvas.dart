@@ -95,6 +95,10 @@ class Canvas {
   String deviceId;
   DateTime? deletedAt;
 
+  /// Terminal purge marker (see [Notebook.purgedAt]): content permanently
+  /// wiped everywhere, only this doc survives. Grow-only in merges.
+  DateTime? purgedAt;
+
   final String notebookId;
   final String sectionId;
   String name;
@@ -114,6 +118,7 @@ class Canvas {
     DateTime? updatedAt,
     this.deviceId = 'unknown',
     this.deletedAt,
+    this.purgedAt,
     required this.notebookId,
     required this.sectionId,
     required this.name,
@@ -145,6 +150,7 @@ class Canvas {
     'updatedAt': updatedAt.millisecondsSinceEpoch,
     'deviceId': deviceId,
     'deletedAt': deletedAt?.millisecondsSinceEpoch,
+    if (purgedAt != null) 'purgedAt': purgedAt!.millisecondsSinceEpoch,
     'notebookId': notebookId,
     'sectionId': sectionId,
     'name': name,
@@ -168,6 +174,9 @@ class Canvas {
     deviceId: json['deviceId'] ?? 'unknown',
     deletedAt: json['deletedAt'] != null
         ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+        : null,
+    purgedAt: json['purgedAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(json['purgedAt'])
         : null,
     notebookId: json['notebookId'] ?? '',
     sectionId: json['sectionId'] ?? '',

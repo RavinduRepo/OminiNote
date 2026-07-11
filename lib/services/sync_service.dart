@@ -363,11 +363,16 @@ class SyncService {
 
     try {
       final localOnly = NotebookService().localOnlyNotebookIds();
+      final purged = await NotebookService().purgedPaths();
       final defaultId = _defaultId;
       final connected = _connectedAccountIds().toSet();
       // Snapshot so concurrent edits during the drain aren't lost.
       final pending = List<String>.from(_dirty);
       for (final rel in pending) {
+        if (NotebookService.isPurgedContentPath(rel, purged)) {
+          _dirty.remove(rel); // content of a purged item — never upload
+          continue;
+        }
         if (rel == 'notebooks.json') {
           // Upload each account's own (filtered) index to its own Drive.
           for (final id in connected) {
@@ -404,6 +409,8 @@ class SyncService {
         _dirty.remove(rel);
         await batchedSave();
       }
+      // After the files (so purge markers upload before their folders go).
+      await _drainRemotePurges(connected, defaultId);
       _finishOk();
     } on SocketException {
       status.value = SyncStatus.offline;
@@ -586,6 +593,15 @@ class SyncService {
       return false;
     }
 
+    // Content of a purged item (e.g. re-uploaded by a device that was offline
+    // when the purge happened): record the head so it isn't re-offered, but
+    // never materialize it locally.
+    if (NotebookService.isPurgedContentPath(
+        rel, await NotebookService().purgedPaths())) {
+      drive.recordRemote(rel, rf.id, rf.headRevisionId);
+      return false;
+    }
+
     if (_isAsset(rel)) {
       // Content-addressed & immutable: fetch only if we don't have it.
       if (await file.exists()) {
@@ -626,6 +642,7 @@ class SyncService {
     if (result.localContributed) {
       _markDirty(rel);
     }
+    await _applyPurgeMarkers(rel, result.content);
     _notifyOpenCanvas(rel, result.content);
     return result.changedLocal;
   }
@@ -688,6 +705,9 @@ class SyncService {
         final map = jsonDecode(await _journalFile!.readAsString())
             as Map<String, dynamic>;
         _dirty.addAll(List<String>.from(map['dirty'] ?? const []));
+        for (final e in List.from(map['purges'] ?? const [])) {
+          _pendingPurges.add(Map<String, String>.from(e as Map));
+        }
       }
     } catch (_) {}
   }
@@ -696,9 +716,101 @@ class SyncService {
     try {
       _journalFile ??=
           File('${NotebookService().appDir.path}/sync_journal.json');
-      await _journalFile!
-          .writeAsString(jsonEncode({'dirty': _dirty.toList()}), flush: true);
+      await _journalFile!.writeAsString(
+          jsonEncode({
+            'dirty': _dirty.toList(),
+            if (_pendingPurges.isNotEmpty) 'purges': _pendingPurges,
+          }),
+          flush: true);
     } catch (_) {}
+  }
+
+  // ── Remote purge (Drive-side folder deletion for purged items) ────────────
+
+  /// Drive folder deletions still owed, `{nb: notebookId, path: relFolder}`.
+  /// Persisted in the journal (survives kill/offline) and retried each push
+  /// drain until they succeed; deletion is idempotent (404 = someone else's
+  /// device already did it), so every device that sees a purge marker may
+  /// safely queue the same folder.
+  final List<Map<String, String>> _pendingPurges = [];
+
+  /// Called by [NotebookService] when an item is purged — locally by the user
+  /// or by a pulled marker. Prunes journaled uploads under the purged subtree
+  /// (stale edits must never repopulate Drive), queues the remote folder
+  /// deletions, and drops stale Drive-index entries.
+  void onItemPurged(String notebookId, List<String> folderRelPaths) {
+    for (final folder in folderRelPaths) {
+      final p = '$folder/';
+      _dirty.removeWhere((rel) => rel == folder || rel.startsWith(p));
+      if (!_pendingPurges.any((e) => e['path'] == folder)) {
+        _pendingPurges.add({'nb': notebookId, 'path': folder});
+      }
+      for (final id in _connectedAccountIds()) {
+        DriveManager.forAccount(id).forgetUnder(folder);
+      }
+    }
+    unawaited(_saveJournal());
+    if (AuthService().isSignedIn) _armPush();
+  }
+
+  Future<void> _drainRemotePurges(
+      Set<String> connected, String? defaultId) async {
+    if (_pendingPurges.isEmpty) return;
+    for (final entry in List.of(_pendingPurges)) {
+      final target = await NotebookService()
+          .syncTargetOfNotebook(entry['nb']!, defaultAccountId: defaultId);
+      if (target == null || !connected.contains(target)) {
+        continue; // that account isn't signed in here — retry later
+      }
+      try {
+        await DriveManager.forAccount(target).deleteFolder(entry['path']!);
+        _pendingPurges.remove(entry);
+      } on SocketException {
+        rethrow; // offline — stays queued
+      } catch (e) {
+        debugPrint('Remote purge failed (${entry['path']}): $e');
+      }
+    }
+    await _saveJournal();
+  }
+
+  /// If a pulled/merged doc carries `purgedAt`, enact the purge on this
+  /// device (wipe the content subtree, update the sync filters) — this is how
+  /// a purge made on another device lands here. Idempotent via the
+  /// purged-paths cache.
+  Future<void> _applyPurgeMarkers(String rel, String mergedContent) async {
+    try {
+      final known = await NotebookService().purgedPaths();
+      if (rel == 'notebooks.json') {
+        final map = jsonDecode(mergedContent) as Map<String, dynamic>;
+        for (final e in map.entries) {
+          final j = e.value as Map<String, dynamic>;
+          if (j['purgedAt'] != null && !known.contains(e.key)) {
+            await NotebookService().applyNotebookPurgeLocally(e.key);
+          }
+        }
+        return;
+      }
+      final m = RegExp(
+              r'^notebooks/([^/]+)/sections/([^/]+)/(section\.json|canvases/([^/]+)/canvas\.json)$')
+          .firstMatch(rel);
+      if (m == null) return;
+      final j = jsonDecode(mergedContent) as Map<String, dynamic>;
+      if (j['purgedAt'] == null) return;
+      final nb = m.group(1)!, sec = m.group(2)!;
+      if (m.group(3) == 'section.json') {
+        if (!known.contains('$nb/$sec')) {
+          await NotebookService().applySectionPurgeLocally(nb, sec);
+        }
+      } else {
+        final cv = m.group(4)!;
+        if (!known.contains('$nb/$sec/$cv')) {
+          await NotebookService().applyCanvasPurgeLocally(nb, sec, cv);
+        }
+      }
+    } catch (e) {
+      debugPrint('Purge marker application error: $e');
+    }
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────

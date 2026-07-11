@@ -294,6 +294,68 @@ class DriveService {
     _forget(drivePath);
   }
 
+  /// Resolves a *folder* path (relative to root) to its Drive id without
+  /// creating anything along the way — unlike [_ensureParentFolder], a missing
+  /// segment returns null instead of materializing the chain.
+  Future<String?> _findFolderId(String folderPath) async {
+    final parts = folderPath.replaceAll('\\', '/').split('/');
+    String parentId = await rootFolderId;
+    var pathSoFar = '';
+    for (final part in parts) {
+      pathSoFar = pathSoFar.isEmpty ? part : '$pathSoFar/$part';
+      final cached = _folderIds[pathSoFar];
+      if (cached != null) {
+        parentId = cached;
+        continue;
+      }
+      final result = await _drive.files.list(
+        q: "mimeType='$_kAppMimeFolder' and name='$part' "
+            "and '$parentId' in parents and trashed=false",
+        spaces: 'drive',
+        $fields: 'files(id)',
+      );
+      final ids = (result.files ?? [])
+          .map((f) => f.id)
+          .whereType<String>()
+          .toList()
+        ..sort();
+      if (ids.isEmpty) return null;
+      parentId = ids.first;
+      _cacheFolder(pathSoFar, parentId);
+    }
+    return parentId;
+  }
+
+  /// Permanently deletes a folder and every descendant on Drive (one API
+  /// call — `files.delete` on a folder id is recursive and bypasses trash),
+  /// then drops all index/cache entries under it. Idempotent: a folder
+  /// already gone (deleted by another device) is a no-op, so every device
+  /// can safely enforce a purge.
+  Future<void> deleteFolder(String folderPath) async {
+    final id = await _findFolderId(folderPath);
+    if (id != null) {
+      try {
+        await _drive.files.delete(id);
+      } on gd.DetailedApiRequestError catch (e) {
+        if (e.status != 404) rethrow;
+      }
+    }
+    forgetUnder(folderPath);
+  }
+
+  /// Drops file-index and folder-cache entries at or under [prefix].
+  void forgetUnder(String prefix) {
+    final p = '$prefix/';
+    _index.removeWhere((k, _) => k == prefix || k.startsWith(p));
+    final droppedFolders = _folderIds.keys
+        .where((k) => k == prefix || k.startsWith(p))
+        .toList();
+    for (final k in droppedFolders) {
+      _folderPathById.remove(_folderIds.remove(k));
+    }
+    _saveIndexSoon();
+  }
+
   // ── Full-tree listing (bootstrap / resync / duplicate healing) ─────────────
 
   /// Enumerates every file under any "omininote" root, keyed by relative path.

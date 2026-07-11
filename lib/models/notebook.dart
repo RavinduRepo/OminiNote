@@ -10,6 +10,12 @@ class Notebook {
   String deviceId;
   DateTime? deletedAt;
 
+  /// Terminal purge marker: content was permanently wiped from Drive and every
+  /// device; only this envelope survives (grow-only in merges — once set
+  /// anywhere it stays set everywhere, and a racing restore loses). Implies
+  /// deleted.
+  DateTime? purgedAt;
+
   String name;
   final DateTime createdAt;
   int? color; // ARGB; null → deterministic identity color
@@ -30,6 +36,7 @@ class Notebook {
     DateTime? updatedAt,
     required this.deviceId,
     this.deletedAt,
+    this.purgedAt,
     required this.name,
     required this.createdAt,
     this.color,
@@ -56,6 +63,7 @@ class Notebook {
         'updatedAt': updatedAt.millisecondsSinceEpoch,
         'deviceId': deviceId,
         'deletedAt': deletedAt?.millisecondsSinceEpoch,
+        if (purgedAt != null) 'purgedAt': purgedAt!.millisecondsSinceEpoch,
         'name': name,
         'createdAt': createdAt.toIso8601String(),
         'color': color,
@@ -75,6 +83,9 @@ class Notebook {
         deviceId: json['deviceId'] ?? 'unknown',
         deletedAt: json['deletedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+            : null,
+        purgedAt: json['purgedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['purgedAt'])
             : null,
         name: json['name'],
         createdAt: DateTime.parse(json['createdAt']),

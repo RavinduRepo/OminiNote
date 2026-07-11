@@ -274,4 +274,97 @@ void main() {
       expect(r.changedLocal, isFalse);
     });
   });
+
+  group('purge — terminal, grow-only purgedAt', () {
+    Map<String, dynamic> nb(String id,
+            {int rev = 1, int? deletedAt, int? purgedAt}) =>
+        {
+          'schemaVersion': 1,
+          'id': id,
+          'rev': rev,
+          'updatedAt': 1000 + rev, // higher rev also looks later
+          'deviceId': 'dev',
+          'deletedAt': deletedAt,
+          'purgedAt': ?purgedAt,
+          'name': 'N',
+          'createdAt': '2026-01-01T00:00:00.000',
+          'nodes': [],
+        };
+
+    test('a purged notebook beats a higher-rev RESTORE — purge is terminal, '
+        'not LWW', () {
+      // Device A purged n1; device B (not yet synced) restored it with a
+      // bumped rev, which would win plain LWW. The purge must still stick:
+      // its content is already gone from Drive, so resurrection would leave
+      // an empty shell.
+      final purged = jsonEncode({
+        'n1': nb('n1', rev: 5, deletedAt: 2000, purgedAt: 2000),
+      });
+      final restored = jsonEncode({'n1': nb('n1', rev: 9)});
+
+      for (final (local, remote) in [(purged, restored), (restored, purged)]) {
+        final r = MergeEngine.reconcile('notebooks.json', local, remote);
+        final m = (jsonDecode(r.content) as Map)['n1'] as Map;
+        expect(m['purgedAt'], 2000, reason: 'purge survives either side');
+        expect(m['deletedAt'], isNotNull, reason: 'purged implies deleted');
+        expect(r.changedLocal, isTrue);
+        expect(r.localContributed, isTrue,
+            reason: 'the corrected doc must propagate both ways');
+      }
+    });
+
+    test('both sides purged — earliest purgedAt wins (deterministic)', () {
+      final a = jsonEncode({
+        'n1': nb('n1', rev: 6, deletedAt: 1500, purgedAt: 3000),
+      });
+      final b = jsonEncode({
+        'n1': nb('n1', rev: 4, deletedAt: 1500, purgedAt: 2000),
+      });
+      final ab = MergeEngine.reconcile('notebooks.json', a, b);
+      final ba = MergeEngine.reconcile('notebooks.json', b, a);
+      expect((jsonDecode(ab.content) as Map)['n1']['purgedAt'], 2000);
+      expect((jsonDecode(ba.content) as Map)['n1']['purgedAt'], 2000,
+          reason: 'commutative');
+    });
+
+    test('a stale live copy cannot resurrect a purged notebook', () {
+      final local = jsonEncode({
+        'n1': nb('n1', rev: 5, deletedAt: 2000, purgedAt: 2000),
+      });
+      final remote = jsonEncode({'n1': nb('n1', rev: 3)});
+      final r = MergeEngine.reconcile('notebooks.json', local, remote);
+      final m = (jsonDecode(r.content) as Map)['n1'] as Map;
+      expect(m['purgedAt'], 2000);
+      expect(m['deletedAt'], isNotNull);
+    });
+
+    test('single-doc (section.json): purge beats a higher-rev restore', () {
+      Map<String, dynamic> sec({int rev = 1, int? deletedAt, int? purgedAt}) =>
+          {
+            'schemaVersion': 1,
+            'id': 's1',
+            'rev': rev,
+            'updatedAt': 1000 + rev,
+            'deviceId': 'dev',
+            'deletedAt': deletedAt,
+            'purgedAt': ?purgedAt,
+            'notebookId': 'n1',
+            'name': 'S',
+            'createdAt': '2026-01-01T00:00:00.000',
+            'nodes': [],
+          };
+      final purged = jsonEncode(sec(rev: 5, deletedAt: 2000, purgedAt: 2000));
+      final restored = jsonEncode(sec(rev: 9));
+      const rel = 'notebooks/n1/sections/s1/section.json';
+
+      for (final (local, remote) in [(purged, restored), (restored, purged)]) {
+        final r = MergeEngine.reconcile(rel, local, remote);
+        final m = jsonDecode(r.content) as Map;
+        expect(m['purgedAt'], 2000);
+        expect(m['deletedAt'], isNotNull);
+        expect(r.changedLocal, isTrue);
+        expect(r.localContributed, isTrue);
+      }
+    });
+  });
 }

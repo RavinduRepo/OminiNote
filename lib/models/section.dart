@@ -13,6 +13,10 @@ class Section {
   String deviceId;
   DateTime? deletedAt;
 
+  /// Terminal purge marker (see [Notebook.purgedAt]): content permanently
+  /// wiped everywhere, only this doc survives. Grow-only in merges.
+  DateTime? purgedAt;
+
   final String notebookId;
   String name;
   final DateTime createdAt;
@@ -26,6 +30,7 @@ class Section {
     DateTime? updatedAt,
     required this.deviceId,
     this.deletedAt,
+    this.purgedAt,
     required this.notebookId,
     required this.name,
     required this.createdAt,
@@ -52,6 +57,7 @@ class Section {
         'updatedAt': updatedAt.millisecondsSinceEpoch,
         'deviceId': deviceId,
         'deletedAt': deletedAt?.millisecondsSinceEpoch,
+        if (purgedAt != null) 'purgedAt': purgedAt!.millisecondsSinceEpoch,
         'notebookId': notebookId,
         'name': name,
         'createdAt': createdAt.toIso8601String(),
@@ -69,6 +75,9 @@ class Section {
         deviceId: json['deviceId'] ?? 'unknown',
         deletedAt: json['deletedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+            : null,
+        purgedAt: json['purgedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['purgedAt'])
             : null,
         notebookId: json['notebookId'] ?? '',
         name: json['name'] ?? 'Untitled',
