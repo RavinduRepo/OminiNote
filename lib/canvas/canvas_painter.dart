@@ -23,6 +23,11 @@ class CanvasPainter extends CustomPainter {
     required this.canvasTextColor,
   }) : super(repaint: controller);
 
+  /// Set false during a picture recording when an image raster wasn't decoded
+  /// yet — keeps that page's cache entry provisional so it re-records once
+  /// the raster lands (RenderCache repaints via the controller when it does).
+  bool _recordComplete = true;
+
   @override
   void paint(Canvas canvas, Size size) {
     // Generous cull margin (canvas units) so edge pages aren't dropped.
@@ -94,15 +99,31 @@ class CanvasPainter extends CustomPainter {
         ..color = pageBorderColor,
     );
 
-    // Elements, clipped to the page.
+    // Elements, clipped to the page. Committed elements replay from a cached
+    // per-page picture (page-local coords, zoom-independent) — re-recorded
+    // only when the controller invalidates the page, not every frame.
     canvas.save();
     canvas.clipRect(rect);
     canvas.translate(rect.left, rect.top);
 
-    for (final el in zOrderedElements(page)) {
-      if (el.id == controller.editingElementId) continue; // text overlay open
-      _paintElement(canvas, el);
-    }
+    final editingId = controller.editingElementId;
+    final skipped = editingId != null &&
+            page.objects.any((o) => o.id == editingId)
+        ? editingId // text overlay open on this page
+        : null;
+    controller.pictureCache.paint(
+      canvas,
+      page.id,
+      skippedElementId: skipped,
+      record: (c) {
+        _recordComplete = true;
+        for (final el in zOrderedElements(page)) {
+          if (el.id == skipped) continue;
+          _paintElement(c, el);
+        }
+        return _recordComplete;
+      },
+    );
 
     // In-progress stroke on this page.
     if (controller.activeStrokePageId == page.id &&
@@ -349,6 +370,7 @@ class CanvasPainter extends CustomPainter {
         Paint()..filterQuality = FilterQuality.medium,
       );
     } else {
+      _recordComplete = false; // decode pending — placeholder isn't cacheable
       canvas.drawRect(
         el.rect,
         Paint()..color = pageBorderColor.withValues(alpha: 0.3),
