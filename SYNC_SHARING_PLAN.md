@@ -3,7 +3,7 @@
 Three related features share one foundation: **each notebook knowing its sync
 target**. Tracked here; update as phases land.
 
-## Status (updated 2026-07-10)
+## Status (updated 2026-07-11)
 
 - ✅ **Phase 0 — per-device local-only** — done & shipped.
 - ✅ **Phase 1 — sign-out safety** — done & shipped (closes the ★ must-have).
@@ -18,7 +18,16 @@ target**. Tracked here; update as phases land.
   Key auth fix: **`forceCodeForRefreshToken: true`** so multiple devices can use
   the same account (no `disconnect()`/revoke). Perf fix: batched sync-journal
   saves.
-- ⬜ **Phase 3 — link sharing** — not started (next).
+- ✅ **Phase 3 — link sharing** — done & shipped, but via a different mechanism
+  than originally sketched below (bundle transfer, not HTTPS link + Drive ACLs —
+  see "Verified constraint"). Stage 1: **send a copy** via a `.omninote` bundle.
+  Stage 2: tap-to-open on Android. Stage 3: an `omininote://` share link (host
+  bundle → download → import). Desktop open-with follow-on: Linux wired +
+  verified; Windows (Inno Setup installer) and macOS (`Info.plist` +
+  `AppDelegate.swift`) implemented but **unverified** — no local Windows/macOS
+  toolchain, needs a CI-built artifact or a real machine to confirm registration
+  + launch-arg routing. See `KNOWN_ISSUES.md` "Notebook sharing" for shipped
+  limitations.
 
 **Open-canvas refresh:** fixed — a pushed `CanvasScreen` listens to
 `SyncService.dataVersion` and pops (with a message) when its notebook is
@@ -27,10 +36,10 @@ tombstoned/moved away; the desktop shell clears its selection in `_loadAll`
 **Remaining caveats (not blocking)** in `KNOWN_ISSUES.md` "Multi-account sync":
 the move's inherent lagging-unsynced-device edge + orphaned old-Drive content.
 
-**Resume for Phase 3 (link sharing):** foundation is done — each notebook knows
-its account (`syncTarget`) and Drive is account-scoped. Ship "send a copy" first
-(no scope risk); live-collab needs the Google Picker / a `drive` scope upgrade
-(see the constraint section below).
+**Phase 3 shipped as "send a copy" only** (no scope risk) — live-collab (v2:
+open + edit a notebook someone else owns, via the Google Picker / a `drive`
+scope upgrade) was never started and isn't currently planned; see the
+constraint section below for why it's the harder path.
 
 ```
           Notebook.syncTarget   ← foundation (small model change)
@@ -97,12 +106,15 @@ separate, *synced* property — added then.
 - **Phase 2 — Multi-account (simultaneous).** `AuthService` holds multiple
   accounts; `DriveService`/`SyncService` become per-account (own root + index);
   per-notebook "which account" picker.
-- **Phase 3 — Link sharing.** HTTPS link (`.../open?...`) → in-app **Incoming
-  share** screen (item, who shared, permission) → **Add to my notes** (copy) or
-  **Open shared** (live). Shared items live in a **"Shared with me"** area on
-  Home. v1 = copy (no scope risk); v2 = live edit (Picker flow / scope upgrade).
+- **Phase 3 — Link sharing.** *Done, shipped differently than sketched here:*
+  instead of an HTTPS link + in-app "Incoming share"/"Shared with me" screen,
+  shipped as a `.omninote` bundle (send-a-copy) + an `omininote://` share link
+  that hosts and imports that same bundle, plus OS-level open-with (tap a
+  `.omninote` on Android, double-click on desktop) — see `KNOWN_ISSUES.md`
+  "Notebook sharing" for the actual mechanism and its limitations. Live edit
+  (open + edit someone else's notebook) remains unshipped.
 
-## Phase 2 breakdown (start here next session)
+## Phase 2 breakdown (historical — kept for reference)
 
 Goal: be signed into several Google accounts at once; each notebook syncs to its
 chosen account (or local-only). Current code assumes **one** account everywhere

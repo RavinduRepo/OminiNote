@@ -6,8 +6,6 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Cross-platform
 
-- **macOS bundle ID still uses `com.example.omininote`.** The Android package was renamed to `io.github.ravinduRepo.omininote` but the macOS bundle ID in `macos/Runner/Configs/AppInfo.xcconfig` (and the `keychain-access-groups` entitlement) still references the old name. This is harmless for local testing but should be updated for consistency before any Mac App Store submission. Changing the macOS bundle ID also requires regenerating the entitlements and any associated provisioning profile.
-
 - **macOS sandbox entitlements are still missing file access.** `macos/Runner/DebugProfile.entitlements` and `Release.entitlements` enable `com.apple.security.app-sandbox` but grant no file-access entitlement (e.g. `com.apple.security.files.user-selected.read-only`). PDF/image picking and reads may silently fail in macOS release builds without this. (`keychain-access-groups` was added 07/09/26 to fix `flutter_secure_storage` failing with `-34018 "A required entitlement isn't present"` on Google sign-in — file access is the remaining gap.)
 
 ### Canvas v1 limitations (deliberate scope cuts — see CANVAS_SPEC.md §17/§19)
@@ -44,7 +42,7 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 ### Notebook sharing (`.omninote` bundles — Phase 3)
 
 - **Samsung "My Files" won't direct-open a `.omninote` file** (verified on an SM X510). Because `.omninote` is a custom, unregistered extension, Samsung's file manager shows "No app can open this" / a Play-Store search *regardless* of the app's `VIEW` intent-filters — it checks against known types before resolving intents. No manifest change fixes it (`application/octet-stream`, `application/zip`, `application/*`, and a path-pattern filter were all tried live). **Workaround: "Share → Omininote" from My Files** (the `SEND` path works everywhere). Direct-tap ("Open with") *does* work from Telegram, Google Files, and most other apps, which send a matchable MIME type. The app deliberately matches `application/zip` + `application/octet-stream` (not `*/*`) to avoid appearing in "Open with" for images/video/etc.
-- **Desktop open-with (double-click a `.omninote`) not wired yet** — needs native-runner handling (argv on Linux/Windows, an `openFile` event on macOS) + OS registration, deferred to the desktop installer packaging task. In-app **Import notebook…** works on desktop today.
+- **Desktop open-with (double-click a `.omninote` or an `omninote://` link) is wired but Windows/macOS are unverified.** Linux (`packaging/linux/install.sh` registers the MIME type + URI scheme; argv routing) is implemented and verified. Windows (`packaging/windows/omininote.iss` Inno Setup installer registers the file type + URL scheme, launches with `%1`) and macOS (`Info.plist` document type + URL scheme, `AppDelegate.swift` open-file/open-url handling) are implemented but could not be tested locally — no Windows/macOS toolchain here — so it needs a real machine or a CI-built artifact to confirm registration + launch-arg routing before this is fully closed. In-app **Import notebook…** works on desktop regardless.
 
 - **`omninote://` share links aren't tappable in messaging/email apps.** Custom URI schemes are only *auto-linkified* by browsers for `http(s)://` — WhatsApp/Telegram/Gmail/etc. render `omninote://import?id=…` as plain, non-tappable text; the recipient has to paste it into a browser address bar to invoke it (which then opens the app and imports fine). The mechanism (host public bundle → download → import) works end to end; the shareability is the limitation. A universally tappable link needs an `https://` **App Link / Universal Link** backed by a hosted domain (a `.well-known/assetlinks.json` + redirect) — deliberately out of scope (no backend). Kept as-is by user choice; "Send a copy" (file / share sheet) is the reliable path.
 
@@ -55,17 +53,11 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Distribution / installation
 
-- **Linux release build has no desktop launcher entry.** The GitHub release `.tar.gz` extracts to a plain bundle directory with no `.desktop` file or icon. Users must manually create `~/.local/share/applications/omininote.desktop` pointing at the extracted binary and copy an icon from `assets/branding/`. Consider shipping a small install script in the archive, or packaging as Flatpak/AppImage which handle this automatically.
-
 - **macOS release build is unsigned.** Distributed `.app` bundles trigger Gatekeeper ("Apple could not verify…") because there is no Developer ID certificate. Users must run `xattr -cr OminiNote.app` or use System Settings → Privacy & Security → Open Anyway on first launch. Resolving requires an Apple Developer account ($99/yr) for Developer ID signing. Mac App Store distribution requires a separate Paid distribution certificate.
 
 - **Android: debug and release builds install as separate apps** if the debug build was ever installed before the package rename (old `com.example.omininote` stays alongside new `io.github.ravinduRepo.omininote`). Users upgrading from a pre-rename debug build must manually uninstall the old one.
 
 ### Features — planned
-
-- **[★ MUST HAVE] Sign-out safety + per-notebook sync control.** Currently deleting a notebook while signed out then signing back in propagates the deletion to Drive. Needed: (1) warn on sign-out if any notebooks have unsynced local changes; (2) optionally remove local copies of cloud-synced notebooks on sign-out to prevent stale-delete accidents; (3) per-notebook toggle: Sync / Local-only / choose which account. This also lays the groundwork for multi-account sync.
-
-- **Multi-account sync.** Ability to sync different notebooks to different Google accounts, or have a second account as a collaborator. Depends on per-notebook sync control above.
 
 - **Android multi-instance (multiple OminiNote windows).** The goal is running *two or more copies of OminiNote itself* side by side so you can view/edit more than one note at once (Android supports this on large screens / DeX). Basic split-screen *with another app* already works; true multi-instance needs the activity to opt into multiple tasks (`android:resizeableActivity` + a multi-instance/`documentLaunchMode` setup and a way to launch a second instance from Recents), plus verifying the single-instance in-memory state (open controllers, sync listeners) is safe across two processes/tasks. Deferred.
 
@@ -75,8 +67,6 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 - **Note summarisation.** Feed canvas text content to an LLM API and insert a summary text element. Depends on voice recording (for audio transcription path) or can start with text-only canvases.
 
-- **Link sharing.** Generate a shareable link to a specific canvas or section that opens it directly in the app (deep link). Requires a URI scheme (`omininote://`) registered in each platform's manifest, and a server-side redirect or Drive share as the transport. Related to multi-account feature.
-
 ### Branding
 
 - **`flutter_native_splash` cannot be added to this project right now.** Every version requires either an `xml` range incompatible with `syncfusion_flutter_pdf ^33.2.15`'s `xml ^7.0.1`, or a `meta` version newer than the installed Flutter SDK's bundled `meta 1.17.0` — confirmed via `flutter pub add --dry-run`, a genuine current ecosystem conflict, not a config mistake. Re-check if either package's constraints loosen in a future update.
@@ -84,6 +74,10 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 - **iOS and web app icons are intentionally skipped** in the `flutter_launcher_icons` config (`ios: false`, no `web` block) — consistent with iOS/web not being project priorities.
 
 ## Fixed
+
+- ~~macOS bundle ID still used `com.example.omininote`~~ (07/11/26) — unified the app identifier to `io.github.ravinduRepo.omininote` across every platform (Android already matched), alongside moving the local data store from `getApplicationDocumentsDirectory()` to `getApplicationSupportDirectory()` (the former dumped `notebooks.json`/`settings.json`/`sync_journal.json`/`drive_index_*.json` loose into the user's real `~/Documents` on desktop). No data migration — acceptable pre-release, no real users. See CLAUDE.md's Persistence section for the resolved per-platform paths.
+- ~~[★ MUST HAVE] Sign-out safety, per-notebook sync control, and multi-account sync were open feature requests~~ (07/10/26) — shipped as Phases 0–2 of `SYNC_SHARING_PLAN.md`: per-notebook local-only toggle, a sign-out warning for unsynced changes + safe local-copy removal, and simultaneous multi-account sync (per-account Drive root/index/poll timer, a per-notebook "Sync to…" picker, account-scoped merge). Three-device verified. Remaining caveats are tracked under "Multi-account sync" above, not here.
+- ~~Link sharing was an open feature request~~ (07/10/26) — shipped as Phase 3, but via a different mechanism than originally sketched in `SYNC_SHARING_PLAN.md` (a bundle transfer instead of an HTTPS link + Drive ACLs — see that plan's "Verified constraint" section for why): **Send a copy** via a `.omninote` bundle (Stage 1), tap-to-open on Android (Stage 2), and an `omininote://` share link that hosts + imports that same bundle (Stage 3). Desktop open-with (double-click a bundle/link) followed as a related add-on. See "Notebook sharing" above for the shipped mechanism's limitations, including the Windows/macOS open-with verification gap.
 
 - ~~Pages navigator was a flat list; no visual reorder; canvas pages had no page-number indicator~~ (07/09/26) — **Page organizer.** Canvas overflow → Pages now opens a drag-reorder view (`page_organizer.dart`) that **mirrors the canvas structure exactly**: rows stack vertically, and a horizontal multi-page row shows its pages side by side. Press-and-hold a page and drop it into a gap **between rows** (own row) or **within a row** (join that horizontal row at a column) — free create/split/reorder via `CanvasController.setPageRows` (undoable). **Real content thumbnails** (`PageThumbnail`/`_PageThumbnailPainter`, a self-contained painter reusing the same perfect_freehand outlines, `RenderCache`, and text-span builder — doesn't touch the live `CanvasPainter`). Every existing page action is kept (tap = jump; ⋮ = Duplicate / Copy page / Delete; Undo). Also: each actual canvas page now shows a **soft page-number badge** (bottom-right, PDF-viewer style, constant on-screen size at any zoom, painter-only so it's never exported). Covered by `reorderPages` preserve-rows tests in `canvas_controller_test`.
 
