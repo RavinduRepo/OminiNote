@@ -123,7 +123,9 @@ class SettingsService {
   }
 
   Future<void> init() async {
-    final appDir = await getApplicationDocumentsDirectory();
+    // Device-local settings live alongside the data store in the app-support dir
+    // (see NotebookService.init for the per-OS locations), never in Documents.
+    final appDir = await getApplicationSupportDirectory();
     _settingsFile = File('${appDir.path}/settings.json');
 
     Map<String, dynamic> data = {};

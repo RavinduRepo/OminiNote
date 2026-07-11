@@ -12,7 +12,7 @@
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)com.example.omininote</string>
+		<string>$(AppIdentifierPrefix)io.github.ravinduRepo.omininote</string>
 	</array>
 </dict>
 </plist>

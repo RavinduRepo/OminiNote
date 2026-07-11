@@ -526,7 +526,7 @@ class DriveService {
 
   Future<void> _loadIndex() async {
     try {
-      final dir = await getApplicationDocumentsDirectory();
+      final dir = await getApplicationSupportDirectory();
       _indexFile = File('${dir.path}/drive_index_$accountId.json');
       if (!await _indexFile!.exists()) {
         // One-time migration: the pre-multi-account single `drive_index.json`
@@ -588,7 +588,7 @@ class DriveService {
   Future<void> _saveIndex() async {
     try {
       _indexFile ??= File(
-          '${(await getApplicationDocumentsDirectory()).path}/drive_index_$accountId.json');
+          '${(await getApplicationSupportDirectory()).path}/drive_index_$accountId.json');
       final map = _index.map(
         (k, v) => MapEntry(k, {'id': v.id, 'head': v.head}),
       );

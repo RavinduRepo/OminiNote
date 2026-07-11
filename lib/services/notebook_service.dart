@@ -37,7 +37,14 @@ class NotebookService {
   static const int _storageVersion = 2;
 
   Future<void> init() async {
-    appDir = await getApplicationDocumentsDirectory();
+    // App-managed data store (JSON structure files + content-addressed assets).
+    // Uses the OS application-support dir — NOT Documents — so desktop
+    // (Windows/Linux) doesn't clutter the user's Documents folder. Resolves to:
+    //   Windows: %APPDATA%\Roaming\io.github.ravinduRepo\omininote
+    //   macOS:   ~/Library/Containers/<bundle>/Data/Library/Application Support/<bundle>
+    //   Linux:   ~/.local/share/io.github.ravinduRepo.omininote
+    //   Android: /data/user/0/io.github.ravinduRepo.omininote/files (private internal)
+    appDir = await getApplicationSupportDirectory();
     notebooksFile = File('${appDir.path}/notebooks.json');
     await _freshStartIfOldFormat();
     if (!await notebooksFile.exists()) {

@@ -8,7 +8,7 @@
 PRODUCT_NAME = omininote
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.example.omininote
+PRODUCT_BUNDLE_IDENTIFIER = io.github.ravinduRepo.omininote
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 io.github.ravinduRepo. All rights reserved.
