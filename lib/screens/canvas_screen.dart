@@ -887,7 +887,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
     c.notifyRepaint(); // refresh toolbar highlight
   }
 
-  /// Grows/wraps the editing box to fit the current (rich) content.
+  /// Grows/wraps the editing box to fit the current (rich) content — and when
+  /// it outgrows the page bottom, flows the overflow onto the next page.
   void _remeasureEditing() {
     final session = _textEdit;
     if (session == null) return;
@@ -899,6 +900,74 @@ class _CanvasScreenState extends State<CanvasScreen> {
     setState(() {
       el.rect = autoTextRect(el, maxWidth);
     });
+    if (el.rect.bottom > page.height - 8 && !_handlingOverflow) {
+      // Never mutate the controller from inside its own notification.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _handleTypingOverflow(),
+      );
+    }
+  }
+
+  bool _handlingOverflow = false;
+
+  /// Live-typing page flow (the paste-splitter's typing counterpart): when the
+  /// editing box crosses the page bottom, the lines that no longer fit move to
+  /// a linked continuation box on the next page (reused if empty, freshly
+  /// inserted otherwise — `insertTypingContinuation`). If the caret rode the
+  /// overflow (typing at the end — the common case), the editing session
+  /// commits and hops to the continuation, word-processor style; editing the
+  /// middle keeps the caret put and only the tail flows. Overflow only flows
+  /// forward — no Word-style back-rebalancing (deliberate v1 scope).
+  void _handleTypingOverflow() {
+    final session = _textEdit;
+    final c = _controller;
+    if (session == null || c == null || _handlingOverflow) return;
+    final page = c.pages[session.pageId];
+    if (page == null) return;
+    final el = session.element;
+    if (el.rect.bottom <= page.height - 8) return; // resolved meanwhile
+
+    _handlingOverflow = true;
+    try {
+      final rc = session.controller;
+      final runs = runsFromController(rc);
+      final maxW = page.width - el.rect.left - 6;
+      final budget = page.height - el.rect.top - 8;
+      final chunks = splitRunsByHeight(runs, maxW, budget);
+      if (chunks.length < 2) return; // one unsplittable line — leave as-is
+
+      final fit = chunks.first;
+      final overflow = [for (final ch in chunks.skip(1)) ...ch];
+      final fitLen = fit.fold(0, (n, r) => n + r.text.length);
+      final caret = rc.selection.baseOffset;
+
+      final target = c.insertTypingContinuation(session.pageId, el, overflow);
+      if (target == null) return;
+      final (targetPageId, targetEl) = target;
+
+      // Truncate the editing box to the fitting part. The value setter
+      // reconciles per-char styles by suffix diff, so attributes follow.
+      final fitText = fit.map((r) => r.text).join();
+      rc.value = TextEditingValue(
+        text: fitText,
+        selection: TextSelection.collapsed(
+          offset: math.min(math.max(caret, 0), fitText.length),
+        ),
+      );
+
+      if (caret > fitLen) {
+        // The caret rode the overflow: hop the session to the continuation.
+        final rel =
+            math.min(math.max(caret - fitLen, 0), targetEl.text.length);
+        _commitTextEdit();
+        c.jumpToPage(targetPageId);
+        _startTextEdit(targetPageId, targetEl, isNew: false);
+        _textEdit?.controller.selection =
+            TextSelection.collapsed(offset: rel);
+      }
+    } finally {
+      _handlingOverflow = false;
+    }
   }
 
   void _commitTextEdit() {

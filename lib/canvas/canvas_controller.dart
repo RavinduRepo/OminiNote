@@ -1910,6 +1910,161 @@ class CanvasController extends ChangeNotifier {
     return parts.length;
   }
 
+  /// Places typing-overflow text on the page after [pageId] — the live-typing
+  /// counterpart of the paste-time splitter (spec: overflow flows forward,
+  /// never rebalances back). Marks [source] as linked (assigning a linkId if
+  /// needed) and, in order of preference:
+  /// 1. **prepends** to an existing linked continuation on the next page
+  ///    (repeat overflow while editing the same box),
+  /// 2. drops a new linked box onto the next page **if it's empty** (blank,
+  ///    no ink/objects, not PDF-backed),
+  /// 3. else **inserts a fresh page** right after the current one (in-row for
+  ///    horizontal rows, else a new row below) and puts the box there.
+  /// One undoable op; returns `(pageId, element)` of the continuation, or
+  /// null when the page's row can't be found.
+  (String, TextElement)? insertTypingContinuation(
+    String pageId,
+    TextElement source,
+    List<TextRun> overflowRuns,
+  ) {
+    final page = pages[pageId];
+    if (page == null || overflowRuns.isEmpty) return null;
+    final rowIndex = canvas.rows.indexWhere((r) => r.pageIds.contains(pageId));
+    if (rowIndex < 0) return null;
+    final row = canvas.rows[rowIndex];
+    final horizontal = row.pageIds.length > 1;
+
+    source.linkId ??= newModelId('lnk');
+    final linkId = source.linkId!;
+
+    String? nextId;
+    if (horizontal) {
+      final at = row.pageIds.indexOf(pageId);
+      if (at + 1 < row.pageIds.length) nextId = row.pageIds[at + 1];
+    } else if (rowIndex + 1 < canvas.rows.length) {
+      final ids = canvas.rows[rowIndex + 1].pageIds;
+      if (ids.isNotEmpty) nextId = ids.first;
+    }
+    final next = nextId == null ? null : pages[nextId];
+
+    // 1. A linked continuation already lives on the next page: prepend.
+    if (next != null && nextId != null) {
+      final nid = nextId;
+      final existing = next.objects
+          .whereType<TextElement>()
+          .cast<TextElement?>()
+          .firstWhere((e) => e!.linkId == linkId, orElse: () => null);
+      if (existing != null) {
+        final before = existing.deepCopy();
+        existing.runs = [
+          for (final r in overflowRuns) r.clone(),
+          ...existing.runs,
+        ];
+        _remeasureText(existing, nid);
+        _stamp([existing]);
+        final after = existing.deepCopy();
+        var applied = true;
+        _doOp(
+          _CanvasOp(
+            label: 'Continue text',
+            dirtyPageIds: {nid},
+            apply: () {
+              if (applied) {
+                applied = false;
+                return;
+              }
+              _replaceElements(nid, [after]);
+            },
+            revert: () => _replaceElements(nid, [before]),
+          ),
+        );
+        return (nid, existing);
+      }
+    }
+
+    TextElement buildBox(CanvasPage host) {
+      final el = TextElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        rect: Rect.fromLTWH(source.rect.left, 24, 10, 10),
+        runs: [for (final r in overflowRuns) r.clone()],
+        linkId: linkId,
+        fontFamily: textFontFamily,
+        fontSize: textFontSize,
+        color: textColor,
+      );
+      el.rect = autoTextRect(el, host.width - el.rect.left - 6);
+      return el;
+    }
+
+    // 2. Next page exists and is empty: use it, no structural change.
+    if (next != null &&
+        nextId != null &&
+        next.deletedAt == null &&
+        next.source == null &&
+        next.strokes.isEmpty &&
+        next.objects.isEmpty) {
+      final el = buildBox(next);
+      _doOp(_addElementsOp('Continue text', nextId, [el]));
+      return (nextId, el);
+    }
+
+    // 3. Insert a fresh page right after this one.
+    final newPage = CanvasPage(
+      id: newModelId('pg'),
+      deviceId: SettingsService().deviceId,
+      width: page.width,
+      height: page.height,
+      background: canvas.defaultBackground,
+    );
+    final el = buildBox(newPage);
+    final newRow = horizontal
+        ? null
+        : PageRow(id: _service.newId(), pageIds: [newPage.id]);
+    _doOp(
+      _CanvasOp(
+        label: 'Continue text on new page',
+        structural: true,
+        dirtyPageIds: {pageId, newPage.id},
+        apply: () {
+          pages[newPage.id] = newPage;
+          if (horizontal) {
+            if (!row.pageIds.contains(newPage.id)) {
+              row.pageIds.insert(row.pageIds.indexOf(pageId) + 1, newPage.id);
+            }
+          } else if (newRow != null &&
+              !canvas.rows.any((r) => identical(r, newRow))) {
+            canvas.rows.insert(
+              math.min(rowIndex + 1, canvas.rows.length),
+              newRow,
+            );
+          }
+          newPage.deletedObjects.removeWhere((t) => t.strokeId == el.id);
+          if (!newPage.objects.any((e) => e.id == el.id)) {
+            newPage.objects.add(el);
+          }
+        },
+        revert: () {
+          newPage.deletedObjects.add(
+            EraseTombstone(
+              strokeId: el.id,
+              erasedAt: DateTime.now(),
+              deviceId: SettingsService().deviceId,
+            ),
+          );
+          newPage.objects.removeWhere((e) => e.id == el.id);
+          if (horizontal) {
+            row.pageIds.remove(newPage.id);
+          } else if (newRow != null) {
+            canvas.rows.remove(newRow);
+          }
+          pages.remove(newPage.id);
+        },
+      ),
+    );
+    return (newPage.id, el);
+  }
+
   /// True when the lasso selection holds a text box that is part of a split
   /// pasted text (has a [TextElement.linkId]) — enables the linked actions.
   bool get selectionHasLinkedText =>
