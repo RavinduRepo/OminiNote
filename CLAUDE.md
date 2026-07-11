@@ -19,6 +19,8 @@ flutter run -d windows          # run desktop build directly
 flutter build apk / windows / linux / macos
 ```
 
+Sync builds need the gitignored `.dart_defines.json` (OAuth client ids; template in `.dart_defines.example.json`, real values in `SECRETS/`): `flutter run -d <id> --dart-define-from-file=.dart_defines.json`. The `Makefile` wraps this per platform (`make android|linux|windows|macos`); on Windows invoke it as `mingw32-make` from Git Bash.
+
 No custom lint config beyond default `package:flutter_lints/flutter.yaml`.
 
 ## Architecture
