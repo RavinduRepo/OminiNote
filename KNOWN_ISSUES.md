@@ -4,10 +4,6 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ## Open issues
 
-### Cross-platform
-
-- **macOS sandbox entitlements are still missing file access.** `macos/Runner/DebugProfile.entitlements` and `Release.entitlements` enable `com.apple.security.app-sandbox` but grant no file-access entitlement (e.g. `com.apple.security.files.user-selected.read-only`). PDF/image picking and reads may silently fail in macOS release builds without this. (`keychain-access-groups` was added 07/09/26 to fix `flutter_secure_storage` failing with `-34018 "A required entitlement isn't present"` on Google sign-in — file access is the remaining gap.)
-
 ### Canvas v1 limitations (deliberate scope cuts — see CANVAS_SPEC.md §17/§19)
 
 - **Eraser is whole-stroke only**; partial/pixel erase later.
@@ -73,6 +69,7 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ## Fixed
 
+- ~~macOS sandbox entitlements were missing file access~~ (07/11/26) — added `com.apple.security.files.user-selected.read-write` to both `DebugProfile.entitlements` and `Release.entitlements` (read-**write**, not read-only, because PDF export and ".omninote Send a copy" write bytes to a `FilePicker.saveFile`-picked path on desktop). Closes the gap where PDF/image picking could silently fail in sandboxed macOS release builds. Not yet exercised on a real Mac (no macOS toolchain on this machine) — but the entitlement is the standard, documented requirement for `NSOpenPanel`/`NSSavePanel` access under the sandbox.
 - ~~macOS bundle ID still used `com.example.omininote`~~ (07/11/26) — unified the app identifier to `io.github.ravinduRepo.omininote` across every platform (Android already matched), alongside moving the local data store from `getApplicationDocumentsDirectory()` to `getApplicationSupportDirectory()` (the former dumped `notebooks.json`/`settings.json`/`sync_journal.json`/`drive_index_*.json` loose into the user's real `~/Documents` on desktop). No data migration — acceptable pre-release, no real users. See CLAUDE.md's Persistence section for the resolved per-platform paths.
 - ~~[★ MUST HAVE] Sign-out safety, per-notebook sync control, and multi-account sync were open feature requests~~ (07/10/26) — shipped as Phases 0–2 of `SYNC_SHARING_PLAN.md`: per-notebook local-only toggle, a sign-out warning for unsynced changes + safe local-copy removal, and simultaneous multi-account sync (per-account Drive root/index/poll timer, a per-notebook "Sync to…" picker, account-scoped merge). Three-device verified. Remaining caveats are tracked under "Multi-account sync" above, not here.
 - ~~Link sharing was an open feature request~~ (07/10/26) — shipped as Phase 3, but via a different mechanism than originally sketched in `SYNC_SHARING_PLAN.md` (a bundle transfer instead of an HTTPS link + Drive ACLs — see that plan's "Verified constraint" section for why): **Send a copy** via a `.omninote` bundle (Stage 1), tap-to-open on Android (Stage 2), and an `omininote://` share link that hosts + imports that same bundle (Stage 3). Desktop open-with (double-click a bundle/link) followed as a related add-on. See "Notebook sharing" above for the shipped mechanism's remaining limitations.
