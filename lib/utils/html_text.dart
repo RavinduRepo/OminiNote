@@ -250,6 +250,25 @@ class _HtmlWalker {
       text = text.substring(1);
     }
     if (text.isEmpty) return;
+
+    // Some markdown renderers (ChatGPT among them) don't render task lists as
+    // checkbox <input>s — the <li> text still starts with a literal "[ ]" /
+    // "[x]". Convert it: the glyph replaces the just-emitted "• " bullet.
+    if (_out.isNotEmpty && _out.last.text.endsWith('• ')) {
+      final m = RegExp(r'^\[( |x|X)?\]\s*(.*)$').firstMatch(text);
+      if (m != null) {
+        _out.last.text =
+            _out.last.text.substring(0, _out.last.text.length - 2);
+        if (_out.last.text.isEmpty) _out.removeLast();
+        _recomputeEnds();
+        _emit(
+          (m.group(1) == 'x' || m.group(1) == 'X') ? '☑ ' : '☐ ',
+          style,
+        );
+        text = m.group(2)!;
+        if (text.isEmpty) return;
+      }
+    }
     _emit(text, style);
   }
 
@@ -259,6 +278,23 @@ class _HtmlWalker {
     required bool preformatted,
   }) {
     final tag = el.localName ?? '';
+    // Rendered Markdown task lists (GitHub/chat previews) put an
+    // <input type=checkbox> inside the <li> — emit the app's tappable glyph
+    // instead of dropping it (which left task items as bare bullets).
+    if (tag == 'input') {
+      if ((el.attributes['type'] ?? '').toLowerCase() == 'checkbox') {
+        // The parent <li> already emitted its "• " — the checkbox replaces it
+        // (keeping any nesting indent before it).
+        if (_out.isNotEmpty && _out.last.text.endsWith('• ')) {
+          _out.last.text =
+              _out.last.text.substring(0, _out.last.text.length - 2);
+          if (_out.last.text.isEmpty) _out.removeLast();
+          _recomputeEnds();
+        }
+        _emit(el.attributes.containsKey('checked') ? '☑ ' : '☐ ', style);
+      }
+      return;
+    }
     if (_skipTags.contains(tag)) return;
 
     var s = style;
@@ -290,6 +326,10 @@ class _HtmlWalker {
     s = _applyCssStyle(s, el.attributes['style']);
 
     final isBlock = _blockTags.contains(tag);
+    if (tag == 'table') {
+      _emitTable(el, s);
+      return;
+    }
     if (tag == 'br') {
       _emitBreak(s);
       return;
@@ -301,7 +341,7 @@ class _HtmlWalker {
     if (isBlock) _ensureBreak(s);
 
     // Cells inside a row: separate from the previous cell with two spaces
-    // (tables degrade to space-separated text).
+    // (only reached for orphan cells — whole <table>s take the aligned path).
     if ((tag == 'td' || tag == 'th') && !_atLineStart) _emit('  ', s);
 
     if (tag == 'ul' || tag == 'ol') {
@@ -328,6 +368,38 @@ class _HtmlWalker {
     if (isBlock) {
       _suppressNextBreak = false;
       _ensureBreak(s);
+    }
+  }
+
+  /// A whole <table> degrades to column-padded mono rows — padding only
+  /// aligns in a fixed-width font, and this is far more readable than the old
+  /// flat two-space cell separation. Cell content flattens to plain text.
+  void _emitTable(dom.Element table, _RunStyle s) {
+    final rows = <List<String>>[];
+    for (final tr in table.querySelectorAll('tr')) {
+      final cells = [
+        for (final c in tr.querySelectorAll('td,th'))
+          c.text.replaceAll(RegExp(r'\s+'), ' ').trim(),
+      ];
+      if (cells.any((c) => c.isNotEmpty)) rows.add(cells);
+    }
+    if (rows.isEmpty) return;
+    final cols = rows.map((r) => r.length).reduce((a, b) => a > b ? a : b);
+    final widths = List<int>.filled(cols, 0);
+    for (final row in rows) {
+      for (var i = 0; i < row.length; i++) {
+        if (row[i].length > widths[i]) widths[i] = row[i].length;
+      }
+    }
+    _ensureBreak(s);
+    final mono = s.copyWith(fontFamily: 'mono');
+    for (final row in rows) {
+      final line = [
+        for (var i = 0; i < row.length; i++)
+          i == row.length - 1 ? row[i] : row[i].padRight(widths[i]),
+      ].join('  ');
+      _emit(line, mono);
+      _emitBreak(mono);
     }
   }
 

@@ -10,6 +10,7 @@ import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/clipboard_images.dart';
 import '../utils/html_text.dart';
+import '../utils/markdown_text.dart';
 import '../utils/url_text.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
@@ -305,14 +306,37 @@ class _CanvasScreenState extends State<CanvasScreen> {
       color: c.textColor,
       fontFamily: c.textFontFamily,
     );
-    final runs = runsFromHtml(html, base);
+    var runs = runsFromHtml(html, base);
     if (runs.isEmpty) return false;
 
+    // A source/code view (editor, chat code fence) wraps raw Markdown in an
+    // HTML flavor — the converted text then *still reads as Markdown*. Only
+    // reconvert when the HTML produced a style-UNIFORM result (the fingerprint
+    // of a source copy): a rendered page always has style variety, and
+    // reconverting one would flatten its real headings/bold/code styling and
+    // mis-convert literal syntax its content merely mentions (found live on a
+    // Markdown spec page whose escaped examples became headings).
+    final first = runs.first;
+    final uniform = runs.every((r) =>
+        r.fontSize == first.fontSize &&
+        r.bold == first.bold &&
+        r.italic == first.italic &&
+        r.fontFamily == first.fontFamily &&
+        r.link == null);
+    final joined = runs.map((r) => r.text).join();
+    var wasMarkdown = false;
+    if (uniform && looksLikeMarkdown(joined)) {
+      final md = runsFromMarkdown(joined, base);
+      if (md.isNotEmpty) {
+        runs = md;
+        wasMarkdown = true;
+      }
+    }
+
     final boxes = c.insertRunsAsText(target.pageId, runs);
+    final what = wasMarkdown ? 'Markdown as formatted text' : 'formatted text';
     _toast(
-      boxes > 1
-          ? 'Pasted formatted text across $boxes pages'
-          : 'Pasted formatted text',
+      boxes > 1 ? 'Pasted $what across $boxes pages' : 'Pasted $what',
     );
     return boxes > 0;
   }
@@ -1181,18 +1205,32 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
     final target = c.currentPageLayout;
     if (target == null) return;
+    final base = TextRun(
+      text: '',
+      fontSize: c.textFontSize,
+      bold: false,
+      italic: false,
+      color: c.textColor,
+      fontFamily: c.textFontFamily,
+    );
+    // Markdown arrives as plain text (it has no clipboard flavor of its own):
+    // when the strict detector recognizes it, convert to styled runs — the
+    // same one-way input conversion Notion does. Ordinary prose never matches.
+    if (looksLikeMarkdown(text)) {
+      final runs = runsFromMarkdown(text, base);
+      if (runs.isNotEmpty) {
+        final boxes = c.insertRunsAsText(target.pageId, runs);
+        _toast(
+          boxes > 1
+              ? 'Pasted Markdown as formatted text across $boxes pages'
+              : 'Pasted Markdown as formatted text',
+        );
+        return;
+      }
+    }
     // Same auto-size + split-across-pages pipeline as the rich paste, with
     // one base-styled run.
-    final boxes = c.insertRunsAsText(target.pageId, [
-      TextRun(
-        text: text,
-        fontSize: c.textFontSize,
-        bold: false,
-        italic: false,
-        color: c.textColor,
-        fontFamily: c.textFontFamily,
-      ),
-    ]);
+    final boxes = c.insertRunsAsText(target.pageId, [base..text = text]);
     if (boxes > 1) _toast('Pasted text across $boxes pages');
   }
 

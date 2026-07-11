@@ -215,4 +215,37 @@ void main() {
       },
     );
   });
+
+  group('runsFromHtml — task-list checkboxes', () {
+    test('an <input type=checkbox> replaces its <li> bullet with ☐/☑ '
+        '(rendered GitHub/chat task lists)', () {
+      final runs = runsFromHtml(
+        '<ul>'
+        '<li><input type="checkbox"> milk</li>'
+        '<li><input type="checkbox" checked> bread</li>'
+        '<li>plain item</li>'
+        '</ul>',
+        base(),
+      );
+      expect(plain(runs), '☐ milk\n☑ bread\n• plain item');
+    });
+
+    test('non-checkbox inputs are still dropped', () {
+      final runs = runsFromHtml('a<input type="text" value="x">b', base());
+      expect(plain(runs), 'ab');
+    });
+
+    test('a literal "[ ]"/"[x]" at the start of a list item converts too — '
+        'ChatGPT-style renderers leave task markers as plain <li> text', () {
+      final runs = runsFromHtml(
+        '<ul>'
+        '<li>[ ] milk</li>'
+        '<li>[x] bread</li>'
+        '<li>[not a task] note</li>'
+        '</ul>',
+        base(),
+      );
+      expect(plain(runs), '☐ milk\n☑ bread\n• [not a task] note');
+    });
+  });
 }

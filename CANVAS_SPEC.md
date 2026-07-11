@@ -266,8 +266,10 @@ Handwriting→text recognition; shape-recognition/snapping; rulers/guides; real-
 
 **Implemented 07/08/26** (see §7.5): HTML→`TextRun[]` converter (`lib/utils/html_text.dart`), HTML-first system paste, HTML+plain copy-out, and per-run PDF text export — all shipped together as planned here.
 
+**Implemented 07/11/26 — Markdown paste (option (a)):** `lib/utils/markdown_text.dart` — `looksLikeMarkdown` (strict detector in the plain-text paste branch; strong signals convert alone, weak ones need two kinds, ordinary prose never matches) + `runsFromMarkdown` (headings via the HTML converter's scale map, bold/italic with pragmatic CommonMark flanking rules, inline+fenced code as mono, bullet/numbered/task lists as the app's glyph prefixes — `- [ ]` makes the same tappable ☐ — links as `TextRun.link`, `│ `-prefixed italic blockquotes, hr as a divider line). One-way conversion (Notion model): the result is ordinary rich text.
+
 **Still future:**
-- **Markdown rendering** — either (a) Markdown→`TextRun`s on paste (one-shot; same converter shape as the HTML one, cheap now that the run pipeline exists) or (b) a live "Markdown text box" mode. (a) first.
+- **Markdown live input rules** (option (b), planned next): Notion-style as-you-type conversion (`# `, `- `, `[ ] `, `**bold**`) in `RichTextController`, with undo + backspace-right-after reverts.
 - Richer HTML block layout (real tables, images inside pasted HTML, indent/quote styling) — deliberately out of scope for the inline-styling pass.
 
 ---
