@@ -74,6 +74,43 @@ String? urlAtOffset(TextElement el, Offset localOffset) {
   return el.runs.isNotEmpty ? el.runs.last.link : null;
 }
 
+/// The character offset of the checkbox glyph (`☐`/`☑`) whose drawn box (with
+/// finger padding) contains [localOffset] (relative to the box's top-left), or
+/// null. Only a line-leading glyph counts (optionally indented — nested list
+/// items); a ☐ in the middle of a sentence isn't a checkbox. Uses the same
+/// layout the painter does, so the hit area lines up with what's drawn.
+int? checkboxOffsetAt(TextElement el, Offset localOffset) {
+  final text = el.text;
+  if (!text.contains('☐') && !text.contains('☑')) return null;
+  final tp = TextPainter(
+    text: textSpanForElement(el),
+    textDirection: TextDirection.ltr,
+    textAlign: switch (el.align) {
+      TextAlignOption.center => TextAlign.center,
+      TextAlignOption.right => TextAlign.right,
+      _ => TextAlign.left,
+    },
+  )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+
+  // Candidate glyph: the (possibly indented) first character of the tapped
+  // hard line.
+  final idx = tp.getPositionForOffset(localOffset).offset;
+  final lineStart = text.lastIndexOf('\n', idx > 0 ? idx - 1 : 0) + 1;
+  var g = lineStart;
+  while (g < text.length && text[g] == ' ') {
+    g++;
+  }
+  if (g >= text.length || (text[g] != '☐' && text[g] != '☑')) return null;
+
+  // Confirm the tap landed on that glyph's own drawn box (padded) — the hard
+  // line may wrap over several visual lines, and only the glyph toggles.
+  final boxes = tp.getBoxesForSelection(
+    TextSelection(baseOffset: g, extentOffset: g + 1),
+  );
+  if (boxes.isEmpty) return null;
+  return boxes.first.toRect().inflate(6).contains(localOffset) ? g : null;
+}
+
 /// The element's content as a multi-style span (one child per run).
 InlineSpan textSpanForElement(TextElement el) {
   if (el.runs.isEmpty) {

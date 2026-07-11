@@ -611,6 +611,51 @@ class CanvasController extends ChangeNotifier {
     );
   }
 
+  /// Flips a line-leading checkbox glyph (☐↔☑) at [charOffset] in a text
+  /// element — the tap-on-canvas toggle (no editor opens). One undoable op;
+  /// stamps the element for sync.
+  void toggleCheckboxAt(String pageId, String elementId, int charOffset) {
+    final page = pages[pageId];
+    if (page == null) return;
+    final el = page.objects
+        .whereType<TextElement>()
+        .cast<TextElement?>()
+        .firstWhere((e) => e!.id == elementId, orElse: () => null);
+    if (el == null) return;
+
+    var acc = 0;
+    for (final r in el.runs) {
+      final end = acc + r.text.length;
+      if (charOffset < end) {
+        final i = charOffset - acc;
+        final ch = r.text[i];
+        if (ch != '☐' && ch != '☑') return;
+        final before = [el.deepCopy()];
+        r.text = r.text.replaceRange(i, i + 1, ch == '☐' ? '☑' : '☐');
+        _remeasureText(el, pageId);
+        _stamp([el]);
+        final after = [el.deepCopy()];
+        var applied = true;
+        _doOp(
+          _CanvasOp(
+            label: 'Toggle checkbox',
+            dirtyPageIds: {pageId},
+            apply: () {
+              if (applied) {
+                applied = false;
+                return;
+              }
+              _replaceElements(pageId, after);
+            },
+            revert: () => _replaceElements(pageId, before),
+          ),
+        );
+        return;
+      }
+      acc = end;
+    }
+  }
+
   void _remeasureText(TextElement el, String pageId) {
     final page = pages[pageId];
     if (page == null) return;

@@ -527,6 +527,11 @@ class _CanvasScreenState extends State<CanvasScreen> {
       // moves the current selection (handled by endToolGesture).
       if (c.tool == CanvasTool.lasso && !moved) {
         c.cancelToolGesture();
+        final cb = _checkboxAt(e.localPosition);
+        if (cb != null) {
+          c.toggleCheckboxAt(cb.$1, cb.$2.id, cb.$3);
+          return;
+        }
         final url = _urlAt(e.localPosition);
         if (url != null) {
           _openUrl(url);
@@ -542,6 +547,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     // Taps that didn't start a gesture.
     if (!moved && e.kind != PointerDeviceKind.trackpad) {
+      // A tap directly on a checkbox glyph toggles it, regardless of tool —
+      // the drawn ☐/☑ is the affordance, like a link's blue underline.
+      final cb = _checkboxAt(e.localPosition);
+      if (cb != null) {
+        c.toggleCheckboxAt(cb.$1, cb.$2.id, cb.$3);
+        return;
+      }
       // A tap directly on a link opens it, regardless of tool (the blue
       // underlined text is the affordance). Tapping elsewhere falls through.
       final url = _urlAt(e.localPosition);
@@ -617,6 +629,26 @@ class _CanvasScreenState extends State<CanvasScreen> {
     for (final el in [...page.strokes, ...page.objects].reversed) {
       if (el is TextElement && el.rect.inflate(6).contains(local)) {
         return (pageLayout.pageId, el);
+      }
+    }
+    return null;
+  }
+
+  /// The checkbox glyph under a screen position — `(pageId, element,
+  /// charOffset)` if the tap landed on a line-leading ☐/☑ in the topmost text
+  /// box there (else null). Mirrors [_urlAt].
+  (String, TextElement, int)? _checkboxAt(Offset screenPos) {
+    final c = _controller!;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return null;
+    final page = c.pages[pageLayout.pageId]!;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    for (final el in page.objects.reversed) {
+      if (el is TextElement && el.rect.inflate(4).contains(local)) {
+        final offset = checkboxOffsetAt(el, local - el.rect.topLeft);
+        if (offset != null) return (pageLayout.pageId, el, offset);
+        return null; // topmost text box wins even when the tap missed a glyph
       }
     }
     return null;
