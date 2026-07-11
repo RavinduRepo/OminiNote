@@ -22,12 +22,10 @@ target**. Tracked here; update as phases land.
   than originally sketched below (bundle transfer, not HTTPS link + Drive ACLs —
   see "Verified constraint"). Stage 1: **send a copy** via a `.omninote` bundle.
   Stage 2: tap-to-open on Android. Stage 3: an `omininote://` share link (host
-  bundle → download → import). Desktop open-with follow-on: Linux wired +
-  verified; Windows (Inno Setup installer) and macOS (`Info.plist` +
-  `AppDelegate.swift`) implemented but **unverified** — no local Windows/macOS
-  toolchain, needs a CI-built artifact or a real machine to confirm registration
-  + launch-arg routing. See `KNOWN_ISSUES.md` "Notebook sharing" for shipped
-  limitations.
+  bundle → download → import). Desktop open-with follow-on (Linux, Windows via
+  Inno Setup installer, macOS via `Info.plist` + `AppDelegate.swift`) is
+  user-confirmed working on all four platforms (Android/Windows/macOS/Linux).
+  See `KNOWN_ISSUES.md` "Notebook sharing" for shipped limitations.
 
 **Open-canvas refresh:** fixed — a pushed `CanvasScreen` listens to
 `SyncService.dataVersion` and pops (with a message) when its notebook is

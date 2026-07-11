@@ -14,6 +14,7 @@ import '../services/sync/merge_engine.dart';
 import '../services/sync_service.dart';
 import '../utils/url_text.dart';
 import 'canvas_layout.dart';
+import 'page_picture_cache.dart';
 import 'rich_text_controller.dart';
 import 'text_measure.dart';
 
@@ -69,6 +70,13 @@ class CanvasController extends ChangeNotifier {
   final Map<String, CanvasPage> pages;
   final NotebookService _service;
   late final RenderCache renderCache;
+
+  /// Committed-elements picture per page (painter replays instead of
+  /// redrawing every element each frame). Every path that visually mutates a
+  /// page's committed elements must invalidate its entry — committed ops ride
+  /// `_markDirty`; the live eraser, live selection drags, and remote merges
+  /// invalidate explicitly.
+  final pictureCache = PagePictureCache();
 
   // ── Layout & viewport ──────────────────────────────────────────────────
 
@@ -658,6 +666,9 @@ class CanvasController extends ChangeNotifier {
   Timer? _saveTimer;
 
   void _markDirty(Set<String> pageIds, {bool structural = false}) {
+    for (final id in pageIds) {
+      pictureCache.invalidate(id);
+    }
     _dirtyPages.addAll(pageIds);
     if (structural) _dirtyStructure = true;
     _saveTimer?.cancel();
@@ -874,7 +885,10 @@ class CanvasController extends ChangeNotifier {
         removedAny = true;
       }
     }
-    if (removedAny) notifyListeners();
+    if (removedAny) {
+      pictureCache.invalidate(page.id);
+      notifyListeners();
+    }
   }
 
   void _commitErase() {
@@ -1171,6 +1185,7 @@ class CanvasController extends ChangeNotifier {
           el.rect = autoTextRect(el, page.width - newLeft - 6);
           _dragLast = canvasPos;
           _recomputeSelectionBounds();
+          pictureCache.invalidate(selectionPageId!);
           notifyListeners();
           return;
         }
@@ -1210,6 +1225,7 @@ class CanvasController extends ChangeNotifier {
 
     _dragLast = canvasPos;
     _recomputeSelectionBounds();
+    pictureCache.invalidate(selectionPageId!);
     notifyListeners();
   }
 
@@ -2649,6 +2665,9 @@ class CanvasController extends ChangeNotifier {
         _dragMode = SelectionHit.none;
       }
       if (sizeChanged) _relayout();
+      // A remote-only change (e.g. ink erased elsewhere) never reaches
+      // _markDirty (nothing to re-upload), so invalidate here.
+      pictureCache.invalidate(remote.id);
       notifyListeners();
     }
 
@@ -2669,6 +2688,7 @@ class CanvasController extends ChangeNotifier {
       if (row.pageIds.isEmpty) canvas.rows.remove(row);
     }
     pages.remove(pageId);
+    pictureCache.invalidate(pageId);
     if (selectionPageId == pageId) clearSelection(notify: false);
     _relayout();
     notifyListeners();
@@ -2732,6 +2752,7 @@ class CanvasController extends ChangeNotifier {
     _saveTimer?.cancel();
     flushSaves();
     renderCache.dispose();
+    pictureCache.dispose();
     super.dispose();
   }
 }
