@@ -416,6 +416,30 @@ void main() {
       expect(decoded.deletedAt, DateTime(2026, 7, 7));
       expect(decoded.deletedObjects.single.strokeId, 'el_deleted');
     });
+
+    test('purgedAt (terminal page marker) round-trips; absent stays null', () {
+      final purged = CanvasPage(
+        id: 'pg_1',
+        deviceId: 'test_device',
+        rev: 7,
+        deletedAt: DateTime(2026, 7, 12),
+        purgedAt: DateTime(2026, 7, 12),
+      );
+      final decoded = CanvasPage.fromJson(
+        jsonDecode(jsonEncode(purged.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded.purgedAt, DateTime(2026, 7, 12));
+
+      // A normal (never-purged) page leaves purgedAt out of the JSON entirely.
+      final live = CanvasPage(id: 'pg_2', deviceId: 'test_device');
+      expect(live.toJson().containsKey('purgedAt'), isFalse);
+      expect(
+        CanvasPage.fromJson(
+          jsonDecode(jsonEncode(live.toJson())) as Map<String, dynamic>,
+        ).purgedAt,
+        isNull,
+      );
+    });
   });
 
   group('Canvas round-trips', () {

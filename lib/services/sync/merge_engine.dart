@@ -292,6 +292,36 @@ class MergeEngine {
       local.deviceId,
     );
 
+    // Terminal purge: once either side is purged, the merged page keeps the
+    // purge (earliest wins) and its content stays permanently stripped —
+    // exactly like [_withPurgeOverride] for the enveloped docs. A purge beats
+    // a concurrent restore or a stale device's live copy deterministically,
+    // regardless of the LWW tuple. The tiny stub survives forever so it can't
+    // resurrect.
+    final lp = local.purgedAt, rp = remote.purgedAt;
+    if (lp != null || rp != null) {
+      final purged = (lp != null && rp != null)
+          ? (lp.isBefore(rp) ? lp : rp)
+          : (lp ?? rp)!;
+      final meta = remotePageWins ? remote : local;
+      return CanvasPage(
+        schemaVersion: meta.schemaVersion,
+        id: local.id,
+        rev: remotePageWins ? remote.rev : local.rev,
+        updatedAt: remotePageWins ? remote.updatedAt : local.updatedAt,
+        deviceId: remotePageWins ? remote.deviceId : local.deviceId,
+        deletedAt: meta.deletedAt ?? purged,
+        purgedAt: purged,
+        width: meta.width,
+        height: meta.height,
+        background: meta.background,
+        strokes: <StrokeElement>[],
+        erased: <EraseTombstone>[],
+        objects: <CanvasElement>[],
+        deletedObjects: <EraseTombstone>[],
+      );
+    }
+
     // Set Union for strokes (id ⇒ immutable points; props resolved by winner).
     final Map<String, StrokeElement> mergedStrokes = {};
     for (final s in local.strokes) {
@@ -404,6 +434,7 @@ class MergeEngine {
       'w${p.width}h${p.height}',
       'bg${p.background.color.toARGB32()}/${p.background.pattern.name}',
       'del${p.deletedAt?.millisecondsSinceEpoch}',
+      'purge${p.purgedAt?.millisecondsSinceEpoch}',
       's:${strokes.join(',')}',
       'e:${erased.join(',')}',
       'o:${objects.join(',')}',

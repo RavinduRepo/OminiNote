@@ -422,5 +422,77 @@ void main() {
         expect(r.localContributed, isTrue);
       }
     });
+
+    test('page purge: strips content + beats a higher-rev live copy, either '
+        'order', () {
+      // Device A purged the page (content stripped, purgedAt stamped). Device
+      // B still has it live with ink and a HIGHER rev (would win plain LWW).
+      final purged = CanvasPage(
+        id: 'p1',
+        deviceId: 'devA',
+        rev: 5,
+        deletedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+        purgedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+      );
+      final live = _page(id: 'p1', rev: 9, strokes: [_stroke('a'), _stroke('b')]);
+
+      for (final (l, r) in [(purged, live), (live, purged)]) {
+        final m = MergeEngine.mergePage(l, r);
+        expect(m.purgedAt, isNotNull, reason: 'purge is terminal, not LWW');
+        expect(m.deletedAt, isNotNull, reason: 'purged implies deleted');
+        expect(m.strokes, isEmpty, reason: 'content permanently stripped');
+        expect(m.objects, isEmpty);
+      }
+    });
+
+    test('page purge: earliest purgedAt wins when both sides purged', () {
+      CanvasPage purgedAt(int t, {int rev = 1}) => CanvasPage(
+            id: 'p1',
+            deviceId: 'dev',
+            rev: rev,
+            deletedAt: DateTime.fromMillisecondsSinceEpoch(t),
+            purgedAt: DateTime.fromMillisecondsSinceEpoch(t),
+          );
+      final a = purgedAt(3000, rev: 6);
+      final b = purgedAt(2000, rev: 4);
+      expect(MergeEngine.mergePage(a, b).purgedAt!.millisecondsSinceEpoch, 2000);
+      expect(MergeEngine.mergePage(b, a).purgedAt!.millisecondsSinceEpoch, 2000,
+          reason: 'commutative');
+    });
+
+    test('page purge propagates through reconcile in the needed direction', () {
+      const rel = 'notebooks/n1/sections/s1/canvases/c1/pages/p1.json';
+      final purged = jsonEncode(CanvasPage(
+        id: 'p1',
+        deviceId: 'devA',
+        rev: 5,
+        deletedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+        purgedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+      ).toJson());
+      final live =
+          jsonEncode(_page(id: 'p1', rev: 9, strokes: [_stroke('a')]).toJson());
+
+      // The merged result is the stripped marker in BOTH orders — that's the
+      // load-bearing correctness. The changed/contributed flags are asymmetric:
+      // whichever side still has the live copy is the one that must move.
+
+      // local already purged, remote still live → overwrite Drive, no local change.
+      final r1 = MergeEngine.reconcile(rel, purged, live);
+      final m1 = jsonDecode(r1.content) as Map;
+      expect(m1['purgedAt'], 2000);
+      expect(m1['strokes'] as List, isEmpty);
+      expect(r1.changedLocal, isFalse);
+      expect(r1.localContributed, isTrue,
+          reason: 'must overwrite the remote live copy');
+
+      // local still live, remote purged → adopt the marker, no re-push needed.
+      final r2 = MergeEngine.reconcile(rel, live, purged);
+      final m2 = jsonDecode(r2.content) as Map;
+      expect(m2['purgedAt'], 2000);
+      expect(m2['strokes'] as List, isEmpty);
+      expect(r2.changedLocal, isTrue,
+          reason: 'the live side must adopt the stripped marker');
+      expect(r2.localContributed, isFalse);
+    });
   });
 }

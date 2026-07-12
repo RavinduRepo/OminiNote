@@ -71,6 +71,7 @@ class CanvasController extends ChangeNotifier {
       CanvasSyncListener(
         onPage: applyRemotePage,
         onStructure: () => unawaited(applyRemoteStructure()),
+        onRestorePage: restorePage,
       ),
     );
   }
@@ -2482,11 +2483,18 @@ class CanvasController extends ChangeNotifier {
           page.deletedAt = null;
           page.bumpRev(SettingsService().deviceId);
           pages[pageId] = page;
-          if (rowBecomesEmpty) {
-            canvas.rows.insert(math.min(rowIndex, canvas.rows.length), row);
-          }
-          if (!row.pageIds.contains(pageId)) {
-            row.pageIds.insert(math.min(colIndex, row.pageIds.length), pageId);
+          // If the page was already re-linked out of band (restored from the
+          // recycle bin while this canvas stayed open), don't re-insert its
+          // row — that would leave two rows referencing the same page id.
+          final alreadyReferenced =
+              canvas.rows.any((r) => r.pageIds.contains(pageId));
+          if (!alreadyReferenced) {
+            if (rowBecomesEmpty) {
+              canvas.rows.insert(math.min(rowIndex, canvas.rows.length), row);
+            }
+            if (!row.pageIds.contains(pageId)) {
+              row.pageIds.insert(math.min(colIndex, row.pageIds.length), pageId);
+            }
           }
           // Restored to `pages` — the normal dirty-flush will persist it
           // (dirtyPageIds below covers this).
@@ -2944,6 +2952,32 @@ class CanvasController extends ChangeNotifier {
     if (selectionPageId == pageId) clearSelection(notify: false);
     _relayout();
     notifyListeners();
+  }
+
+  /// Restores a soft-deleted page into this open canvas (invoked from the
+  /// recycle bin via [SyncService.restorePageInOpenCanvas]). Loads the
+  /// tombstoned page from disk, clears its tombstone, and appends a fresh row
+  /// at the bottom — done in memory so the controller's own autosave persists
+  /// it (a disk-level restore would be overwritten by that autosave). Not an
+  /// undo op: it originates outside the canvas's own editing history.
+  Future<void> restorePage(String pageId) async {
+    if (pages.containsKey(pageId)) return; // already live
+    final page = await _service.loadPageFile(canvas, pageId);
+    if (page == null || page.purgedAt != null) return;
+    page.deletedAt = null;
+    pages[pageId] = page;
+    final referenced = <String>{for (final r in canvas.rows) ...r.pageIds};
+    if (!referenced.contains(pageId)) {
+      canvas.rows.add(PageRow(id: _service.newId(), pageIds: [pageId]));
+    }
+    // Persist: savePage rewrites the page with its tombstone cleared (bumped
+    // rev, so it beats the deletion in LWW everywhere), saveCanvas writes the
+    // new row. Flush immediately (not just the 500ms debounce) so the bin sees
+    // the cleared tombstone the moment it reloads after the restore.
+    _markDirty({pageId}, structural: true);
+    _relayout();
+    notifyListeners();
+    await flushSaves();
   }
 
   /// canvas.json changed on disk from a pull — refresh structure (rows,

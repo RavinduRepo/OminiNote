@@ -134,6 +134,7 @@ class _BinScreenState extends State<BinScreen> {
                     BinItemType.notebook => Icons.menu_book_outlined,
                     BinItemType.section => Icons.description_outlined,
                     BinItemType.canvas => Icons.crop_portrait,
+                    BinItemType.page => Icons.insert_drive_file_outlined,
                   }),
                   title: Text(item.name),
                   subtitle: Text(
@@ -151,7 +152,11 @@ class _BinScreenState extends State<BinScreen> {
                         icon: const Icon(Icons.restore),
                         tooltip: item.parentAlive
                             ? 'Restore'
-                            : 'Restore its ${item.type == BinItemType.canvas ? 'section' : 'notebook'} first',
+                            : 'Restore its ${switch (item.type) {
+                                BinItemType.canvas => 'section',
+                                BinItemType.page => 'section',
+                                _ => 'notebook',
+                              }} first',
                         onPressed:
                             item.parentAlive ? () => _restore(item) : null,
                       ),

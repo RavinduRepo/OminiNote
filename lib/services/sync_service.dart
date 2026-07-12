@@ -23,7 +23,17 @@ class CanvasSyncListener {
   /// (structure: rows/defaults/attachments).
   final void Function() onStructure;
 
-  const CanvasSyncListener({required this.onPage, required this.onStructure});
+  /// Called when a soft-deleted page of this canvas is restored from the
+  /// recycle bin while the canvas is open — the controller re-links it in
+  /// memory (and flushes to disk) so its own autosave doesn't clobber a
+  /// disk-level restore. Awaited so the bin sees a fresh state on reload.
+  final Future<void> Function(String pageId)? onRestorePage;
+
+  const CanvasSyncListener({
+    required this.onPage,
+    required this.onStructure,
+    this.onRestorePage,
+  });
 }
 
 /// Per-account sync state. Phase 2 runs one of these per connected account, each
@@ -78,6 +88,18 @@ class SyncService {
 
   void unregisterCanvasListener(String canvasId) =>
       _canvasListeners.remove(canvasId);
+
+  /// If the named canvas is open, restore [pageId] through its live controller
+  /// and return true; otherwise return false so the caller does a disk-level
+  /// restore. Keeps a bin-restore from being clobbered by the open canvas's
+  /// autosave (its in-memory rows can be ahead of disk). Awaits the controller
+  /// so the on-disk tombstone is cleared before the bin reloads its list.
+  Future<bool> restorePageInOpenCanvas(String canvasId, String pageId) async {
+    final cb = _canvasListeners[canvasId]?.onRestorePage;
+    if (cb == null) return false;
+    await cb(pageId);
+    return true;
+  }
 
   // Per-account sync state, keyed by account id (Google `sub`).
   final Map<String, _AccountSync> _accountSyncs = {};

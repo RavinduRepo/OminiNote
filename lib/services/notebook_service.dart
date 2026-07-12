@@ -1053,6 +1053,19 @@ class NotebookService {
     if (await file.exists()) await file.delete();
   }
 
+  /// Reads a single page file directly, tombstone and all (unlike [loadPages],
+  /// which filters deleted pages out). Returns null if the file is absent or
+  /// unparseable. Used by the recycle-bin restore path.
+  Future<CanvasPage?> loadPageFile(Canvas canvas, String pageId) async {
+    final json = await _readJsonFile(_pageFile(canvas, pageId));
+    if (json == null) return null;
+    try {
+      return CanvasPage.fromJson(json);
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ── Assets (content-addressed, canvas-scoped) ──────────────────────────
 
   Future<String> putAsset(
@@ -1355,20 +1368,48 @@ class NotebookService {
         if (!await cvRoot.exists()) continue;
         await for (final cvDir in cvRoot.list(followLinks: false)) {
           if (cvDir is! Directory) continue;
+          final cvId = _basename(cvDir.path);
           final cvJson =
               await _readJsonFile(File('${cvDir.path}/canvas.json'));
+          if (cvJson?['purgedAt'] != null) continue; // gone — hide marker
           final cvDeleted = cvJson?['deletedAt'];
-          if (cvDeleted is! num || cvJson?['purgedAt'] != null) continue;
-          out.add(BinItem(
-            type: BinItemType.canvas,
-            name: cvJson?['name'] as String? ?? 'Canvas',
-            deletedAt: DateTime.fromMillisecondsSinceEpoch(cvDeleted.toInt()),
-            notebookId: nbId,
-            sectionId: secId,
-            canvasId: _basename(cvDir.path),
-            parentAlive: nbAlive && secDeleted is! num,
-            parentName: secName,
-          ));
+          final cvName = cvJson?['name'] as String? ?? 'Canvas';
+          if (cvDeleted is num) {
+            // Canvas itself is deleted — its pages are subsumed by this entry
+            // (restoring the canvas brings them all back), so don't list them.
+            out.add(BinItem(
+              type: BinItemType.canvas,
+              name: cvName,
+              deletedAt: DateTime.fromMillisecondsSinceEpoch(cvDeleted.toInt()),
+              notebookId: nbId,
+              sectionId: secId,
+              canvasId: cvId,
+              parentAlive: nbAlive && secDeleted is! num,
+              parentName: secName,
+            ));
+            continue;
+          }
+          // Alive canvas: surface individually-deleted pages.
+          final cvAlive = nbAlive && secDeleted is! num;
+          final pagesDir = Directory('${cvDir.path}/pages');
+          if (!await pagesDir.exists()) continue;
+          await for (final pf in pagesDir.list(followLinks: false)) {
+            if (pf is! File || !pf.path.endsWith('.json')) continue;
+            final pj = await _readJsonFile(pf);
+            final pDeleted = pj?['deletedAt'];
+            if (pDeleted is! num || pj?['purgedAt'] != null) continue;
+            out.add(BinItem(
+              type: BinItemType.page,
+              name: 'Page',
+              deletedAt: DateTime.fromMillisecondsSinceEpoch(pDeleted.toInt()),
+              notebookId: nbId,
+              sectionId: secId,
+              canvasId: cvId,
+              pageId: _basename(pf.path).replaceAll('.json', ''),
+              parentAlive: cvAlive,
+              parentName: cvName,
+            ));
+          }
         }
       }
     }
@@ -1425,6 +1466,37 @@ class NotebookService {
           sec.nodes.add(LeafNode(c.id));
           await saveSection(sec);
         }
+
+      case BinItemType.page:
+        await restorePage(
+            item.notebookId, item.sectionId!, item.canvasId!, item.pageId!);
+    }
+  }
+
+  /// Restores a soft-deleted page: clears its tombstone (bumped rev, so it
+  /// beats the deletion in every device's LWW merge) and re-links it as a
+  /// fresh row appended at the bottom of the canvas — the page's original
+  /// position is unrecoverable once the canvas has been restructured, so we
+  /// append (mirroring how sections/canvases restore to the end of the tree,
+  /// not their original slot).
+  ///
+  /// If the canvas is currently **open**, the restore is routed through its
+  /// live [CanvasController] instead — writing canvas.json from disk here would
+  /// be clobbered by the controller's own autosave (its in-memory rows may be
+  /// ahead of disk), and the user wouldn't see the page appear.
+  Future<void> restorePage(
+      String notebookId, String sectionId, String canvasId, String pageId) async {
+    if (await SyncService().restorePageInOpenCanvas(canvasId, pageId)) return;
+    final canvas = await getCanvas(notebookId, sectionId, canvasId);
+    if (canvas == null) return; // canvas deleted/purged — nowhere to restore to
+    final page = await loadPageFile(canvas, pageId);
+    if (page == null || page.purgedAt != null || page.deletedAt == null) return;
+    page.deletedAt = null;
+    await savePage(canvas, page); // bumps rev + journals the upload
+    final referenced = {for (final r in canvas.rows) ...r.pageIds};
+    if (!referenced.contains(pageId)) {
+      canvas.rows.add(PageRow(id: newId(), pageIds: [pageId]));
+      await saveCanvas(canvas); // bumps rev + journals the structural upload
     }
   }
 
@@ -1496,7 +1568,40 @@ class NotebookService {
         await purgeSection(item.notebookId, item.sectionId!);
       case BinItemType.canvas:
         await purgeCanvas(item.notebookId, item.sectionId!, item.canvasId!);
+      case BinItemType.page:
+        await purgePage(item.notebookId, item.sectionId!, item.canvasId!,
+            item.pageId!);
     }
+  }
+
+  /// Permanently purges a single page. Unlike the container levels a page has
+  /// no subtree/folder — the page file *is* the marker, so we strip its content
+  /// in place, stamp `purgedAt`, and re-save. The tiny stub re-uploads through
+  /// the normal page-merge path (no Drive folder-delete needed) and survives
+  /// forever so a stale device can't resurrect the page; the purge propagates
+  /// because [MergeEngine.mergePage] treats `purgedAt` as terminal.
+  Future<void> purgePage(
+      String notebookId, String sectionId, String canvasId, String pageId) async {
+    final file = File(
+        '${canvasDir(notebookId, sectionId, canvasId).path}/pages/$pageId.json');
+    // Local-only notebooks have no Drive copy and no other-device presence —
+    // a plain local file delete is the whole purge (no resurrection risk).
+    if (localOnlyNotebookIds().contains(notebookId)) {
+      if (await file.exists()) await file.delete();
+      return;
+    }
+    final json = await _readJsonFile(file);
+    if (json == null) return;
+    final page = CanvasPage.fromJson(json);
+    page.deletedAt ??= DateTime.now();
+    page.purgedAt ??= DateTime.now();
+    page.strokes.clear();
+    page.erased.clear();
+    page.objects.clear();
+    page.deletedObjects.clear();
+    page.source = null; // content gone; keep the marker tiny
+    page.bumpRev(SettingsService().deviceId);
+    await _writeAtomic(file, jsonEncode(page.toJson())); // journals the upload
   }
 
   Future<void> purgeNotebook(String notebookId) async {
@@ -1699,12 +1804,14 @@ class NotebookService {
         await purgeCanvas(notebookId, sectionId, canvasId);
         continue;
       }
-      await _gcPagesUnder(entity.path, cutoff);
+      await _gcPagesUnder(notebookId, sectionId, canvasId, cutoff);
     }
   }
 
-  Future<void> _gcPagesUnder(String canvasDirPath, DateTime cutoff) async {
-    final dir = Directory('$canvasDirPath/pages');
+  Future<void> _gcPagesUnder(String notebookId, String sectionId,
+      String canvasId, DateTime cutoff) async {
+    final dir = Directory(
+        '${canvasDir(notebookId, sectionId, canvasId).path}/pages');
     if (!await dir.exists()) return;
     await for (final entity in dir.list(followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.json')) continue;
@@ -1714,8 +1821,14 @@ class NotebookService {
       } catch (_) {
         continue;
       }
+      if (json['purgedAt'] != null) continue; // terminal marker — leave it
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        await entity.delete();
+        // Route through the terminal purge (strip + `purgedAt` marker,
+        // Drive-reclaiming) instead of a bare local delete — a local-only
+        // delete left the tombstoned page live on Drive forever and let it
+        // re-download on the next full resync.
+        final pageId = _basename(entity.path).replaceAll('.json', '');
+        await purgePage(notebookId, sectionId, canvasId, pageId);
         continue;
       }
       _compactTombstoneList(json, 'erased', cutoff);
@@ -1749,7 +1862,7 @@ class NotebookService {
 
 // ── Recycle bin items ─────────────────────────────────────────────────────
 
-enum BinItemType { notebook, section, canvas }
+enum BinItemType { notebook, section, canvas, page }
 
 /// One soft-deleted item shown in the recycle bin.
 class BinItem {
@@ -1759,6 +1872,7 @@ class BinItem {
   final String notebookId;
   final String? sectionId;
   final String? canvasId;
+  final String? pageId;
 
   /// False when the containing notebook/section is itself deleted — restoring
   /// this item alone would put it nowhere visible, so restore the parent
@@ -1773,6 +1887,7 @@ class BinItem {
     required this.notebookId,
     this.sectionId,
     this.canvasId,
+    this.pageId,
     required this.parentAlive,
     required this.parentName,
   });

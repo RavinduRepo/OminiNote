@@ -107,6 +107,12 @@ class CanvasPage {
   String deviceId;
   DateTime? deletedAt;
 
+  /// Terminal purge marker (see [Notebook.purgedAt]): the page's content is
+  /// permanently stripped and this stub survives forever so a stale offline
+  /// device holding a live copy can't resurrect it. Grow-only in merges —
+  /// a purge always beats a concurrent restore/edit.
+  DateTime? purgedAt;
+
   double width;
   double height;
   PageBackground background;
@@ -132,6 +138,7 @@ class CanvasPage {
     DateTime? updatedAt,
     required this.deviceId,
     this.deletedAt,
+    this.purgedAt,
     this.width = kDefaultPageWidth,
     this.height = kDefaultPageHeight,
     this.background = const PageBackground(),
@@ -190,6 +197,7 @@ class CanvasPage {
         'updatedAt': updatedAt.millisecondsSinceEpoch,
         'deviceId': deviceId,
         'deletedAt': deletedAt?.millisecondsSinceEpoch,
+        if (purgedAt != null) 'purgedAt': purgedAt!.millisecondsSinceEpoch,
         'w': width,
         'h': height,
         'background': background.toJson(),
@@ -224,6 +232,9 @@ class CanvasPage {
       deviceId: json['deviceId'] ?? 'unknown',
       deletedAt: json['deletedAt'] != null
           ? DateTime.fromMillisecondsSinceEpoch(json['deletedAt'])
+          : null,
+      purgedAt: json['purgedAt'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['purgedAt'])
           : null,
       width: (json['w'] as num?)?.toDouble() ?? kDefaultPageWidth,
       height: (json['h'] as num?)?.toDouble() ?? kDefaultPageHeight,
