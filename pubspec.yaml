@@ -52,6 +52,7 @@ dependencies:
   # today) and breaks the Android build. 1.8.1 uses stable compileSdk 34 and has
   # the same Dart API (ReceiveSharingIntent.instance.getInitialMedia/getMediaStream).
   receive_sharing_intent: 1.8.1
+  image_picker: ^1.2.3
 
 dev_dependencies:
   flutter_test:

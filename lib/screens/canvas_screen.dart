@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
@@ -1050,18 +1051,18 @@ class _CanvasScreenState extends State<CanvasScreen> {
               const Divider(),
               const _SheetLabel('Content'),
               ListTile(
-                leading: const Icon(Icons.text_fields),
-                title: const Text('Text box'),
-                subtitle: const Text(
-                  'Switch to the text tool, then tap the page',
-                ),
-                onTap: () => Navigator.pop(context, 'text'),
-              ),
-              ListTile(
                 leading: const Icon(Icons.image_outlined),
                 title: const Text('Image'),
+                subtitle: const Text('From files'),
                 onTap: () => Navigator.pop(context, 'image'),
               ),
+              if (Platform.isAndroid || Platform.isIOS)
+                ListTile(
+                  leading: const Icon(Icons.photo_camera_outlined),
+                  title: const Text('Take photo'),
+                  subtitle: const Text('Capture with the camera'),
+                  onTap: () => Navigator.pop(context, 'camera'),
+                ),
               ListTile(
                 leading: const Icon(Icons.content_paste),
                 title: const Text('Paste'),
@@ -1084,11 +1085,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
         if (current != null) c.addHorizontalPage(current.rowIndex);
       case 'pdf':
         await _insertPdfFlow();
-      case 'text':
-        c.setTool(CanvasTool.text);
-        _toast('Tap anywhere on a page to place text');
       case 'image':
         await _insertImageFlow();
+      case 'camera':
+        await _capturePhotoFlow();
       case 'paste':
         await _pasteFlow();
       case 'pastePage':
@@ -1206,13 +1206,36 @@ class _CanvasScreenState extends State<CanvasScreen> {
   }
 
   Future<void> _insertImageFlow() async {
-    final c = _controller!;
     final result = await FilePicker.platform.pickFiles(type: FileType.image);
     final path = result?.files.single.path;
     if (path == null || !mounted) return;
-
     final bytes = await File(path).readAsBytes();
-    final ext = path.split('.').last.toLowerCase();
+    await _placeImageFromFileBytes(bytes, path.split('.').last.toLowerCase());
+  }
+
+  /// Captures a photo with the device camera and drops it on the page.
+  Future<void> _capturePhotoFlow() async {
+    final XFile? shot;
+    try {
+      shot = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        imageQuality: 90,
+      );
+    } catch (e) {
+      _toast('Camera unavailable');
+      return;
+    }
+    if (shot == null || !mounted) return;
+    final bytes = await shot.readAsBytes();
+    final ext = shot.name.contains('.') ? shot.name.split('.').last : 'jpg';
+    await _placeImageFromFileBytes(bytes, ext.toLowerCase());
+  }
+
+  /// Stores [bytes] as a content-addressed asset and drops an ImageElement
+  /// centered on the current page (scaled to fit). Shared by the file-pick
+  /// and camera flows.
+  Future<void> _placeImageFromFileBytes(Uint8List bytes, String ext) async {
+    final c = _controller!;
     final assetId = await _service.putAsset(widget.canvas, bytes, ext);
 
     final codec = await ui.instantiateImageCodec(bytes);

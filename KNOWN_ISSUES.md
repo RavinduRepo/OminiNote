@@ -7,7 +7,6 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 ### Canvas v1 limitations (deliberate scope cuts — see CANVAS_SPEC.md §17/§19)
 
 - **Selection is single-page**; can't lasso across page boundaries.
-- **No camera capture** for images (gallery/file picker only — camera needs a plugin + permissions).
 - **Undo/redo history is in-memory** (~100 ops), cleared when the canvas closes.
 - **S-Pen button-to-erase works while the pen is touching** (`kPrimaryStylusButton` / inverted stylus); a pure hover-button tool toggle isn't implemented.
 - **Orphaned page files**: deleting a page removes it from `section.json` but leaves `pages/<id>.json` on disk (undo may restore it). Harmless; a GC-on-open could clean these later.
