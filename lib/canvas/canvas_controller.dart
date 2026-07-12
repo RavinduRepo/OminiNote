@@ -740,7 +740,17 @@ class CanvasController extends ChangeNotifier {
 
   // Eraser accumulation for the current gesture: pageId → removed (index, el).
   final Map<String, List<(int, CanvasElement)>> _eraseAccum = {};
-  static const double _eraseRadius = 10.0; // page points
+
+  // Partial-mode accumulation: pageId → surviving segment strokes added live
+  // this gesture (new ids; committed together with the removals as one op).
+  final Map<String, List<StrokeElement>> _segAccum = {};
+
+  /// Partial mode splits strokes at the erased gap instead of removing them
+  /// whole. Device-local preference (screen persists via SettingsService).
+  bool eraserPartial = false;
+
+  /// Eraser radius in page points (screen persists via SettingsService).
+  double eraserSize = 10.0;
 
   // Lasso in progress (page-local points on _gesturePageId).
   List<Offset>? lassoPoints;
@@ -815,6 +825,7 @@ class CanvasController extends ChangeNotifier {
         return true;
       case CanvasTool.eraser:
         _eraseAccum.clear();
+        _segAccum.clear();
         _activeGestureTool = CanvasTool.eraser;
         _eraseAt(canvasPos);
         return true;
@@ -905,7 +916,7 @@ class CanvasController extends ChangeNotifier {
     lassoPoints = null;
     _gesturePageId = null;
     // Erase already applied live — commit what happened rather than losing it.
-    if (_eraseAccum.isNotEmpty) {
+    if (_eraseAccum.isNotEmpty || _segAccum.isNotEmpty) {
       _commitErase();
       return;
     }
@@ -913,7 +924,7 @@ class CanvasController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ── Eraser (whole-stroke, live) ────────────────────────────────────────
+  // ── Eraser (whole-stroke or partial, live) ─────────────────────────────
 
   void _eraseAt(Offset canvasPos) {
     final pageLayout = layout.pageAt(canvasPos);
@@ -921,68 +932,183 @@ class CanvasController extends ChangeNotifier {
     final page = pages[pageLayout.pageId]!;
     final local = canvasPos - pageLayout.rect.topLeft;
 
-    var removedAny = false;
+    var changed = false;
     for (var i = page.strokes.length - 1; i >= 0; i--) {
       final el = page.strokes[i];
-      if (_strokeHit(el, local)) {
-        page.strokes.removeAt(i);
+      if (!_strokeHit(el, local)) continue;
+      changed = true;
+
+      // A segment WE created earlier in this gesture isn't persisted yet —
+      // splitting it again just replaces it in the added set, no tombstone.
+      final gestureSegs = _segAccum[page.id];
+      final isOwnSegment =
+          gestureSegs?.any((s) => s.id == el.id) ?? false;
+
+      page.strokes.removeAt(i);
+      if (isOwnSegment) {
+        gestureSegs!.removeWhere((s) => s.id == el.id);
+      } else {
         _eraseAccum.putIfAbsent(page.id, () => []).add((i, el));
-        removedAny = true;
+      }
+
+      if (eraserPartial) {
+        final survivors = _splitStrokeAround(el, local);
+        if (survivors.isNotEmpty) {
+          page.strokes.insertAll(i, survivors);
+          _segAccum.putIfAbsent(page.id, () => []).addAll(survivors);
+        }
       }
     }
-    if (removedAny) {
+    if (changed) {
       pictureCache.invalidate(page.id);
       notifyListeners();
     }
   }
 
+  /// Splits [stroke] into the point runs that survive an erase at [center]:
+  /// points within the eraser radius are dropped (both endpoints of any
+  /// segment the eraser crosses count as hit), and each surviving run of 2+
+  /// points becomes a fresh stroke with the original's style and z. An empty
+  /// result means nothing survives — the whole-stroke removal stands.
+  List<StrokeElement> _splitStrokeAround(StrokeElement stroke, Offset center) {
+    final pts = stroke.points;
+    final radius = eraserSize + stroke.size / 2;
+    final hit = List<bool>.filled(pts.length, false);
+    for (var j = 0; j < pts.length; j++) {
+      if ((Offset(pts[j].x, pts[j].y) - center).distance <= radius) {
+        hit[j] = true;
+      }
+    }
+    for (var j = 0; j < pts.length - 1; j++) {
+      if (_distToSegment(
+            center,
+            Offset(pts[j].x, pts[j].y),
+            Offset(pts[j + 1].x, pts[j + 1].y),
+          ) <=
+          radius) {
+        hit[j] = true;
+        hit[j + 1] = true;
+      }
+    }
+
+    final out = <StrokeElement>[];
+    var runStart = -1;
+    void flush(int end) {
+      if (runStart >= 0 && end - runStart >= 2) {
+        out.add(StrokeElement(
+          id: newModelId('el'),
+          deviceId: SettingsService().deviceId,
+          z: stroke.z,
+          tool: stroke.tool,
+          color: stroke.color,
+          size: stroke.size,
+          points: [
+            for (var j = runStart; j < end; j++)
+              StrokePoint(pts[j].x, pts[j].y, pts[j].p),
+          ],
+        )..zIndex = stroke.zIndex);
+      }
+      runStart = -1;
+    }
+
+    for (var j = 0; j < pts.length; j++) {
+      if (hit[j]) {
+        flush(j);
+      } else if (runStart < 0) {
+        runStart = j;
+      }
+    }
+    flush(pts.length);
+    return out;
+  }
+
   void _commitErase() {
     final accum = Map.of(_eraseAccum);
+    final segs = Map.of(_segAccum);
     _eraseAccum.clear();
-    if (accum.isEmpty) return;
+    _segAccum.clear();
+    if (accum.isEmpty && segs.isEmpty) return;
 
     // The live gesture (_eraseAt) already removed the strokes from the
     // array, but tombstones MUST be written on this first apply too — the
     // array removal alone syncs as "stroke missing, no tombstone", which the
     // other device's union merge treats as "I still have it" and resurrects.
-    // removeWhere on already-removed ids is a no-op, so apply is safely
-    // idempotent for both the first run and redo.
+    //
+    // Undo/redo REVIVES BY NEW IDENTITY instead of removing tombstones:
+    // the erased set is grow-only in the merge (that's what makes deletions
+    // durable), so un-tombstoning locally cannot survive a merge with a
+    // device that already pulled the tombstone — the stroke would die again
+    // everywhere (found live: undoing a synced partial erase ended with the
+    // WHOLE line deleted on both devices, because the undo also tombstoned
+    // the segments). Reviving as a fresh stroke id is a new event the union
+    // merge adds everywhere — same philosophy as the bin's restore. The
+    // accum/segs maps are rewritten with the fresh identities each cycle.
+    final pageIds = {...accum.keys, ...segs.keys};
+    void tombstone(CanvasPage page, String strokeId) {
+      page.erased.add(
+        EraseTombstone(
+          strokeId: strokeId,
+          erasedAt: DateTime.now(),
+          deviceId: SettingsService().deviceId,
+        ),
+      );
+    }
+
     _doOp(
       _CanvasOp(
         label: 'Erase',
-        dirtyPageIds: accum.keys.toSet(),
+        dirtyPageIds: pageIds,
         apply: () {
-          for (final entry in accum.entries) {
-            final page = pages[entry.key];
+          for (final pid in pageIds) {
+            final page = pages[pid];
             if (page == null) continue;
-            final ids = entry.value.map((r) => r.$2.id).toSet();
-            for (final el in entry.value) {
-              page.erased.add(
-                EraseTombstone(
-                  strokeId: el.$2.id,
-                  erasedAt: DateTime.now(),
-                  deviceId: SettingsService().deviceId,
-                ),
-              );
+            final removed = accum[pid] ?? const [];
+            final ids = removed.map((r) => r.$2.id).toSet();
+            for (final el in removed) {
+              tombstone(page, el.$2.id);
             }
             page.strokes.removeWhere((e) => ids.contains(e.id));
+            // Segments: on the first run they're already live (same ids); on
+            // a redo their previous identities were tombstoned by the undo —
+            // revive fresh copies instead.
+            final added = segs[pid] ?? const [];
+            final revived = <StrokeElement>[];
+            for (final s in added) {
+              if (page.strokes.any((e) => e.id == s.id)) {
+                revived.add(s);
+                continue;
+              }
+              final fresh = s.deepCopy(withNewId: true);
+              page.strokes.add(fresh);
+              revived.add(fresh);
+            }
+            if (added.isNotEmpty) segs[pid] = revived;
           }
         },
         revert: () {
-          for (final entry in accum.entries) {
-            final page = pages[entry.key];
+          for (final pid in pageIds) {
+            final page = pages[pid];
             if (page == null) continue;
-            // Re-insert in ascending index order to restore z-positions.
-            final sorted = [...entry.value]
-              ..sort((a, b) => a.$1.compareTo(b.$1));
-            final ids = entry.value.map((r) => r.$2.id).toSet();
-            page.erased.removeWhere((e) => ids.contains(e.strokeId));
+            final added = segs[pid] ?? const [];
+            for (final s in added) {
+              tombstone(page, s.id);
+            }
+            final addedIds = added.map((s) => s.id).toSet();
+            page.strokes.removeWhere((e) => addedIds.contains(e.id));
+            final removed = accum[pid] ?? const [];
+            // Revive originals as fresh identities (old tombstones stay);
+            // re-insert ascending to approximate the original z-positions.
+            final sorted = [...removed]..sort((a, b) => a.$1.compareTo(b.$1));
+            final revived = <(int, CanvasElement)>[];
             for (final (index, el) in sorted) {
+              final fresh = el.deepCopy(withNewId: true) as StrokeElement;
               page.strokes.insert(
                 math.min(index, page.strokes.length),
-                el as StrokeElement,
+                fresh,
               );
+              revived.add((index, fresh));
             }
+            if (removed.isNotEmpty) accum[pid] = revived;
           }
         },
       ),
@@ -990,7 +1116,7 @@ class CanvasController extends ChangeNotifier {
   }
 
   bool _strokeHit(StrokeElement stroke, Offset point) {
-    final radius = _eraseRadius + stroke.size / 2;
+    final radius = eraserSize + stroke.size / 2;
     final pts = stroke.points;
     if (pts.isEmpty) return false;
     if (pts.length == 1) {

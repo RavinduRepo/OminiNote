@@ -148,7 +148,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
     setState(() {
       _controller = CanvasController(canvas: widget.canvas, pages: pages)
         ..systemCopyHook = _copySelectionToSystemClipboard
-        ..systemPasteFallback = _pasteFromSystemClipboard;
+        ..systemPasteFallback = _pasteFromSystemClipboard
+        ..eraserPartial = SettingsService().eraserPartial
+        ..eraserSize = SettingsService().eraserSize;
     });
     // Jump to a requested page (e.g. a bookmark opened from search) once the
     // first layout has set the screen size, so the fit math has real bounds.
@@ -2202,18 +2204,71 @@ Widget? _buildToolContextRow(
     case CanvasTool.highlighter:
       return _buildPenOptionsRow(context, c, palette);
     case CanvasTool.eraser:
-      return _HintRow(
-        icon: Icons.auto_fix_normal_outlined,
-        text:
-            'Draw over strokes to erase them · hold the pen button to erase anytime',
-        palette: palette,
-      );
+      return _buildEraserOptionsRow(context, c, palette);
     case CanvasTool.lasso:
       // Hint + Paste (the row handles the empty-selection state itself).
       return _buildLassoActionRow(context, c, palette);
     case CanvasTool.text:
       return _buildTextStyleRow(context, c, palette);
   }
+}
+
+Widget _buildEraserOptionsRow(
+  BuildContext context,
+  CanvasController c,
+  AppPalette palette,
+) {
+  return Row(
+    children: [
+      SegmentedButton<bool>(
+        showSelectedIcon: false,
+        style: const ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        segments: const [
+          ButtonSegment(
+            value: false,
+            label: Text('Stroke'),
+            tooltip: 'Erase whole strokes',
+          ),
+          ButtonSegment(
+            value: true,
+            label: Text('Partial'),
+            tooltip: 'Erase only where you rub',
+          ),
+        ],
+        selected: {c.eraserPartial},
+        onSelectionChanged: (sel) {
+          c.eraserPartial = sel.first;
+          SettingsService().setEraserPrefs(partial: sel.first);
+          c.notifyRepaint();
+        },
+      ),
+      Container(
+        width: 1,
+        height: 24,
+        margin: const EdgeInsets.symmetric(horizontal: 8),
+        color: palette.border,
+      ),
+      Icon(Icons.line_weight, size: 18, color: palette.textDim),
+      SizedBox(
+        width: 110,
+        child: Slider(
+          value: c.eraserSize.clamp(4, 40),
+          min: 4,
+          max: 40,
+          divisions: 18,
+          label: c.eraserSize.toStringAsFixed(0),
+          onChanged: (v) {
+            c.eraserSize = v;
+            SettingsService().setEraserPrefs(size: v);
+            c.notifyRepaint();
+          },
+        ),
+      ),
+    ],
+  );
 }
 
 Widget _buildPenOptionsRow(

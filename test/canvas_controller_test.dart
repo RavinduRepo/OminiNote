@@ -266,11 +266,18 @@ void main() {
 
       controller.undo();
       expect(page.strokes.length, 2);
-      expect(page.erased, isEmpty);
+      // Undo revives by NEW identity and leaves the tombstones in place —
+      // the erased set is grow-only in the merge, so removing them locally
+      // couldn't survive a merge with a device that already pulled them
+      // (the stroke would just die again everywhere).
+      expect(page.strokes.map((s) => s.id).toSet().intersection({'s1', 's2'}),
+          isEmpty);
+      expect(page.erased.map((e) => e.strokeId).toSet(), {'s1', 's2'});
 
       controller.redo();
       expect(page.strokes, isEmpty);
-      expect(page.erased.length, 2);
+      expect(page.erased.length, 4,
+          reason: 'redo tombstones the revived identities too');
     });
   });
 

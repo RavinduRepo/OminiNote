@@ -52,6 +52,21 @@ class SettingsService {
     await _persist();
   }
 
+  /// Eraser preferences (device-local, like [fingerDraw]): partial mode
+  /// splits strokes at the erased gap instead of removing them whole.
+  bool eraserPartial = false;
+  double eraserSize = 10.0;
+
+  Future<void> setEraserPrefs({bool? partial, double? size}) async {
+    if ((partial == null || partial == eraserPartial) &&
+        (size == null || size == eraserSize)) {
+      return;
+    }
+    eraserPartial = partial ?? eraserPartial;
+    eraserSize = size ?? eraserSize;
+    await _persist();
+  }
+
   // ── Sync-related fields ─────────────────────────────────────────────────
 
   /// Stable identifier for this installation, generated once and persisted.
@@ -142,6 +157,8 @@ class SettingsService {
     themeMode.value = _parseThemeMode(data['themeMode']);
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
+    eraserPartial = data['eraserPartial'] == true;
+    eraserSize = (data['eraserSize'] as num?)?.toDouble() ?? 10.0;
     autoPageColor.value = data['autoPageColor'] != false; // default true
     if (data['defaultPageBackground'] is Map<String, dynamic>) {
       defaultPageBackground.value = PageBackground.fromJson(
@@ -255,6 +272,8 @@ class SettingsService {
         'themeMode': themeMode.value.name,
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
+        'eraserPartial': eraserPartial,
+        'eraserSize': eraserSize,
         'autoPageColor': autoPageColor.value,
         'defaultPageBackground': defaultPageBackground.value.toJson(),
         'deviceId': deviceId,
