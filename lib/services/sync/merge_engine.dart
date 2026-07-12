@@ -320,10 +320,14 @@ class MergeEngine {
       }
     }
 
-    // Erased strokes stay out of `strokes` (but their tombstone lives on).
-    final filteredStrokes = mergedStrokes.values
-        .where((s) => !mergedErased.containsKey(s.id))
-        .toList();
+    // Rev-based (LWW) deletion: an erased stroke stays out of `strokes` unless
+    // its own rev has climbed ABOVE its tombstone's rev — i.e. it was revived
+    // (undo/move-back bumps rev) or edited after the erase. A passive copy at
+    // rev <= tombstone.rev stays dead. The tombstone always lives on.
+    final filteredStrokes = mergedStrokes.values.where((s) {
+      final t = mergedErased[s.id];
+      return t == null || s.rev > t.rev;
+    }).toList();
 
     // LWW for objects (text/image) among the live copies on each side.
     final Map<String, CanvasElement> mergedObjects = {};
@@ -356,9 +360,11 @@ class MergeEngine {
       }
     }
 
-    final filteredObjects = mergedObjects.values
-        .where((o) => !mergedDeletedObjects.containsKey(o.id))
-        .toList();
+    // Rev-based (LWW) deletion, same rule as strokes above.
+    final filteredObjects = mergedObjects.values.where((o) {
+      final t = mergedDeletedObjects[o.id];
+      return t == null || o.rev > t.rev;
+    }).toList();
 
     return CanvasPage(
       schemaVersion:

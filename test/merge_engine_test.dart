@@ -120,6 +120,62 @@ void main() {
     });
   });
 
+  group('mergePage — rev-based (LWW) deletion', () {
+    EraseTombstone tomb(String id, {required int rev, String device = 'devA'}) =>
+        EraseTombstone(
+            strokeId: id, rev: rev, erasedAt: DateTime(2026), deviceId: device);
+
+    test('a passive copy at/below the tombstone rev stays DEAD; a copy that '
+        'out-revs its tombstone is ALIVE (revived / edited)', () {
+      // Device A erased s@rev2 → tombstone rev2. Device B still holds a copy.
+      final tombstone = [tomb('s', rev: 2)];
+
+      // B passive at rev2 → dead (delete wins at equal rev).
+      final passive = MergeEngine.mergePage(
+        _page(id: 'p', strokes: [_stroke('s', rev: 2)], erased: tombstone),
+        _page(id: 'p', strokes: [_stroke('s', device: 'devB', rev: 2)]),
+      );
+      expect(passive.strokes.map((e) => e.id), isEmpty,
+          reason: 'passive rev-2 copy does not out-rev the rev-2 tombstone');
+      expect(passive.erased.map((e) => e.strokeId), ['s'],
+          reason: 'tombstone kept');
+
+      // B revived/edited to rev3 → alive (out-revs the tombstone).
+      final revived = MergeEngine.mergePage(
+        _page(id: 'p', strokes: [_stroke('s', rev: 2)], erased: tombstone),
+        _page(id: 'p', strokes: [_stroke('s', device: 'devB', rev: 3)]),
+      );
+      expect(revived.strokes.map((e) => e.id), ['s'],
+          reason: 'rev-3 copy out-revs the rev-2 tombstone → alive');
+    });
+
+    test('partial-erase undo across sync: the whole line is restored on the '
+        'remote device (the exact reported round trip)', () {
+      // A partial-erased line L (tombstone L@rev1) + two survivor segments;
+      // B pulled that. A then UNDID: L revived at rev2 (out-revs its rev-1
+      // tombstone), segments tombstoned. Merge A's undo into B.
+      final aAfterUndo = _page(
+        id: 'p',
+        strokes: [_stroke('L', rev: 2)], // revived, bumped
+        erased: [tomb('L', rev: 1), tomb('S1', rev: 1), tomb('S2', rev: 1)],
+      );
+      final bAfterErase = _page(
+        id: 'p',
+        strokes: [_stroke('S1', device: 'devB'), _stroke('S2', device: 'devB')],
+        erased: [tomb('L', rev: 1)],
+      );
+
+      for (final m in [
+        MergeEngine.mergePage(aAfterUndo, bAfterErase),
+        MergeEngine.mergePage(bAfterErase, aAfterUndo),
+      ]) {
+        expect(m.strokes.map((e) => e.id), ['L'],
+            reason: 'L (rev2) beats its rev-1 tombstone → full line back; '
+                'segments (rev1) stay dead under their rev-1 tombstones');
+      }
+    });
+  });
+
   group('reconcile — notebooks.json union', () {
     Map<String, dynamic> _nb(String id,
             {int rev = 1, String name = 'N', int? deletedAt}) =>

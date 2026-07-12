@@ -126,7 +126,15 @@ void main() {
       c.redo();
       expect(c.canvas.rows, hasLength(n));
       expect(p1.objects, hasLength(1));
-      expect(p1.deletedObjects, isEmpty);
+      // Rev-based: the tombstone is KEPT (grow-only); the re-added part
+      // out-revs it instead.
+      final redone = p1.objects.single as TextElement;
+      final tombRev = p1.deletedObjects
+          .where((t) => t.strokeId == redone.id)
+          .map((t) => t.rev)
+          .fold(0, (m, r) => r > m ? r : m);
+      expect(redone.rev, greaterThan(tombRev),
+          reason: 'redo out-revs the kept tombstone → alive');
     });
 
     test('overflowing text on a page in a HORIZONTAL row grows the same row to '
@@ -192,8 +200,15 @@ void main() {
       expect(p1.deletedObjects, isNotEmpty);
 
       c.undo();
-      expect(p1.objects, hasLength(1));
-      expect(p1.deletedObjects, isEmpty);
+      expect(p1.objects, hasLength(1), reason: 'the part is restored…');
+      // Rev-based: tombstone kept (grow-only); the revived part out-revs it.
+      final restored = p1.objects.single as TextElement;
+      final tombRev = p1.deletedObjects
+          .where((t) => t.strokeId == restored.id)
+          .map((t) => t.rev)
+          .fold(0, (m, r) => r > m ? r : m);
+      expect(restored.rev, greaterThan(tombRev),
+          reason: '…under the same id, out-revving the kept tombstone');
     });
 
     test('cutLinkedText merges all parts into one clipboard text element whose '

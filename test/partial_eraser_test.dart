@@ -60,10 +60,14 @@ void main() {
     }
   });
 
-  test('undo/redo revive by NEW identity — tombstones are never removed '
-      '(grow-only in the merge; un-tombstoning locally cannot survive a '
-      'merge with a device that already pulled it, which live-deleted the '
-      'entire line on both devices)', () {
+  test('undo/redo revive the SAME ids with a rev bumped above the tombstone '
+      '(rev-based; tombstones kept). This is what restores the WHOLE line on '
+      'a device that already pulled the partial-erase.', () {
+    int tombRev(CanvasPage p, String id) => p.erased
+        .where((e) => e.strokeId == id)
+        .map((e) => e.rev)
+        .fold(0, (m, r) => r > m ? r : m);
+
     final page = CanvasPage(id: 'a', deviceId: 'test_device')
       ..strokes.add(_longStroke('s1'));
     final c = _controller(page);
@@ -72,23 +76,22 @@ void main() {
     final segIds = page.strokes.map((s) => s.id).toSet();
 
     c.undo();
-    expect(page.strokes.length, 1, reason: 'the original line is back…');
-    expect(page.strokes.single.id, isNot('s1'),
-        reason: '…as a FRESH stroke — a new event the union merge adds '
-            'everywhere, instead of fighting the synced tombstone');
-    expect(page.strokes.single.points.length,
-        _longStroke('x').points.length);
+    expect(page.strokes.map((s) => s.id), ['s1'],
+        reason: 'the original line is back under its SAME id');
+    expect(page.strokes.single.rev, greaterThan(tombRev(page, 's1')),
+        reason: 'out-revs its tombstone → alive across a merge (the WHOLE '
+            'line is restored on the remote device, not deleted)');
     expect(page.erased.map((e) => e.strokeId), contains('s1'),
-        reason: 'the old tombstone stays — grow-only');
+        reason: 'the tombstone stays (grow-only storage)');
     expect(page.erased.map((e) => e.strokeId).toSet(), containsAll(segIds),
-        reason: 'the segments died by tombstone too');
+        reason: 'the segments are tombstoned');
 
     c.redo();
-    expect(page.strokes.length, 2, reason: 'split state is back…');
+    expect(page.strokes.map((s) => s.id).toSet(), segIds,
+        reason: 'split state back under the SAME segment ids');
     for (final s in page.strokes) {
-      expect(segIds, isNot(contains(s.id)),
-          reason: '…as fresh segment identities (old ones stay tombstoned)');
-      expect(page.erased.map((e) => e.strokeId), isNot(contains(s.id)));
+      expect(s.rev, greaterThan(tombRev(page, s.id)),
+          reason: 'each revived segment out-revs its tombstone');
     }
   });
 

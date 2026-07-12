@@ -46,6 +46,15 @@ class _CanvasOp {
   });
 }
 
+/// A revivable element slot for undo/redo. Holds the (mutable) element — its
+/// `rev` is bumped above the tombstone on revive, keeping the same id — and
+/// its insertion index (-1 = append). See [CanvasController._reviveSlots].
+class _ElSlot {
+  final CanvasElement el;
+  final int index;
+  _ElSlot(this.el, [this.index = -1]);
+}
+
 /// All canvas state + behavior: app-owned viewport (pan/zoom over the page
 /// layout), tool gestures in page-local points, op-based undo/redo, lasso
 /// selection with live transforms, clipboard, page/row structure edits, and
@@ -1029,30 +1038,26 @@ class CanvasController extends ChangeNotifier {
     _segAccum.clear();
     if (accum.isEmpty && segs.isEmpty) return;
 
-    // The live gesture (_eraseAt) already removed the strokes from the
-    // array, but tombstones MUST be written on this first apply too — the
-    // array removal alone syncs as "stroke missing, no tombstone", which the
-    // other device's union merge treats as "I still have it" and resurrects.
-    //
-    // Undo/redo REVIVES BY NEW IDENTITY instead of removing tombstones:
-    // the erased set is grow-only in the merge (that's what makes deletions
-    // durable), so un-tombstoning locally cannot survive a merge with a
-    // device that already pulled the tombstone — the stroke would die again
-    // everywhere (found live: undoing a synced partial erase ended with the
-    // WHOLE line deleted on both devices, because the undo also tombstoned
-    // the segments). Reviving as a fresh stroke id is a new event the union
-    // merge adds everywhere — same philosophy as the bin's restore. The
-    // accum/segs maps are rewritten with the fresh identities each cycle.
+    // The live gesture (_eraseAt) already removed the erased strokes and added
+    // the survivor segments; this op just makes it undoable and sync-safe.
+    // Erase = tombstone the originals; partial-mode survivor segments are the
+    // "added" side. Undo is the symmetric swap (tombstone segments, revive
+    // originals). All rev-based via the shared helpers — reviving bumps the
+    // original's rev above its tombstone (same id), which is what restores the
+    // WHOLE line on the remote device after an undo-across-sync (the fresh-id
+    // approach broke the undo chain; this doesn't).
     final pageIds = {...accum.keys, ...segs.keys};
-    void tombstone(CanvasPage page, String strokeId) {
-      page.erased.add(
-        EraseTombstone(
-          strokeId: strokeId,
-          erasedAt: DateTime.now(),
-          deviceId: SettingsService().deviceId,
-        ),
-      );
-    }
+    final originals = {
+      for (final pid in pageIds)
+        pid: [
+          for (final (i, el) in (accum[pid] ?? const <(int, CanvasElement)>[]))
+            _ElSlot(el, i),
+        ],
+    };
+    final segments = {
+      for (final pid in pageIds)
+        pid: [for (final s in (segs[pid] ?? const <StrokeElement>[])) _ElSlot(s)],
+    };
 
     _doOp(
       _CanvasOp(
@@ -1062,53 +1067,16 @@ class CanvasController extends ChangeNotifier {
           for (final pid in pageIds) {
             final page = pages[pid];
             if (page == null) continue;
-            final removed = accum[pid] ?? const [];
-            final ids = removed.map((r) => r.$2.id).toSet();
-            for (final el in removed) {
-              tombstone(page, el.$2.id);
-            }
-            page.strokes.removeWhere((e) => ids.contains(e.id));
-            // Segments: on the first run they're already live (same ids); on
-            // a redo their previous identities were tombstoned by the undo —
-            // revive fresh copies instead.
-            final added = segs[pid] ?? const [];
-            final revived = <StrokeElement>[];
-            for (final s in added) {
-              if (page.strokes.any((e) => e.id == s.id)) {
-                revived.add(s);
-                continue;
-              }
-              final fresh = s.deepCopy(withNewId: true);
-              page.strokes.add(fresh);
-              revived.add(fresh);
-            }
-            if (added.isNotEmpty) segs[pid] = revived;
+            _tombstoneSlots(page, originals[pid]!);
+            _reviveSlots(page, segments[pid]!);
           }
         },
         revert: () {
           for (final pid in pageIds) {
             final page = pages[pid];
             if (page == null) continue;
-            final added = segs[pid] ?? const [];
-            for (final s in added) {
-              tombstone(page, s.id);
-            }
-            final addedIds = added.map((s) => s.id).toSet();
-            page.strokes.removeWhere((e) => addedIds.contains(e.id));
-            final removed = accum[pid] ?? const [];
-            // Revive originals as fresh identities (old tombstones stay);
-            // re-insert ascending to approximate the original z-positions.
-            final sorted = [...removed]..sort((a, b) => a.$1.compareTo(b.$1));
-            final revived = <(int, CanvasElement)>[];
-            for (final (index, el) in sorted) {
-              final fresh = el.deepCopy(withNewId: true) as StrokeElement;
-              page.strokes.insert(
-                math.min(index, page.strokes.length),
-                fresh,
-              );
-              revived.add((index, fresh));
-            }
-            if (removed.isNotEmpty) accum[pid] = revived;
+            _tombstoneSlots(page, segments[pid]!);
+            _reviveSlots(page, originals[pid]!);
           }
         },
       ),
@@ -1513,36 +1481,39 @@ class CanvasController extends ChangeNotifier {
       _CanvasOp(
         label: 'Move to page',
         dirtyPageIds: {sourceId, targetId},
+        // A move is delete-on-source + add-on-target (same ids), symmetric on
+        // undo. Rev-based, so nothing is un-tombstoned: the landed copy is
+        // bumped ABOVE any tombstone on its page (this is what lets a
+        // move-BACK out-rev the stale origin tombstone — the reported bug),
+        // and the side it left tombstones the ids at the landed rev.
         apply: () {
           _setPageElements(sourceId, sourceAfter);
           _setPageElements(targetId, targetAfter);
-          // The moved ids vanished from the source page — tombstone them
-          // there, or a stale remote copy of the source page resurrects them
-          // on merge (→ duplicates, since they're also live on the target).
-          // On the target they're live: clear any old tombstones for them.
-          final dev = SettingsService().deviceId;
-          final now = DateTime.now();
+          // Source: the ids left → tombstone them (a stale remote source copy
+          // must not resurrect them). Landed rev is recorded so a future
+          // return out-revs it.
           for (final el in movingAfter) {
-            final t = EraseTombstone(
-              strokeId: el.id,
-              erasedAt: now,
-              deviceId: dev,
-            );
-            if (el is StrokeElement) {
-              source.erased.add(t);
-              target.erased.removeWhere((e) => e.strokeId == el.id);
-            } else {
-              source.deletedObjects.add(t);
-              target.deletedObjects.removeWhere((e) => e.strokeId == el.id);
-            }
+            _tombstoneFor(source, el);
+          }
+          // Target: the landed copies must out-rev any pre-existing tombstone
+          // for their id on this page (e.g. from an earlier move here).
+          for (final el in [...target.strokes, ...target.objects]) {
+            if (movedIds.contains(el.id)) _bumpAliveOn(target, el);
           }
         },
         revert: () {
+          // Target: tombstone the moved ids at their CURRENT (pushed) rev —
+          // captured from the live target copies BEFORE they're removed, so a
+          // remote that already pulled the move drops them too.
+          for (final el in [...target.strokes, ...target.objects]) {
+            if (movedIds.contains(el.id)) _tombstoneFor(target, el);
+          }
           _setPageElements(sourceId, sourceBefore);
           _setPageElements(targetId, targetBefore);
-          for (final id in movedIds) {
-            source.erased.removeWhere((e) => e.strokeId == id);
-            source.deletedObjects.removeWhere((e) => e.strokeId == id);
+          // Source: the restored copies must out-rev the source tombstone that
+          // apply added (kept — grow-only).
+          for (final el in [...source.strokes, ...source.objects]) {
+            if (movedIds.contains(el.id)) _bumpAliveOn(source, el);
           }
         },
       ),
@@ -1611,15 +1582,14 @@ class CanvasController extends ChangeNotifier {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
     final page = pages[pageId]!;
-    final removedStrokes = <(int, StrokeElement)>[];
-    final removedObjects = <(int, CanvasElement)>[];
+    final slots = <_ElSlot>[];
     for (final el in selection) {
       if (el is StrokeElement) {
         final i = page.strokes.indexOf(el);
-        if (i >= 0) removedStrokes.add((i, el));
+        if (i >= 0) slots.add(_ElSlot(el, i));
       } else {
         final i = page.objects.indexOf(el);
-        if (i >= 0) removedObjects.add((i, el));
+        if (i >= 0) slots.add(_ElSlot(el, i));
       }
     }
     clearSelection(notify: false);
@@ -1627,42 +1597,10 @@ class CanvasController extends ChangeNotifier {
       _CanvasOp(
         label: 'Delete',
         dirtyPageIds: {pageId},
-        apply: () {
-          final dev = SettingsService().deviceId;
-          final now = DateTime.now();
-          final strokeIds = removedStrokes.map((r) => r.$2.id).toSet();
-          final objectIds = removedObjects.map((r) => r.$2.id).toSet();
-          for (final id in strokeIds) {
-            page.erased.add(
-              EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev),
-            );
-          }
-          for (final id in objectIds) {
-            page.deletedObjects.add(
-              EraseTombstone(strokeId: id, erasedAt: now, deviceId: dev),
-            );
-          }
-          page.strokes.removeWhere((e) => strokeIds.contains(e.id));
-          page.objects.removeWhere((e) => objectIds.contains(e.id));
-        },
-        revert: () {
-          final strokeIds = removedStrokes.map((r) => r.$2.id).toSet();
-          final objectIds = removedObjects.map((r) => r.$2.id).toSet();
-          page.erased.removeWhere((e) => strokeIds.contains(e.strokeId));
-          page.deletedObjects.removeWhere(
-            (e) => objectIds.contains(e.strokeId),
-          );
-          final sortedStrokes = [...removedStrokes]
-            ..sort((a, b) => a.$1.compareTo(b.$1));
-          for (final (index, el) in sortedStrokes) {
-            page.strokes.insert(math.min(index, page.strokes.length), el);
-          }
-          final sortedObjects = [...removedObjects]
-            ..sort((a, b) => a.$1.compareTo(b.$1));
-          for (final (index, el) in sortedObjects) {
-            page.objects.insert(math.min(index, page.objects.length), el);
-          }
-        },
+        // Delete = tombstone; undo = revive (fresh id if the tombstone
+        // already synced — see [_reviveSlots]).
+        apply: () => _tombstoneSlots(page, slots),
+        revert: () => _reviveSlots(page, slots),
       ),
     );
   }
@@ -1858,45 +1796,89 @@ class CanvasController extends ChangeNotifier {
   /// Once an element could have synced, undoing its insert must still record
   /// a tombstone alongside the physical removal — a stale remote copy would
   /// otherwise resurrect it on the next merge. `apply` (redo) clears the
-  /// tombstone and re-adds if missing.
+  // ── Tombstone-safe undo/redo primitives (rev-based LWW deletion) ────────
+  //
+  // Deletion is rev-based, like the Recycle bin: a tombstone records the
+  // element's `rev` at delete time, and the merge filter keeps an element dead
+  // only while `element.rev <= tombstone.rev`. So undo/redo NEVER removes a
+  // tombstone (grow-only, durable across sync — a device that pulled it would
+  // otherwise re-delete on merge). Instead:
+  //   - tombstone = record the element's current rev (redo, on a bumped
+  //     element, produces a higher tombstone → dead again);
+  //   - revive = keep the SAME id, bump the element's rev above its tombstone
+  //     (alive again, survives sync, undo stack stays intact — no id swap).
+  // rev climbs monotonically across undo↔redo, so each action out-revs the
+  // last. Verified against the partial-eraser undo-across-sync round trip.
+
+  void _tombstoneFor(CanvasPage page, CanvasElement el) {
+    final list = el is StrokeElement ? page.erased : page.deletedObjects;
+    // Dedup: raise (never lower) the tombstone's rev to the element's current
+    // rev. Local remove-then-add is safe — the merge takes the higher rev.
+    list.removeWhere((e) => e.strokeId == el.id);
+    list.add(EraseTombstone(
+      strokeId: el.id,
+      rev: el.rev,
+      erasedAt: DateTime.now(),
+      deviceId: SettingsService().deviceId,
+    ));
+  }
+
+  /// Bumps [el]'s rev above the highest tombstone for its id on [page], so the
+  /// merge filter keeps it ALIVE. The tombstone itself stays (grow-only).
+  void _bumpAliveOn(CanvasPage page, CanvasElement el) {
+    final list = el is StrokeElement ? page.erased : page.deletedObjects;
+    final tomb = list
+        .where((e) => e.strokeId == el.id)
+        .fold<int?>(null, (m, e) => m == null || e.rev > m ? e.rev : m);
+    if (tomb == null) return;
+    final dev = SettingsService().deviceId;
+    while (el.rev <= tomb) {
+      el.bumpRev(dev);
+    }
+  }
+
+  void _tombstoneSlots(CanvasPage page, List<_ElSlot> slots) {
+    for (final s in slots) {
+      _tombstoneFor(page, s.el);
+    }
+    final ids = slots.map((s) => s.el.id).toSet();
+    page.strokes.removeWhere((e) => ids.contains(e.id));
+    page.objects.removeWhere((e) => ids.contains(e.id));
+  }
+
+  void _reviveSlots(CanvasPage page, List<_ElSlot> slots) {
+    final ordered = [...slots]..sort((a, b) => a.index.compareTo(b.index));
+    for (final s in ordered) {
+      final el = s.el;
+      _bumpAliveOn(page, el);
+      if (el is StrokeElement) {
+        if (!page.strokes.any((e) => e.id == el.id)) {
+          s.index < 0
+              ? page.strokes.add(el)
+              : page.strokes.insert(math.min(s.index, page.strokes.length), el);
+        }
+      } else {
+        if (!page.objects.any((e) => e.id == el.id)) {
+          s.index < 0
+              ? page.objects.add(el)
+              : page.objects.insert(math.min(s.index, page.objects.length), el);
+        }
+      }
+    }
+  }
+
   _CanvasOp _addElementsOp(
     String label,
     String pageId,
     List<CanvasElement> elements,
   ) {
     final page = pages[pageId]!;
+    final slots = [for (final el in elements) _ElSlot(el)];
     return _CanvasOp(
       label: label,
       dirtyPageIds: {pageId},
-      apply: () {
-        for (final el in elements) {
-          if (el is StrokeElement) {
-            page.erased.removeWhere((e) => e.strokeId == el.id);
-            if (!page.strokes.any((e) => e.id == el.id)) page.strokes.add(el);
-          } else {
-            page.deletedObjects.removeWhere((e) => e.strokeId == el.id);
-            if (!page.objects.any((e) => e.id == el.id)) page.objects.add(el);
-          }
-        }
-      },
-      revert: () {
-        final dev = SettingsService().deviceId;
-        final now = DateTime.now();
-        final ids = elements.map((e) => e.id).toSet();
-        for (final el in elements) {
-          if (el is StrokeElement) {
-            page.erased.add(
-              EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev),
-            );
-          } else {
-            page.deletedObjects.add(
-              EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev),
-            );
-          }
-        }
-        page.strokes.removeWhere((e) => ids.contains(e.id));
-        page.objects.removeWhere((e) => ids.contains(e.id));
-      },
+      apply: () => _reviveSlots(page, slots),
+      revert: () => _tombstoneSlots(page, slots),
     );
   }
 
@@ -2001,25 +1983,17 @@ class CanvasController extends ChangeNotifier {
           }
           for (var i = 0; i < parts.length; i++) {
             final target = pages[targetPageIds[i]]!;
-            target.deletedObjects.removeWhere((t) => t.strokeId == parts[i].id);
+            _bumpAliveOn(target, parts[i]); // out-rev any tombstone (redo)
             if (!target.objects.any((e) => e.id == parts[i].id)) {
               target.objects.add(parts[i]);
             }
           }
         },
         revert: () {
-          final dev = SettingsService().deviceId;
-          final now = DateTime.now();
           for (var i = 0; i < parts.length; i++) {
             final target = pages[targetPageIds[i]];
             if (target == null) continue;
-            target.deletedObjects.add(
-              EraseTombstone(
-                strokeId: parts[i].id,
-                erasedAt: now,
-                deviceId: dev,
-              ),
-            );
+            _tombstoneFor(target, parts[i]); // rev-based; keeps the tombstone
             target.objects.removeWhere((e) => e.id == parts[i].id);
           }
           if (horizontal) {
@@ -2166,18 +2140,13 @@ class CanvasController extends ChangeNotifier {
             );
           }
           newPage.deletedObjects.removeWhere((t) => t.strokeId == el.id);
+          _bumpAliveOn(newPage, el); // out-rev any tombstone (redo)
           if (!newPage.objects.any((e) => e.id == el.id)) {
             newPage.objects.add(el);
           }
         },
         revert: () {
-          newPage.deletedObjects.add(
-            EraseTombstone(
-              strokeId: el.id,
-              erasedAt: DateTime.now(),
-              deviceId: SettingsService().deviceId,
-            ),
-          );
+          _tombstoneFor(newPage, el); // rev-based; keeps the tombstone
           newPage.objects.removeWhere((e) => e.id == el.id);
           if (horizontal) {
             row.pageIds.remove(newPage.id);
@@ -2223,33 +2192,28 @@ class CanvasController extends ChangeNotifier {
     final parts = _linkedParts();
     if (parts.isEmpty) return;
     clearSelection(notify: false);
+    // Rev-based (like every delete): tombstone each part at its rev; undo
+    // revives the same ids with a bumped rev (never un-tombstones), so the
+    // parts survive an undo-across-sync just like the eraser does.
+    final slotsByPage = <String, List<_ElSlot>>{};
+    for (final (pid, el) in parts) {
+      slotsByPage.putIfAbsent(pid, () => []).add(_ElSlot(el));
+    }
     _doOp(
       _CanvasOp(
         label: 'Delete linked text',
-        dirtyPageIds: parts.map((p) => p.$1).toSet(),
+        dirtyPageIds: slotsByPage.keys.toSet(),
         apply: () {
-          final dev = SettingsService().deviceId;
-          final now = DateTime.now();
-          for (final (pid, el) in parts) {
+          slotsByPage.forEach((pid, slots) {
             final page = pages[pid];
-            if (page == null) continue;
-            if (!page.deletedObjects.any((t) => t.strokeId == el.id)) {
-              page.deletedObjects.add(
-                EraseTombstone(strokeId: el.id, erasedAt: now, deviceId: dev),
-              );
-            }
-            page.objects.removeWhere((e) => e.id == el.id);
-          }
+            if (page != null) _tombstoneSlots(page, slots);
+          });
         },
         revert: () {
-          for (final (pid, el) in parts) {
+          slotsByPage.forEach((pid, slots) {
             final page = pages[pid];
-            if (page == null) continue;
-            page.deletedObjects.removeWhere((t) => t.strokeId == el.id);
-            if (!page.objects.any((e) => e.id == el.id)) {
-              page.objects.add(el);
-            }
-          }
+            if (page != null) _reviveSlots(page, slots);
+          });
         },
       ),
     );
@@ -2344,56 +2308,18 @@ class CanvasController extends ChangeNotifier {
   void removeElement(String pageId, CanvasElement element) {
     final page = pages[pageId];
     if (page == null) return;
-    final dev = SettingsService().deviceId;
-    if (element is StrokeElement) {
-      final index = page.strokes.indexWhere((e) => e.id == element.id);
-      if (index < 0) return;
-      final el = page.strokes[index];
-      _doOp(
-        _CanvasOp(
-          label: 'Remove',
-          dirtyPageIds: {pageId},
-          apply: () {
-            page.erased.add(
-              EraseTombstone(
-                strokeId: el.id,
-                erasedAt: DateTime.now(),
-                deviceId: dev,
-              ),
-            );
-            page.strokes.removeWhere((e) => e.id == el.id);
-          },
-          revert: () {
-            page.erased.removeWhere((e) => e.strokeId == el.id);
-            page.strokes.insert(math.min(index, page.strokes.length), el);
-          },
-        ),
-      );
-    } else {
-      final index = page.objects.indexWhere((e) => e.id == element.id);
-      if (index < 0) return;
-      final el = page.objects[index];
-      _doOp(
-        _CanvasOp(
-          label: 'Remove',
-          dirtyPageIds: {pageId},
-          apply: () {
-            page.deletedObjects.add(
-              EraseTombstone(
-                strokeId: el.id,
-                erasedAt: DateTime.now(),
-                deviceId: dev,
-              ),
-            );
-            page.objects.removeWhere((e) => e.id == el.id);
-          },
-          revert: () {
-            page.deletedObjects.removeWhere((e) => e.strokeId == el.id);
-            page.objects.insert(math.min(index, page.objects.length), el);
-          },
-        ),
-      );
-    }
+    final list = element is StrokeElement ? page.strokes : page.objects;
+    final index = list.indexWhere((e) => e.id == element.id);
+    if (index < 0) return;
+    final slots = [_ElSlot(list[index], index)];
+    _doOp(
+      _CanvasOp(
+        label: 'Remove',
+        dirtyPageIds: {pageId},
+        apply: () => _tombstoneSlots(page, slots),
+        revert: () => _reviveSlots(page, slots),
+      ),
+    );
   }
 
   // ── Page / row structure ───────────────────────────────────────────────

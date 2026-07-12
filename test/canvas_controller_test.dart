@@ -235,24 +235,32 @@ void main() {
       controller = CanvasController(canvas: canvas, pages: {'a': page});
     });
 
-    test('deleteSelection tombstones strokes; undo clears the tombstones', () {
+    int tombRev(CanvasPage p, String id) =>
+        p.erased.where((e) => e.strokeId == id).map((e) => e.rev).fold(0,
+            (m, r) => r > m ? r : m);
+
+    test('deleteSelection tombstones strokes at the element rev; undo revives '
+        'the SAME id with rev bumped ABOVE the tombstone (kept) — rev-based, '
+        'so it survives a merge with a device that pulled the tombstone', () {
       controller.selection = [page.strokes.first];
       controller.selectionPageId = 'a';
       controller.deleteSelection();
 
       expect(page.strokes.map((s) => s.id), ['s2']);
-      expect(page.erased.map((e) => e.strokeId), ['s1'],
-          reason: 'without the tombstone the deleted stroke resurrects on '
-              'the next merge with a stale remote copy');
+      expect(page.erased.map((e) => e.strokeId), ['s1']);
 
       controller.undo();
-      expect(page.strokes.map((s) => s.id), containsAll(['s1', 's2']));
-      expect(page.erased, isEmpty);
+      expect(page.strokes.map((s) => s.id), containsAll(['s1', 's2']),
+          reason: 's1 comes back with the SAME id (undo chain stays intact)');
+      expect(page.erased.map((e) => e.strokeId), ['s1'],
+          reason: 'the tombstone stays (grow-only storage)');
+      final s1 = page.strokes.firstWhere((s) => s.id == 's1');
+      expect(s1.rev, greaterThan(tombRev(page, 's1')),
+          reason: 'the revived stroke out-revs its tombstone → alive on merge');
     });
 
-    test(
-        'the eraser TOOL writes tombstones on the first apply — not only on '
-        'redo (the resurrection bug)', () {
+    test('the eraser TOOL tombstones on the first apply; undo/redo revive the '
+        'same ids with a climbing rev', () {
       controller.setTool(CanvasTool.eraser);
       // Strokes run (0,0)→(10,10); a gesture at (5,5) hits them.
       controller.startToolGesture(const Offset(5, 5), 0.5);
@@ -260,24 +268,80 @@ void main() {
 
       expect(page.strokes, isEmpty, reason: 'both strokes pass under (5,5)');
       expect(page.erased.map((e) => e.strokeId).toSet(), {'s1', 's2'},
-          reason: 'the FIRST commit must write tombstones — the old code '
-              'only wrote them on redo, so a plain erase synced as "stroke '
-              'missing, no tombstone" and the other device restored it');
+          reason: 'the FIRST commit must write tombstones');
 
       controller.undo();
-      expect(page.strokes.length, 2);
-      // Undo revives by NEW identity and leaves the tombstones in place —
-      // the erased set is grow-only in the merge, so removing them locally
-      // couldn't survive a merge with a device that already pulled them
-      // (the stroke would just die again everywhere).
-      expect(page.strokes.map((s) => s.id).toSet().intersection({'s1', 's2'}),
-          isEmpty);
-      expect(page.erased.map((e) => e.strokeId).toSet(), {'s1', 's2'});
+      expect(page.strokes.map((s) => s.id).toSet(), {'s1', 's2'},
+          reason: 'revived under the SAME ids');
+      expect(page.erased.map((e) => e.strokeId).toSet(), {'s1', 's2'},
+          reason: 'tombstones kept');
+      for (final s in page.strokes) {
+        expect(s.rev, greaterThan(tombRev(page, s.id)),
+            reason: 'each revived stroke out-revs its tombstone');
+      }
 
       controller.redo();
       expect(page.strokes, isEmpty);
-      expect(page.erased.length, 4,
-          reason: 'redo tombstones the revived identities too');
+      expect(page.erased.map((e) => e.strokeId).toSet(), {'s1', 's2'},
+          reason: 're-tombstoned at the bumped rev (deduped, not doubled)');
+    });
+
+    test('redo of an INSERT keeps the same id and out-revs its tombstone '
+        '(undo tombstones it; redo never un-tombstones)', () {
+      final fresh = CanvasPage(id: 'p', deviceId: 'test_device');
+      final canvas = Canvas(
+        id: 'c9',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Ins',
+        createdAt: DateTime(2026, 7, 12),
+        rows: [PageRow(id: 'r1', pageIds: ['p'])],
+      );
+      final c2 = CanvasController(canvas: canvas, pages: {'p': fresh});
+
+      c2.addElement('p', _stroke('new1'));
+      expect(fresh.strokes.map((s) => s.id), ['new1']);
+
+      c2.undo();
+      expect(fresh.strokes, isEmpty);
+      expect(fresh.erased.map((e) => e.strokeId), ['new1'],
+          reason: 'undo of an insert tombstones it');
+
+      c2.redo();
+      expect(fresh.strokes.single.id, 'new1', reason: 'SAME id on redo');
+      expect(fresh.erased.map((e) => e.strokeId), ['new1'],
+          reason: 'the tombstone stays — redo never un-tombstones');
+      expect(fresh.strokes.single.rev,
+          greaterThan(tombRev(fresh, 'new1')),
+          reason: 'redo bumps the rev above the tombstone → alive');
+    });
+
+    test('undo CHAIN stays intact across a delete (Issue 2): insert X → '
+        'delete X → undo → undo removes X cleanly, no orphan', () {
+      final fresh = CanvasPage(id: 'p', deviceId: 'test_device');
+      final canvas = Canvas(
+        id: 'c10',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Chain',
+        createdAt: DateTime(2026, 7, 12),
+        rows: [PageRow(id: 'r1', pageIds: ['p'])],
+      );
+      final c2 = CanvasController(canvas: canvas, pages: {'p': fresh});
+
+      c2.addElement('p', _stroke('X')); // op1: write
+      c2.selection = [fresh.strokes.single];
+      c2.selectionPageId = 'p';
+      c2.deleteSelection(); // op2: delete
+      expect(fresh.strokes, isEmpty);
+
+      c2.undo(); // undo delete → X back, SAME id
+      expect(fresh.strokes.map((s) => s.id), ['X']);
+
+      c2.undo(); // undo write → must still find X (same id) and remove it
+      expect(fresh.strokes, isEmpty,
+          reason: 'the original write-undo targets id X — same-id revival '
+              'keeps it findable, so no orphan is left behind');
     });
   });
 
