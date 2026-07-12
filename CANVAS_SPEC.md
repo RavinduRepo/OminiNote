@@ -268,9 +268,11 @@ Handwriting→text recognition; shape-recognition/snapping; rulers/guides; real-
 
 **Implemented 07/11/26 — Markdown paste (option (a)):** `lib/utils/markdown_text.dart` — `looksLikeMarkdown` (strict detector in the plain-text paste branch; strong signals convert alone, weak ones need two kinds, ordinary prose never matches) + `runsFromMarkdown` (headings via the HTML converter's scale map, bold/italic with pragmatic CommonMark flanking rules, inline+fenced code as mono, bullet/numbered/task lists as the app's glyph prefixes — `- [ ]` makes the same tappable ☐ — links as `TextRun.link`, `│ `-prefixed italic blockquotes, hr as a divider line). One-way conversion (Notion model): the result is ordinary rich text.
 
+**Implemented 07/12/26 — Markdown live input rules (option (b)):** Notion-style as-you-type conversion in `RichTextController._maybeApplyInputRules` — `# `/`## `/`### ` (heading typing style, Enter resets to base), `- `/`* `→`• `, `[ ] `/`[x] `/`[] `→`☐ `/`☑ ` (also flips an auto-continued list glyph), `> `→`│ `+italic, `**bold**`/`__bold__`, `*italic*` (single `_` deliberately skipped — snake_case), `` `code` ``→mono. Backspace-right-after restores the raw characters + typing style; rules skip mid-IME composition. One-way conversion, same as paste.
+
 **Still future:**
-- **Markdown live input rules** (option (b), planned next): Notion-style as-you-type conversion (`# `, `- `, `[ ] `, `**bold**`) in `RichTextController`, with undo + backspace-right-after reverts.
 - Richer HTML block layout (real tables, images inside pasted HTML, indent/quote styling) — deliberately out of scope for the inline-styling pass.
+- Ordered-list Enter-continuation (auto "2." after "1.") — the glyphs work, continuation doesn't.
 
 ---
 

@@ -867,8 +867,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // caret/selection actually moved. Applying a style to a collapsed caret
     // preserves the selection, so this branch is skipped and the just-set
     // typing style (`defaults`) survives to the next keystroke — the fix for
-    // "can't change style while typing".
-    if (selectionMoved) {
+    // "can't change style while typing". A Markdown input rule that changed
+    // the typing style (heading/quote) suppresses one adoption the same way,
+    // or the rule's own caret move would clobber it.
+    if (selectionMoved && !rc.consumeSuppressStyleAdopt()) {
       rc.defaults = rc.styleForToolbar().clone();
     }
 

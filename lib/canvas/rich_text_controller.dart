@@ -45,10 +45,15 @@ class RichTextController extends TextEditingController {
     required super.text,
     required List<CharAttr> attrs,
     required this.defaults,
-  }) : _attrs = attrs;
+  })  : _attrs = attrs,
+        _baseDefaults = defaults.clone();
 
   List<CharAttr> _attrs; // length is kept == text.length
   CharAttr defaults; // typing style for newly inserted characters
+
+  /// The element's base style at edit start — what a heading line's typing
+  /// style resets to on Enter.
+  final CharAttr _baseDefaults;
   double displayScale = 1.0;
 
   /// Fired when a style (not text) change should trigger a re-measure.
@@ -73,13 +78,205 @@ class RichTextController extends TextEditingController {
   set value(TextEditingValue newValue) {
     var next = newValue;
     if (next.text != text) {
-      // OneNote-style list continuation: pressing Enter on a list line
-      // carries the prefix onto the new line; Enter on an *empty* list item
-      // removes the prefix (exits the list).
-      next = _maybeContinueList(value, next);
+      final reverted = _maybeRevertRule(value, next);
+      if (reverted != null) {
+        next = reverted;
+      } else {
+        // OneNote-style list continuation: pressing Enter on a list line
+        // carries the prefix onto the new line; Enter on an *empty* list item
+        // removes the prefix (exits the list).
+        next = _maybeContinueList(value, next);
+        // Notion-style Markdown input rules: `# `, `- `, `[ ] `, `**bold**`…
+        next = _maybeApplyInputRules(value, next);
+      }
       _attrs = _reconcile(text, _attrs, next.text);
+      for (final (a, b, mutate) in _pendingRuleStyles) {
+        for (var i = a; i < b && i < _attrs.length; i++) {
+          mutate(_attrs[i]);
+        }
+      }
+      _pendingRuleStyles.clear();
     }
     super.value = next;
+  }
+
+  // ── Markdown input rules (Notion model: one-way, as-you-type) ────────────
+
+  /// Style ranges (new-text coordinates) staged by a rule, applied right
+  /// after [_reconcile] aligns the attr array to the transformed text.
+  final List<(int, int, void Function(CharAttr))> _pendingRuleStyles = [];
+
+  /// The escape hatch: pressing backspace immediately after a rule fired
+  /// restores the raw characters (and the rule won't re-fire — it only
+  /// triggers on the completing keystroke). `(pre-rule value, post-rule
+  /// text)`; any other edit clears it.
+  (TextEditingValue, String)? _lastRule;
+
+  /// Set when a rule changed the typing style (heading/quote): the editor's
+  /// caret-move style-adoption must skip one notification or it would clobber
+  /// the style the rule just set (same mechanism as the style-while-typing
+  /// fix). Consumed by the edit session via [consumeSuppressStyleAdopt].
+  bool _suppressStyleAdopt = false;
+  bool consumeSuppressStyleAdopt() {
+    final v = _suppressStyleAdopt;
+    _suppressStyleAdopt = false;
+    return v;
+  }
+
+  TextEditingValue? _maybeRevertRule(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final last = _lastRule;
+    _lastRule = null;
+    if (last == null) return null;
+    // A single-character deletion as the very next edit after a rule.
+    if (oldValue.text != last.$2 ||
+        newValue.text.length != oldValue.text.length - 1) {
+      return null;
+    }
+    // A heading/quote rule changed the typing style — undo that too.
+    defaults = _baseDefaults.clone();
+    _suppressStyleAdopt = true;
+    return last.$1;
+  }
+
+  TextEditingValue _maybeApplyInputRules(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final oldText = oldValue.text, newText = newValue.text;
+    // Insertions only, at the caret, not mid-IME-composition (transforming
+    // composing text breaks autocorrect/swipe input).
+    if (newText.length <= oldText.length) return newValue;
+    if (newValue.composing.isValid) return newValue;
+    final caret = newValue.selection.baseOffset;
+    final inserted = newText.length - oldText.length;
+    if (!newValue.selection.isCollapsed || caret < inserted) return newValue;
+    if (newText.substring(0, caret - inserted) !=
+            oldText.substring(0, caret - inserted) ||
+        newText.substring(caret) != oldText.substring(caret - inserted)) {
+      return newValue;
+    }
+    final lastChar = newText[caret - 1];
+
+    // Enter leaves a heading: the next line types at the base size again.
+    if (lastChar == '\n') {
+      if (defaults.fontSize != _baseDefaults.fontSize) {
+        defaults = _baseDefaults.clone();
+        _suppressStyleAdopt = true;
+      }
+      return newValue;
+    }
+
+    TextEditingValue fire(TextEditingValue out) {
+      // Revert restores the raw pre-transform text ("- ", "# ", "**bold**")
+      // with the caret where it was — as if the rule never fired.
+      _lastRule = (
+        TextEditingValue(
+          text: newText,
+          selection: TextSelection.collapsed(offset: caret),
+        ),
+        out.text,
+      );
+      return out;
+    }
+
+    if (lastChar == ' ') {
+      final lineStart = newText.lastIndexOf('\n', caret - 2) + 1;
+      final head = newText.substring(lineStart, caret);
+
+      final heading = RegExp(r'^(#{1,3}) $').firstMatch(head);
+      if (heading != null) {
+        final scale = const [2.0, 1.5, 1.17][heading.group(1)!.length - 1];
+        final size = _baseDefaults.fontSize * scale;
+        defaults = _baseDefaults.clone()
+          ..fontSize = size
+          ..bold = true;
+        _suppressStyleAdopt = true;
+        final lineEndRaw = newText.indexOf('\n', caret);
+        final lineEnd = lineEndRaw < 0 ? newText.length : lineEndRaw;
+        if (lineEnd > caret) {
+          // "# " typed before existing text: the whole line becomes heading.
+          _pendingRuleStyles.add((
+            lineStart,
+            lineEnd - head.length,
+            (a) => a
+              ..fontSize = size
+              ..bold = true,
+          ));
+        }
+        return fire(TextEditingValue(
+          text: newText.substring(0, lineStart) + newText.substring(caret),
+          selection: TextSelection.collapsed(offset: lineStart),
+        ));
+      }
+
+      String? replacement;
+      // An existing list glyph before the marker is swallowed too — "[x] "
+      // typed on an auto-continued "☐ " line flips it rather than nesting.
+      final task = RegExp(r'^(?:[•★☐☑] )?\[( |x|X)?\] $').firstMatch(head);
+      if (task != null) {
+        replacement = (task.group(1) == 'x' || task.group(1) == 'X')
+            ? checkedPrefix
+            : uncheckedPrefix;
+      } else if (RegExp(r'^[-*] $').hasMatch(head)) {
+        replacement = bulletPrefix;
+      } else if (head == '> ') {
+        replacement = '│ ';
+        defaults = defaults.clone()..italic = true;
+        _suppressStyleAdopt = true;
+      }
+      if (replacement != null) {
+        return fire(TextEditingValue(
+          text: newText.substring(0, lineStart) +
+              replacement +
+              newText.substring(caret),
+          selection:
+              TextSelection.collapsed(offset: lineStart + replacement.length),
+        ));
+      }
+      return newValue;
+    }
+
+    // Inline pair completions: the closing marker was just typed.
+    (int, int, String, void Function(CharAttr))? hit;
+    final before = newText.substring(0, caret);
+    if (lastChar == '*' || lastChar == '_') {
+      final marker = lastChar == '*' ? r'\*' : '_';
+      final boldRe = RegExp(
+          '$marker$marker([^\\s*_](?:[^*_\\n]*[^\\s*_])?)$marker$marker\$');
+      final m = boldRe.firstMatch(before);
+      if (m != null) {
+        hit = (m.start, caret, m.group(1)!, (a) => a.bold = true);
+      } else if (lastChar == '*') {
+        // Single-underscore italics are skipped on purpose: snake_case.
+        final itRe =
+            RegExp(r'(?<!\*)\*([^\s*](?:[^*\n]*[^\s*])?)\*$');
+        final it = itRe.firstMatch(before);
+        if (it != null) {
+          hit = (it.start, caret, it.group(1)!, (a) => a.italic = true);
+        }
+      }
+    } else if (lastChar == '`') {
+      final m = RegExp(r'`([^`\n]+)`$').firstMatch(before);
+      if (m != null) {
+        hit = (m.start, caret, m.group(1)!, (a) => a.family = 'mono');
+      }
+    }
+    if (hit != null) {
+      final (start, end, content, mutate) = hit;
+      _pendingRuleStyles.add((start, start + content.length, mutate));
+      // The caret now sits right after the styled content — suppress one
+      // style adoption or typing would continue bold/italic/mono (Notion
+      // exits the style after the closing marker).
+      _suppressStyleAdopt = true;
+      return fire(TextEditingValue(
+        text: newText.substring(0, start) + content + newText.substring(end),
+        selection: TextSelection.collapsed(offset: start + content.length),
+      ));
+    }
+    return newValue;
   }
 
   TextEditingValue _maybeContinueList(
