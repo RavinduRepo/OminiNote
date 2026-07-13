@@ -46,9 +46,22 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   final Map<String, Map<String, Section>> _sectionMaps = {};
 
   final Set<String> _expanded = {};
+  // Notebooks whose section tree has been built at least once this session.
+  // A collapsed-but-opened notebook keeps its tree so re-expand/collapse still
+  // animate with content, but a notebook the user never opened doesn't build
+  // its whole section subtree at all — so a sidebar rebuild (which happens on
+  // every setState, e.g. selecting a canvas) scales with *opened* notebooks,
+  // not total sections across every notebook. (Perf 07/14/26.)
+  final Set<String> _everExpanded = {};
   Section? _selectedSection;
   Map<String, Canvas> _selectedCanvases = {};
   Canvas? _selectedCanvas;
+
+  // Per-section canvas-map cache, keyed by section id, so re-selecting a
+  // visited section is instant (no disk re-read). Cleared whenever data
+  // changes (dataVersion) and refreshed after local canvas edits, so it can't
+  // serve a stale list across a sync or a local mutation. (Perf 07/14/26.)
+  final Map<String, Map<String, Canvas>> _canvasCache = {};
 
   // What the main (rightmost) pane shows. Search + Bin open here — keeping the
   // sidebar + canvas list visible — instead of covering everything.
@@ -100,7 +113,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Future<void> _revealSearchResult(SearchResult r) async {
     final nb = _notebooks?.where((n) => n.id == r.notebook.id).firstOrNull;
     if (nb == null) return;
-    setState(() => _expanded.add(nb.id));
+    setState(() {
+      _expanded.add(nb.id);
+      _everExpanded.add(nb.id);
+    });
 
     // A notebook hit: expand it and glow the notebook row.
     if (r.kind == SearchKind.notebook) {
@@ -218,13 +234,20 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   void _onSyncData() {
-    if (mounted) _loadAll();
+    if (mounted) {
+      // Data changed (sync pull, delete, rename, …) — cached canvas maps may
+      // now be stale, so drop them; the next section select re-reads.
+      _canvasCache.clear();
+      _loadAll();
+    }
   }
 
   Future<void> _loadAll() async {
     final notebooks = await _service.getNotebooks();
     for (final nb in notebooks) {
-      _sectionMaps[nb.id] = await _service.getSectionMap(nb.id);
+      // Pass the already-loaded notebook so getSectionMap doesn't re-decode
+      // the whole notebooks.json for every notebook in the loop.
+      _sectionMaps[nb.id] = await _service.getSectionMap(nb.id, notebook: nb);
     }
     if (!mounted) return;
     // If the open canvas's notebook was moved/deleted elsewhere (its entry is
@@ -243,8 +266,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   Future<void> _reloadNotebook(String notebookId) async {
     final nb = await _service.getNotebook(notebookId);
-    final map = await _service.getSectionMap(notebookId);
-    if (!mounted || nb == null) return;
+    if (nb == null) return;
+    final map = await _service.getSectionMap(notebookId, notebook: nb);
+    if (!mounted) return;
     setState(() {
       final list = _notebooks;
       if (list != null) {
@@ -261,8 +285,20 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   Future<void> _selectSection(Section section) async {
+    // Cache hit → switch instantly, no disk read. The cache is dropped on any
+    // data change (dataVersion) and refreshed on local edits, so it's fresh.
+    final cached = _canvasCache[section.id];
+    if (cached != null) {
+      setState(() {
+        _selectedSection = section;
+        _selectedCanvases = cached;
+        _selectedCanvas = null;
+      });
+      return;
+    }
     final canvases = await _service.getCanvasMap(section);
     if (!mounted) return;
+    _canvasCache[section.id] = canvases;
     setState(() {
       _selectedSection = section;
       _selectedCanvases = canvases;
@@ -278,6 +314,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         ? <String, Canvas>{}
         : await _service.getCanvasMap(fresh);
     if (!mounted) return;
+    // Just re-read from disk — refresh the cache so a later re-select stays
+    // both fast and correct.
+    if (fresh != null) _canvasCache[fresh.id] = canvases;
     setState(() {
       _selectedSection = fresh;
       _selectedCanvases = canvases;
@@ -303,6 +342,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     setState(() {
       (_notebooks ??= []).add(notebook);
       _expanded.add(notebook.id);
+      _everExpanded.add(notebook.id);
       _sidebarCollapsed = false;
     });
   }
@@ -311,7 +351,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final nb = await importNotebookCopy(context);
     if (nb == null || !mounted) return;
     await _loadAll();
-    if (mounted) setState(() => _expanded.add(nb.id));
+    if (mounted) {
+      setState(() {
+        _expanded.add(nb.id);
+        _everExpanded.add(nb.id);
+      });
+    }
   }
 
   Future<void> _exportNotebookPdf(Notebook notebook) async {
@@ -616,6 +661,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         dst.sectionId,
       );
     }
+    // The destination section (which may not be the selected one) gained a
+    // canvas — drop its cached map so a later select re-reads it.
+    _canvasCache.remove(dst.sectionId);
     await _reloadSelectedSection();
     await _reloadNotebook(dst.notebookId);
   }
@@ -1256,9 +1304,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                   InkWell(
                 borderRadius: BorderRadius.circular(kRadius),
                 onTap: () => setState(() {
-                  expanded
-                      ? _expanded.remove(notebook.id)
-                      : _expanded.add(notebook.id);
+                  if (expanded) {
+                    _expanded.remove(notebook.id);
+                  } else {
+                    _expanded.add(notebook.id);
+                    _everExpanded.add(notebook.id);
+                  }
                 }),
                 child: SizedBox(
                   height: 44,
@@ -1364,7 +1415,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           secondChild: const SizedBox(width: double.infinity),
           // Sections hang off their notebook: indented under a rail in the
           // notebook's color so the parent/child relationship is visible.
-          firstChild: Padding(
+          // Build the tree only for notebooks that have been opened —
+          // AnimatedCrossFade constructs firstChild regardless of collapse
+          // state, so an ungated firstChild would build EVERY notebook's whole
+          // section subtree on every sidebar rebuild (e.g. each canvas click).
+          // `expanded ||` guarantees it's present whenever the animation needs
+          // it. (Perf 07/14/26.)
+          firstChild: (expanded || _everExpanded.contains(notebook.id))
+              ? Padding(
             padding: const EdgeInsets.only(left: 15, right: 4, bottom: 4),
             child: Container(
               decoration: BoxDecoration(
@@ -1408,7 +1466,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     _crossDropSection(notebook, dragged, srcId, folder),
               ),
             ),
-          ),
+          )
+              : const SizedBox(width: double.infinity),
         ),
                 ],
               ),

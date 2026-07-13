@@ -424,13 +424,52 @@ class NotebookService {
     }
   }
 
-  Future<Map<String, Section>> getSectionMap(String notebookId) async {
-    final nb = await getNotebook(notebookId);
+  /// Max concurrent child-file reads while building a container map. Mirrors
+  /// `SearchService._mapBounded` (kept a self-contained twin here so this
+  /// service depends on nothing above it). 8 in flight loads a big container's
+  /// files in parallel without flooding the OS with file handles.
+  static const int _kMapReadConcurrency = 8;
+
+  /// Runs [task] over [items] with at most [_kMapReadConcurrency] in flight,
+  /// returning results in input order. `i = next++` is safe: Dart is
+  /// single-threaded, so workers only interleave at `await` points.
+  static Future<List<R>> _mapBounded<T, R>(
+    List<T> items,
+    Future<R> Function(T) task,
+  ) async {
+    final results = List<R?>.filled(items.length, null);
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final i = next++;
+        if (i >= items.length) break;
+        results[i] = await task(items[i]);
+      }
+    }
+
+    final n =
+        items.length < _kMapReadConcurrency ? items.length : _kMapReadConcurrency;
+    await Future.wait([for (var k = 0; k < n; k++) worker()]);
+    return results.cast<R>();
+  }
+
+  /// A notebook's `id -> Section` lookup. Pass [notebook] when the caller
+  /// already holds it (e.g. the desktop shell iterating loaded notebooks) so
+  /// this doesn't re-decode the whole `notebooks.json` again. Section files are
+  /// read bounded-concurrently ([_mapBounded]) instead of one-at-a-time — the
+  /// result is a lookup map, so read-completion order doesn't matter.
+  Future<Map<String, Section>> getSectionMap(
+    String notebookId, {
+    Notebook? notebook,
+  }) async {
+    final nb = notebook ?? await getNotebook(notebookId);
     if (nb == null) return {};
+    final ids = nb.allSectionIds;
+    final sections = await _mapBounded(ids, (id) => getSection(notebookId, id));
     final out = <String, Section>{};
-    for (final id in nb.allSectionIds) {
-      final s = await getSection(notebookId, id);
-      if (s != null) out[id] = s;
+    for (var i = 0; i < ids.length; i++) {
+      final s = sections[i];
+      if (s != null) out[ids[i]] = s;
     }
     return out;
   }
@@ -560,11 +599,19 @@ class NotebookService {
     }
   }
 
+  /// A section's `id -> Canvas` lookup. Canvas files are read
+  /// bounded-concurrently ([_mapBounded]) so opening a section with many
+  /// canvases isn't a serial chain of disk round-trips.
   Future<Map<String, Canvas>> getCanvasMap(Section section) async {
+    final ids = section.allCanvasIds;
+    final canvases = await _mapBounded(
+      ids,
+      (id) => getCanvas(section.notebookId, section.id, id),
+    );
     final out = <String, Canvas>{};
-    for (final id in section.allCanvasIds) {
-      final c = await getCanvas(section.notebookId, section.id, id);
-      if (c != null) out[id] = c;
+    for (var i = 0; i < ids.length; i++) {
+      final c = canvases[i];
+      if (c != null) out[ids[i]] = c;
     }
     return out;
   }
