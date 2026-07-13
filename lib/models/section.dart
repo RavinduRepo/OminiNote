@@ -23,6 +23,9 @@ class Section {
   int? color; // ARGB; null → deterministic identity color
   final List<TreeNode> nodes; // leaves = canvas ids
 
+  /// Super-sections removed to the recycle bin (restorable/purgeable).
+  final List<DeletedFolder> deletedFolders;
+
   Section({
     this.schemaVersion = 1,
     required this.id,
@@ -36,8 +39,10 @@ class Section {
     required this.createdAt,
     this.color,
     List<TreeNode>? nodes,
+    List<DeletedFolder>? deletedFolders,
   })  : updatedAt = updatedAt ?? DateTime.now(),
-        nodes = nodes ?? [];
+        nodes = nodes ?? [],
+        deletedFolders = deletedFolders ?? [];
 
   /// Every canvas id in this section, depth-first.
   List<String> get allCanvasIds => TreeOps.allLeafIds(nodes);
@@ -63,6 +68,8 @@ class Section {
         'createdAt': createdAt.toIso8601String(),
         'color': color,
         'nodes': nodes.map((n) => n.toJson()).toList(),
+        if (deletedFolders.isNotEmpty)
+          'deletedFolders': deletedFolders.map((f) => f.toJson()).toList(),
       };
 
   factory Section.fromJson(Map<String, dynamic> json) => Section(
@@ -84,5 +91,10 @@ class Section {
         createdAt: DateTime.tryParse(json['createdAt'] ?? '') ?? DateTime.now(),
         color: (json['color'] as num?)?.toInt(),
         nodes: TreeOps.parse(json['nodes']),
+        deletedFolders: [
+          for (final f
+              in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? []))
+            DeletedFolder.fromJson(f),
+        ],
       );
 }

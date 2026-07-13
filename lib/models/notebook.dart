@@ -29,6 +29,10 @@ class Notebook {
 
   final List<TreeNode> nodes; // leaves = section ids
 
+  /// Super-sections removed to the recycle bin (restorable/purgeable). Their
+  /// contained sections' files stay on disk (hidden) until restore or purge.
+  final List<DeletedFolder> deletedFolders;
+
   Notebook({
     this.schemaVersion = 1,
     required this.id,
@@ -42,8 +46,10 @@ class Notebook {
     this.color,
     this.syncTarget,
     List<TreeNode>? nodes,
+    List<DeletedFolder>? deletedFolders,
   })  : updatedAt = updatedAt ?? DateTime.now(),
-        nodes = nodes ?? [];
+        nodes = nodes ?? [],
+        deletedFolders = deletedFolders ?? [];
 
   /// Every section id in this notebook, depth-first.
   List<String> get allSectionIds => TreeOps.allLeafIds(nodes);
@@ -69,6 +75,8 @@ class Notebook {
         'color': color,
         'syncTarget': syncTarget,
         'nodes': nodes.map((n) => n.toJson()).toList(),
+        if (deletedFolders.isNotEmpty)
+          'deletedFolders': deletedFolders.map((f) => f.toJson()).toList(),
         // Derived flat list, kept for any back-compat reader.
         'sectionIds': allSectionIds,
       };
@@ -95,5 +103,10 @@ class Notebook {
           json['nodes'],
           legacyIds: List<String>.from(json['sectionIds'] ?? []),
         ),
+        deletedFolders: [
+          for (final f
+              in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? []))
+            DeletedFolder.fromJson(f),
+        ],
       );
 }

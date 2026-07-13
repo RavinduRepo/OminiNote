@@ -18,7 +18,12 @@ import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
 import 'canvas_screen.dart';
 import 'note_search.dart';
+import '../widgets/action_sheet.dart';
+import 'bin_screen.dart';
 import 'settings_screen.dart';
+
+/// What the desktop shell's main (rightmost) pane is showing.
+enum _MainMode { canvas, search, bin, settings }
 
 /// OneNote-desktop-style three-pane view. Sidebar: notebooks (reorderable) →
 /// each expands to its **section** tree (drag/reorder/color/group,
@@ -45,6 +50,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Map<String, Canvas> _selectedCanvases = {};
   Canvas? _selectedCanvas;
 
+  // What the main (rightmost) pane shows. Search + Bin open here — keeping the
+  // sidebar + canvas list visible — instead of covering everything.
+  _MainMode _mainMode = _MainMode.canvas;
+  final ValueNotifier<int> _binRefresh = ValueNotifier(0);
+
+  // Notebook animating out on delete (collapse + fade).
+  String? _removingNotebookId;
+
   // Search-reveal state: page to jump to when opening a bookmarked canvas, and
   // the id of the item to briefly glow (so you can see where search took you).
   String? _pendingJumpPageId;
@@ -57,7 +70,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   static const double _minSidebarWidth = 220;
   static const double _maxSidebarWidth = 460;
-  static const double _collapsedWidth = 56;
+  // Collapsed = fully hidden (0 width). The left icon nav rail already serves
+  // the "narrow rail" purpose, so there's no leftover notebook-initials column.
+  static const double _collapsedWidth = 0;
   static const double _minCanvasListWidth = 170;
   static const double _maxCanvasListWidth = 380;
 
@@ -72,6 +87,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   void dispose() {
     SyncService().dataVersion.removeListener(_onSyncData);
     _glowTimer?.cancel();
+    _binRefresh.dispose();
     super.dispose();
   }
 
@@ -350,10 +366,15 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       _selectedCanvas = null;
     }
     _expanded.remove(notebook.id);
+    setState(() => _removingNotebookId = notebook.id); // collapse + fade out
+    await Future.delayed(const Duration(milliseconds: 260));
     await _service.deleteNotebook(notebook.id);
     _sectionMaps.remove(notebook.id);
     if (!mounted) return;
-    setState(() => _notebooks?.removeWhere((n) => n.id == notebook.id));
+    setState(() {
+      _notebooks?.removeWhere((n) => n.id == notebook.id);
+      _removingNotebookId = null;
+    });
   }
 
   Future<void> _reorderNotebooks(int oldIndex, int newIndex) async {
@@ -438,15 +459,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (mounted) setState(() {});
   }
 
+  // No confirm — recoverable from the recycle bin like any other delete.
   Future<void> _deleteSectionFolder(Notebook nb, FolderNode folder) async {
-    final count = folder.collectLeafIds().length;
-    final ok = await _confirm(
-      'Delete super-section?',
-      count == 0
-          ? '"${folder.name}" will be deleted.'
-          : '"${folder.name}" and its $count section(s) will be permanently deleted.',
-    );
-    if (!ok) return;
     if (_selectedSection != null &&
         folder.collectLeafIds().contains(_selectedSection!.id)) {
       _selectedSection = null;
@@ -569,17 +583,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (mounted) setState(() {});
   }
 
+  // No confirm — recoverable from the recycle bin like any other delete.
   Future<void> _deleteCanvasFolder(FolderNode folder) async {
     final section = _selectedSection;
     if (section == null) return;
-    final count = folder.collectLeafIds().length;
-    final ok = await _confirm(
-      'Delete super-section?',
-      count == 0
-          ? '"${folder.name}" will be deleted.'
-          : '"${folder.name}" and its $count canvas(es) will be permanently deleted.',
-    );
-    if (!ok) return;
     await _service.deleteCanvasFolder(section, folder.id);
     await _reloadSelectedSection();
   }
@@ -684,28 +691,33 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
-            openNoteSearch(context, onReveal: _revealSearchResult),
+            _openMainMode(_MainMode.search),
         const SingleActivator(LogicalKeyboardKey.keyK, meta: true): () =>
-            openNoteSearch(context, onReveal: _revealSearchResult),
+            _openMainMode(_MainMode.search),
       },
       child: Focus(
         autofocus: true,
         child: Scaffold(
       body: LayoutBuilder(
         builder: (context, constraints) {
+          // The left icon nav rail is a fixed strip; the pane width math works
+          // off the space that remains beside it.
+          const railWidth = 60.0;
+          final avail = constraints.maxWidth.isFinite
+              ? (constraints.maxWidth - railWidth).clamp(0.0, double.infinity)
+              : constraints.maxWidth;
           final desired = _sidebarCollapsed ? _collapsedWidth : _sidebarWidth;
-          final width = constraints.maxWidth.isFinite
-              ? desired.clamp(0.0, constraints.maxWidth)
-              : desired;
+          final width = avail.isFinite ? desired.clamp(0.0, avail) : desired;
           // Space left for the canvas-list column (guards the transient
           // zero-width startup frame, same as the sidebar clamp).
-          final remaining = constraints.maxWidth.isFinite
-              ? (constraints.maxWidth - width).clamp(0.0, double.infinity)
+          final remaining = avail.isFinite
+              ? (avail - width).clamp(0.0, double.infinity)
               : double.infinity;
           final canvasColumnOpen =
               !_sidebarCollapsed && _selectedSection != null;
           return Row(
             children: [
+              _buildNavRail(context, theme, palette),
               _buildSidebar(theme, palette, width),
               if (!_sidebarCollapsed)
                 _resizeDivider(
@@ -738,7 +750,132 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     );
   }
 
+  /// The left icon nav rail (redesign): logo, primary destinations, then
+  /// Settings + an account avatar pinned to the bottom. Wired to the existing
+  /// behavior — Notebooks is the always-present pane, Search opens the overlay,
+  /// Bin/Settings push their screens.
+  Widget _buildNavRail(
+      BuildContext context, ThemeData theme, AppPalette palette) {
+    return Container(
+      width: 60,
+      decoration: BoxDecoration(
+        color: palette.canvas,
+        border: Border(right: BorderSide(color: palette.border)),
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 22),
+          Container(
+            width: 34,
+            height: 34,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: palette.accent,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              'O',
+              style: TextStyle(
+                color: theme.colorScheme.onPrimary,
+                fontWeight: FontWeight.w700,
+                fontSize: 16,
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          // Notebooks: return to the canvas view (re-expanding the panes) if a
+          // full-pane mode is open, else toggle the left panes collapsed.
+          _railButton(palette, Icons.book_outlined, 'Notebooks',
+              active: _mainMode == _MainMode.canvas && !_sidebarCollapsed,
+              onTap: () => setState(() {
+                    if (_mainMode != _MainMode.canvas) {
+                      _mainMode = _MainMode.canvas;
+                      _sidebarCollapsed = false;
+                    } else {
+                      _sidebarCollapsed = !_sidebarCollapsed;
+                    }
+                  })),
+          // Search / Bin / Settings take over the main area — the notebooks +
+          // canvas-list columns collapse, leaving just this nav rail.
+          _railButton(palette, Icons.search, 'Search (Ctrl/Cmd+K)',
+              active: _mainMode == _MainMode.search,
+              onTap: () => _openMainMode(_MainMode.search)),
+          _railButton(palette, Icons.delete_outline, 'Recycle bin',
+              active: _mainMode == _MainMode.bin,
+              onTap: () {
+                _binRefresh.value++;
+                _openMainMode(_MainMode.bin);
+              }),
+          const Spacer(),
+          // Settings also opens as a full pane (no account avatar — multiple
+          // accounts are managed inside Settings, so one avatar would mislead).
+          _railButton(palette, Icons.settings_outlined, 'Settings',
+              active: _mainMode == _MainMode.settings,
+              onTap: () => _openMainMode(_MainMode.settings)),
+          const SizedBox(height: 18),
+        ],
+      ),
+    );
+  }
+
+  Widget _railButton(
+    AppPalette palette,
+    IconData icon,
+    String tooltip, {
+    bool active = false,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Tooltip(
+        message: tooltip,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(11),
+          child: Container(
+            width: 44,
+            height: 44,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active ? palette.accentSoft : Colors.transparent,
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon,
+                size: 20, color: active ? palette.accent : palette.textDim),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Open a full-pane mode (Search/Bin/Settings): the notebooks + canvas-list
+  /// columns collapse, leaving the nav rail + the mode filling the main area.
+  void _openMainMode(_MainMode mode) => setState(() {
+        _mainMode = mode;
+        _sidebarCollapsed = true;
+      });
+
   Widget _buildMainPane(ThemeData theme, AppPalette palette) {
+    // Search / Bin / Settings take over the main area (panes collapsed).
+    switch (_mainMode) {
+      case _MainMode.search:
+        return NoteSearchView(
+          autofocus: true, // start typing as soon as Search opens
+          onReveal: (r) {
+            setState(() {
+              _mainMode = _MainMode.canvas;
+              _sidebarCollapsed = false; // re-expand to show where we landed
+            });
+            _revealSearchResult(r);
+          },
+        );
+      case _MainMode.bin:
+        return BinScreen(refreshSignal: _binRefresh);
+      case _MainMode.settings:
+        return const SettingsScreen();
+      case _MainMode.canvas:
+        break;
+    }
     final canvas = _selectedCanvas;
     if (canvas != null) {
       // The canvas list stays visible in its own column (OneNote-style), so
@@ -749,6 +886,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         embedded: true,
         onCanvasRenamed: _reloadSelectedSection,
         initialPageId: _pendingJumpPageId,
+        // Desktop full screen: the canvas hides its own app bar/toolbar (its
+        // internal full-screen) AND the shell collapses the side panes so the
+        // canvas fills the window. This callback syncs the collapse.
+        onFullScreenChanged: (fs) => setState(() => _sidebarCollapsed = fs),
       );
     }
     if (_selectedSection != null) {
@@ -802,8 +943,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final open = !_sidebarCollapsed && section != null;
     final target = open ? _canvasListWidth : 0.0;
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeInOutCubic,
       width: target.clamp(0.0, maxWidth),
       // No right border — the resize divider beside it is the separator when
       // open; when closed the column is 0-width so nothing shows.
@@ -815,9 +956,29 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           maxWidth: _canvasListWidth,
           child: SizedBox(
             width: _canvasListWidth,
-            child: section == null
-                ? const SizedBox.shrink()
-                : _buildCanvasListContent(theme, palette, section),
+            // Switching sections retracts the old canvas list and expands the
+            // new one (fade + slide keyed by section id).
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 280),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, anim) => FadeTransition(
+                opacity: anim,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0.06, 0),
+                    end: Offset.zero,
+                  ).animate(anim),
+                  child: child,
+                ),
+              ),
+              child: KeyedSubtree(
+                key: ValueKey(section?.id ?? '_none'),
+                child: section == null
+                    ? const SizedBox.shrink()
+                    : _buildCanvasListContent(theme, palette, section),
+              ),
+            ),
           ),
         ),
       ),
@@ -863,12 +1024,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                   if (a == 'canvas') _addCanvas();
                   if (a == 'group') _addCanvasFolder();
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'canvas', child: Text('New canvas')),
-                  PopupMenuItem(
-                    value: 'group',
-                    child: Text('New super-section'),
-                  ),
+                itemBuilder: (context) => [
+                  iconMenuItem('canvas', Icons.note_add_outlined, 'New canvas'),
+                  iconMenuItem('group', Icons.create_new_folder_outlined,
+                      'New super-section'),
                 ],
               ),
             ],
@@ -913,6 +1072,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     glowId: _glowId,
                     onOpen: (c) => setState(() {
                       _selectedCanvas = c;
+                      _mainMode = _MainMode.canvas; // leave Search/Bin
                       _pendingJumpPageId = null; // manual open: don't re-jump
                     }),
                     onRenameLeaf: _renameCanvas,
@@ -938,29 +1098,27 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   Widget _buildSidebar(ThemeData theme, AppPalette palette, double width) {
-    final targetWidth = _sidebarCollapsed ? _collapsedWidth : _sidebarWidth;
+    // The content is always laid out at the full sidebar width inside the
+    // clip, and only the outer AnimatedContainer width animates 0 ↔ full — so
+    // collapse/expand slides smoothly without reflowing the tree mid-transition.
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 220),
-      curve: Curves.easeOutCubic,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeInOutCubic,
       width: width,
       color: theme.colorScheme.surface,
       child: ClipRect(
         child: OverflowBox(
           alignment: Alignment.topLeft,
-          minWidth: targetWidth,
-          maxWidth: targetWidth,
+          minWidth: _sidebarWidth,
+          maxWidth: _sidebarWidth,
           child: SizedBox(
-            width: targetWidth,
+            width: _sidebarWidth,
             child: Column(
               children: [
                 const SizedBox(height: 20),
                 _buildHeader(context, palette),
                 Divider(height: 1, color: palette.border),
-                Expanded(
-                  child: _sidebarCollapsed
-                      ? _buildCollapsedRail(palette)
-                      : _buildTree(palette),
-                ),
+                Expanded(child: _buildTree(palette)),
               ],
             ),
           ),
@@ -969,49 +1127,23 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     );
   }
 
-  Widget _buildSidebarToggle(AppPalette palette) {
-    return Tooltip(
-      message: _sidebarCollapsed ? 'Expand panels' : 'Collapse panels',
-      child: InkWell(
-        borderRadius: BorderRadius.circular(kRadius),
-        onTap: () => setState(() => _sidebarCollapsed = !_sidebarCollapsed),
-        child: Padding(
-          padding: const EdgeInsets.all(4),
-          child: Icon(
-            Icons.auto_stories_outlined,
-            color: palette.accent,
-            size: 20,
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildHeader(BuildContext context, AppPalette palette) {
-    if (_sidebarCollapsed) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Center(child: _buildSidebarToggle(palette)),
-      );
-    }
+    // Title matches the mobile Notebooks screen; no collapse-toggle icon (the
+    // nav rail's Notebooks button collapses/expands the panes now).
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 14, 8, 14),
+      padding: const EdgeInsets.fromLTRB(14, 14, 8, 14),
       child: Row(
         children: [
-          _buildSidebarToggle(palette),
-          const SizedBox(width: 6),
           const Expanded(
             child: Text(
-              'Omininote',
+              'Notebooks',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.search, size: 20),
-            tooltip: 'Search (Ctrl/Cmd+K)',
-            onPressed: () => openNoteSearch(context, onReveal: _revealSearchResult),
-          ),
+          // Search and Settings moved to the nav rail; the header keeps the
+          // sync status + Add, in the same order as the mobile Notebooks bar.
+          const SyncStatusIcon(),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add, size: 20),
             tooltip: 'Add',
@@ -1019,64 +1151,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               if (v == 'new') _createNotebook();
               if (v == 'import') _importNotebook();
             },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'new', child: Text('New notebook')),
-              PopupMenuItem(value: 'import', child: Text('Import notebook…')),
+            itemBuilder: (context) => [
+              iconMenuItem('new', Icons.note_add_outlined, 'New notebook'),
+              iconMenuItem('import', Icons.file_download_outlined,
+                  'Import notebook…'),
             ],
-          ),
-          const SyncStatusIcon(),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined, size: 20),
-            tooltip: 'Settings',
-            onPressed: () => Navigator.push(
-              context,
-              fadeThroughRoute(const SettingsScreen()),
-            ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildCollapsedRail(AppPalette palette) {
-    final notebooks = _notebooks ?? const <Notebook>[];
-    return ListView(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        for (final notebook in notebooks)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 10),
-            child: Tooltip(
-              message: notebook.name,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(18),
-                onTap: () => setState(() {
-                  _sidebarCollapsed = false;
-                  _expanded.add(notebook.id);
-                }),
-                child: Container(
-                  width: 36,
-                  height: 36,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: AppPalette.resolveColor(notebook.id, notebook.color),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Text(
-                    notebook.name.isNotEmpty
-                        ? notebook.name[0].toUpperCase()
-                        : '?',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-      ],
     );
   }
 
@@ -1134,11 +1216,21 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final color = AppPalette.resolveColor(notebook.id, notebook.color);
     final sectionMap = _sectionMaps[notebook.id] ?? const {};
     final glow = _glowId != null && _glowId == notebook.id;
+    final removing = _removingNotebookId == notebook.id;
 
-    return Column(
+    return AnimatedSize(
       key: ValueKey('nb_${notebook.id}'),
-      mainAxisSize: MainAxisSize.min,
-      children: [
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeInOut,
+      alignment: Alignment.topCenter,
+      child: AnimatedOpacity(
+        opacity: removing ? 0 : 1,
+        duration: const Duration(milliseconds: 200),
+        child: removing
+            ? const SizedBox(width: double.infinity)
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
         // Notebooks are the top level: neutral row, the solid initial chip
         // carries the color; long-press anywhere to reorder (no handle).
         Padding(
@@ -1215,15 +1307,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           if (a == 'section') _addSection(notebook);
                           if (a == 'group') _addSectionFolder(notebook);
                         },
-                        itemBuilder: (context) => const [
-                          PopupMenuItem(
-                            value: 'section',
-                            child: Text('New section'),
-                          ),
-                          PopupMenuItem(
-                            value: 'group',
-                            child: Text('New super-section'),
-                          ),
+                        itemBuilder: (context) => [
+                          iconMenuItem('section', Icons.post_add_outlined,
+                              'New section'),
+                          iconMenuItem('group', Icons.create_new_folder_outlined,
+                              'New super-section'),
                         ],
                       ),
                       PopupMenuButton<String>(
@@ -1252,39 +1340,17 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           }
                         },
                         itemBuilder: (context) => [
-                          const PopupMenuItem(
-                            value: 'rename',
-                            child: Text('Rename'),
-                          ),
-                          const PopupMenuItem(
-                            value: 'color',
-                            child: Text('Change color'),
-                          ),
-                          const PopupMenuItem(
-                            value: 'export',
-                            child: Text('Export to PDF'),
-                          ),
-                          const PopupMenuItem(
-                            value: 'share',
-                            child: Text('Send a copy'),
-                          ),
-                          const PopupMenuItem(
-                            value: 'sharelink',
-                            child: Text('Share link'),
-                          ),
-                          const PopupMenuItem(
-                            value: 'sync',
-                            child: Text('Sync to…'),
-                          ),
-                          PopupMenuItem(
-                            value: 'delete',
-                            child: Text(
-                              'Delete',
-                              style: TextStyle(
-                                color: Theme.of(context).colorScheme.error,
-                              ),
-                            ),
-                          ),
+                          iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
+                          iconMenuItem('color', Icons.palette_outlined,
+                              'Change color'),
+                          iconMenuItem('export', Icons.picture_as_pdf_outlined,
+                              'Export to PDF'),
+                          iconMenuItem(
+                              'share', Icons.ios_share, 'Send a copy'),
+                          iconMenuItem('sharelink', Icons.link, 'Share link'),
+                          iconMenuItem('sync', Icons.sync_outlined, 'Sync to…'),
+                          iconMenuItem('delete', Icons.delete_outline, 'Delete',
+                              color: Theme.of(context).colorScheme.error),
                         ],
                       ),
                       const SizedBox(width: 2),
@@ -1297,10 +1363,21 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             ),
           ),
         ),
-        if (expanded)
+        // Expand/collapse the section tree — animates the height + fade in
+        // BOTH directions (AnimatedCrossFade keeps the content while shrinking,
+        // so collapse reverses the expand instead of blinking out).
+        AnimatedCrossFade(
+          duration: const Duration(milliseconds: 340),
+          sizeCurve: Curves.easeInOutCubic,
+          firstCurve: Curves.easeInOutCubic,
+          secondCurve: Curves.easeInOutCubic,
+          crossFadeState: expanded
+              ? CrossFadeState.showFirst
+              : CrossFadeState.showSecond,
+          secondChild: const SizedBox(width: double.infinity),
           // Sections hang off their notebook: indented under a rail in the
           // notebook's color so the parent/child relationship is visible.
-          Padding(
+          firstChild: Padding(
             padding: const EdgeInsets.only(left: 15, right: 4, bottom: 4),
             child: Container(
               decoration: BoxDecoration(
@@ -1345,8 +1422,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               ),
             ),
           ),
-      ],
-    );
+        ),
+                ],
+              ),
+            ),
+          );
   }
 }
 

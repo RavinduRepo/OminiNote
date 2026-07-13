@@ -11,7 +11,7 @@ import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
 import 'canvas_screen.dart';
-import 'note_search.dart';
+import 'note_search.dart'; // searchRouteObserver (glow-on-reveal)
 
 /// Mobile screen 3: a section's tree of **canvases** + nested super-sections.
 /// Tapping a canvas opens the drawing surface (`CanvasScreen`).
@@ -95,9 +95,9 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
     );
     await _reload();
     if (!mounted) return;
-    Navigator.push(
-      context,
-      fadeThroughRoute(CanvasScreen(canvas: canvas)),
+    // Root navigator so the canvas editor covers the mobile bottom nav bar.
+    Navigator.of(context, rootNavigator: true).push(
+      slideRoute(CanvasScreen(canvas: canvas)),
     ).then((_) => _reload());
   }
 
@@ -109,9 +109,9 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
   }
 
   void _openCanvas(Canvas canvas) {
-    Navigator.push(
-      context,
-      fadeThroughRoute(CanvasScreen(canvas: canvas)),
+    // Root navigator so the canvas editor covers the mobile bottom nav bar.
+    Navigator.of(context, rootNavigator: true).push(
+      slideRoute(CanvasScreen(canvas: canvas)),
     ).then((_) => _reload());
   }
 
@@ -165,15 +165,8 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
     await _reload();
   }
 
+  // No confirm — recoverable from the recycle bin like any other delete.
   Future<void> _deleteFolder(FolderNode folder) async {
-    final count = folder.collectLeafIds().length;
-    final ok = await _confirm(
-      'Delete super-section?',
-      count == 0
-          ? '"${folder.name}" will be deleted.'
-          : '"${folder.name}" and its $count canvas(es) will be permanently deleted.',
-    );
-    if (!ok) return;
     await _service.deleteCanvasFolder(_section!, folder.id);
     await _reload();
   }
@@ -242,30 +235,6 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
     );
   }
 
-  Future<bool> _confirm(String title, String message) async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
-  }
-
   @override
   Widget build(BuildContext context) {
     final section = _section;
@@ -273,11 +242,6 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
       appBar: AppBar(
         title: Text(widget.section.name),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.search),
-            tooltip: 'Search',
-            onPressed: () => openNoteSearch(context),
-          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),
             tooltip: 'Add',

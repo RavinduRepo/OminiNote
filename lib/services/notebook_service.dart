@@ -649,28 +649,27 @@ class NotebookService {
     await saveSection(section);
   }
 
-  /// Deletes a section-tree folder and all sections inside it.
+  /// Soft-deletes a section-tree super-section to the recycle bin: the whole
+  /// [FolderNode] subtree moves to `deletedFolders` (restorable/purgeable), and
+  /// its sections' files stay on disk (hidden, since the tree no longer
+  /// references them) until restore or purge. No hard delete — durable + sync.
   Future<void> deleteSectionFolder(Notebook notebook, String folderId) async {
     final folder = TreeOps.findFolder(notebook.nodes, folderId);
-    final ids = folder?.collectLeafIds() ?? const <String>[];
+    if (folder == null) return;
     TreeOps.removeFolder(notebook.nodes, folderId);
+    notebook.deletedFolders
+        .add(DeletedFolder(node: folder, deletedAt: DateTime.now()));
     await saveNotebook(notebook);
-    for (final sectionId in ids) {
-      final dir = sectionDir(notebook.id, sectionId);
-      if (await dir.exists()) await dir.delete(recursive: true);
-    }
   }
 
-  /// Deletes a canvas-tree folder and all canvases inside it.
+  /// Soft-deletes a canvas-tree super-section (mirrors [deleteSectionFolder]).
   Future<void> deleteCanvasFolder(Section section, String folderId) async {
     final folder = TreeOps.findFolder(section.nodes, folderId);
-    final ids = folder?.collectLeafIds() ?? const <String>[];
+    if (folder == null) return;
     TreeOps.removeFolder(section.nodes, folderId);
+    section.deletedFolders
+        .add(DeletedFolder(node: folder, deletedAt: DateTime.now()));
     await saveSection(section);
-    for (final canvasId in ids) {
-      final dir = canvasDir(section.notebookId, section.id, canvasId);
-      if (await dir.exists()) await dir.delete(recursive: true);
-    }
   }
 
   // ── Move / copy (whole nodes: leaves or folder subtrees) ───────────────
@@ -1333,6 +1332,22 @@ class NotebookService {
           parentAlive: true,
           parentName: '',
         ));
+        continue; // a deleted notebook's folders are subsumed by it
+      }
+      // Alive notebook: surface its deleted section super-sections.
+      for (final f
+          in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? [])) {
+        if (f['purgedAt'] != null) continue;
+        final node = f['node'] as Map<String, dynamic>;
+        out.add(BinItem(
+          type: BinItemType.folder,
+          name: node['name'] as String? ?? 'Super-section',
+          deletedAt: DateTime.fromMillisecondsSinceEpoch(f['deletedAt']),
+          notebookId: entry.key,
+          folderId: node['id'] as String?,
+          parentAlive: true,
+          parentName: notebookNames[entry.key]!,
+        ));
       }
     }
 
@@ -1363,6 +1378,23 @@ class NotebookService {
             parentAlive: nbAlive,
             parentName: nbName,
           ));
+        } else if (secDeleted is! num && secJson?['purgedAt'] == null) {
+          // Alive section: surface its deleted canvas super-sections.
+          for (final f in List<Map<String, dynamic>>.from(
+              secJson?['deletedFolders'] ?? [])) {
+            if (f['purgedAt'] != null) continue;
+            final node = f['node'] as Map<String, dynamic>;
+            out.add(BinItem(
+              type: BinItemType.folder,
+              name: node['name'] as String? ?? 'Super-section',
+              deletedAt: DateTime.fromMillisecondsSinceEpoch(f['deletedAt']),
+              notebookId: nbId,
+              sectionId: secId,
+              folderId: node['id'] as String?,
+              parentAlive: nbAlive,
+              parentName: secName,
+            ));
+          }
         }
         final cvRoot = Directory('${secDir.path}/canvases');
         if (!await cvRoot.exists()) continue;
@@ -1470,6 +1502,34 @@ class NotebookService {
       case BinItemType.page:
         await restorePage(
             item.notebookId, item.sectionId!, item.canvasId!, item.pageId!);
+
+      case BinItemType.folder:
+        await restoreFolder(
+            item.notebookId, item.sectionId, item.folderId!);
+    }
+  }
+
+  /// Restores a soft-deleted super-section: moves its [FolderNode] subtree out
+  /// of `deletedFolders` and re-appends it to the tree (its contained items'
+  /// files were never touched, so they reappear intact).
+  Future<void> restoreFolder(
+      String notebookId, String? sectionId, String folderId) async {
+    if (sectionId == null) {
+      final nb = await getNotebook(notebookId);
+      if (nb == null) return;
+      final idx = nb.deletedFolders
+          .indexWhere((f) => f.node.id == folderId && f.purgedAt == null);
+      if (idx < 0) return;
+      nb.nodes.add(nb.deletedFolders.removeAt(idx).node);
+      await saveNotebook(nb);
+    } else {
+      final sec = await getSection(notebookId, sectionId);
+      if (sec == null) return;
+      final idx = sec.deletedFolders
+          .indexWhere((f) => f.node.id == folderId && f.purgedAt == null);
+      if (idx < 0) return;
+      sec.nodes.add(sec.deletedFolders.removeAt(idx).node);
+      await saveSection(sec);
     }
   }
 
@@ -1571,6 +1631,38 @@ class NotebookService {
       case BinItemType.page:
         await purgePage(item.notebookId, item.sectionId!, item.canvasId!,
             item.pageId!);
+      case BinItemType.folder:
+        await purgeFolder(item.notebookId, item.sectionId, item.folderId!);
+    }
+  }
+
+  /// Permanently purges a soft-deleted super-section: drops its `deletedFolders`
+  /// record and purges every leaf inside it (their files are deleted from local
+  /// disk + Drive). Structural LWW carries the removal to other devices.
+  Future<void> purgeFolder(
+      String notebookId, String? sectionId, String folderId) async {
+    if (sectionId == null) {
+      final nb = await getNotebook(notebookId);
+      if (nb == null) return;
+      final idx = nb.deletedFolders.indexWhere((f) => f.node.id == folderId);
+      if (idx < 0) return;
+      final leafIds = nb.deletedFolders[idx].node.collectLeafIds();
+      nb.deletedFolders.removeAt(idx);
+      await saveNotebook(nb);
+      for (final secId in leafIds) {
+        await purgeSection(notebookId, secId);
+      }
+    } else {
+      final sec = await getSection(notebookId, sectionId);
+      if (sec == null) return;
+      final idx = sec.deletedFolders.indexWhere((f) => f.node.id == folderId);
+      if (idx < 0) return;
+      final leafIds = sec.deletedFolders[idx].node.collectLeafIds();
+      sec.deletedFolders.removeAt(idx);
+      await saveSection(sec);
+      for (final cvId in leafIds) {
+        await purgeCanvas(notebookId, sectionId, cvId);
+      }
     }
   }
 
@@ -1734,6 +1826,14 @@ class NotebookService {
         await purgeNotebook(entry.key);
         continue;
       }
+      // Expired deleted section super-sections in this (alive) notebook.
+      for (final f
+          in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? [])) {
+        if (f['purgedAt'] == null && _tombstoneExpired(f['deletedAt'], cutoff)) {
+          await purgeFolder(entry.key, null,
+              (f['node'] as Map<String, dynamic>)['id'] as String);
+        }
+      }
       await _gcSectionsUnder(entry.key, cutoff);
     }
   }
@@ -1767,6 +1867,14 @@ class NotebookService {
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
         await purgeSection(notebookId, sectionId);
         continue;
+      }
+      // Expired deleted canvas super-sections in this (alive) section.
+      for (final f
+          in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? [])) {
+        if (f['purgedAt'] == null && _tombstoneExpired(f['deletedAt'], cutoff)) {
+          await purgeFolder(notebookId, sectionId,
+              (f['node'] as Map<String, dynamic>)['id'] as String);
+        }
       }
       await _gcCanvasesUnder(notebookId, sectionId, cutoff);
     }
@@ -1862,7 +1970,7 @@ class NotebookService {
 
 // ── Recycle bin items ─────────────────────────────────────────────────────
 
-enum BinItemType { notebook, section, canvas, page }
+enum BinItemType { notebook, section, canvas, page, folder }
 
 /// One soft-deleted item shown in the recycle bin.
 class BinItem {
@@ -1873,6 +1981,10 @@ class BinItem {
   final String? sectionId;
   final String? canvasId;
   final String? pageId;
+
+  /// Set for a deleted super-section. `sectionId == null` → a section-folder
+  /// (in the notebook); non-null → a canvas-folder (in that section).
+  final String? folderId;
 
   /// False when the containing notebook/section is itself deleted — restoring
   /// this item alone would put it nowhere visible, so restore the parent
@@ -1888,6 +2000,7 @@ class BinItem {
     this.sectionId,
     this.canvasId,
     this.pageId,
+    this.folderId,
     required this.parentAlive,
     required this.parentName,
   });

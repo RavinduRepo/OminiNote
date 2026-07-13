@@ -4,14 +4,14 @@ import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
+import '../widgets/action_sheet.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/refreshable_empty.dart';
+import '../widgets/sync_status_icon.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
-import 'note_search.dart';
 import 'notebook_screen.dart';
-import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -23,6 +23,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _notebookService = NotebookService();
   List<Notebook>? _notebooks;
+
+  // Id of the notebook currently animating out on delete (collapse + fade).
+  String? _removingId;
+  static const _kRemoveAnim = Duration(milliseconds: 280);
 
   @override
   void initState() {
@@ -105,7 +109,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _deleteNotebook(Notebook notebook) async {
+    setState(() => _removingId = notebook.id); // collapse + fade the row out
+    await Future.delayed(_kRemoveAnim);
     await _notebookService.deleteNotebook(notebook.id);
+    _removingId = null;
     _loadNotebooks();
   }
 
@@ -162,14 +169,10 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('Notebooks'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.search),
-            tooltip: 'Search',
-            onPressed: () => openNoteSearch(context),
-          ),
-          // Single, consistent add entry point across all list screens: the
-          // app-bar "+" (the old FAB overlapped the last row's ⋮ menu). A menu
-          // so a fresh notebook or an imported one both start here.
+          // Search and Settings now live in the bottom navigation bar. The
+          // app bar keeps the sync status + add, consistent with the desktop
+          // notebooks-pane header.
+          const SyncStatusIcon(),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),
             tooltip: 'Add',
@@ -196,14 +199,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: 'Settings',
-            onPressed: () => Navigator.push(
-              context,
-              fadeThroughRoute(const SettingsScreen()),
-            ),
-          ),
           const SizedBox(width: 4),
         ],
       ),
@@ -225,19 +220,29 @@ class _HomeScreenState extends State<HomeScreen> {
                           Material(color: Colors.transparent, child: child),
                       itemBuilder: (context, index) {
                         final notebook = notebooks[index];
-                        return Padding(
+                        final removing = notebook.id == _removingId;
+                        return AnimatedSize(
                           key: ValueKey(notebook.id),
-                          padding: const EdgeInsets.only(bottom: 8),
-                          // Long-press anywhere on the card to reorder — no
-                          // visible drag handle.
-                          child: ReorderableDelayedDragStartListener(
-                            index: index,
+                          duration: _kRemoveAnim,
+                          curve: Curves.easeInOut,
+                          alignment: Alignment.topCenter,
+                          child: AnimatedOpacity(
+                            opacity: removing ? 0 : 1,
+                            duration: const Duration(milliseconds: 200),
+                            child: removing
+                                ? const SizedBox(width: double.infinity)
+                                : Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    // Long-press anywhere on the card to
+                                    // reorder — no visible drag handle.
+                                    child: ReorderableDelayedDragStartListener(
+                                      index: index,
                             child: _NotebookRow(
                               notebook: notebook,
                               onTap: () {
                                 Navigator.push(
                                   context,
-                                  fadeThroughRoute(
+                                  slideRoute(
                                     NotebookScreen(notebook: notebook),
                                   ),
                                 ).then((_) => _loadNotebooks());
@@ -251,7 +256,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               onDelete: () => _deleteNotebook(notebook),
                             ),
                           ),
-                        );
+                        ),
+                      ),
+                    );
                       },
                     ),
             ),
@@ -394,96 +401,31 @@ class _RowMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
-    return PopupMenuButton<String>(
+    return IconButton(
       icon: Icon(Icons.more_vert, color: palette.textDim, size: 20),
-      onSelected: (value) {
-        if (value == 'rename') onRename();
-        if (value == 'color') onColor();
-        if (value == 'export') onExport();
-        if (value == 'share') onShare();
-        if (value == 'sharelink') onShareLink();
-        if (value == 'sync') onSyncTo();
-        if (value == 'delete') onDelete();
-      },
-      itemBuilder: (context) => [
-        const PopupMenuItem(
-          value: 'rename',
-          child: Row(
-            children: [
-              Icon(Icons.edit_outlined, size: 18),
-              SizedBox(width: 10),
-              Text('Rename'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'color',
-          child: Row(
-            children: [
-              Icon(Icons.palette_outlined, size: 18),
-              SizedBox(width: 10),
-              Text('Change color'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'export',
-          child: Row(
-            children: [
-              Icon(Icons.picture_as_pdf_outlined, size: 18),
-              SizedBox(width: 10),
-              Text('Export to PDF'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'share',
-          child: Row(
-            children: [
-              Icon(Icons.ios_share, size: 18),
-              SizedBox(width: 10),
-              Text('Send a copy'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'sharelink',
-          child: Row(
-            children: [
-              Icon(Icons.link, size: 18),
-              SizedBox(width: 10),
-              Text('Share link'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'sync',
-          child: Row(
-            children: [
-              Icon(Icons.sync_outlined, size: 18),
-              SizedBox(width: 10),
-              Text('Sync to…'),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: 'delete',
-          child: Row(
-            children: [
-              Icon(
-                Icons.delete_outline,
-                size: 18,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              const SizedBox(width: 10),
-              Text(
-                'Delete',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
-          ),
-        ),
-      ],
+      onPressed: () => showActionSheet(context, items: [
+        ActionSheetItem(
+            icon: Icons.edit_outlined, label: 'Rename', onTap: onRename),
+        ActionSheetItem(
+            icon: Icons.palette_outlined,
+            label: 'Change color',
+            onTap: onColor),
+        ActionSheetItem(
+            icon: Icons.picture_as_pdf_outlined,
+            label: 'Export to PDF',
+            onTap: onExport),
+        ActionSheetItem(
+            icon: Icons.ios_share, label: 'Send a copy', onTap: onShare),
+        ActionSheetItem(
+            icon: Icons.link, label: 'Share link', onTap: onShareLink),
+        ActionSheetItem(
+            icon: Icons.sync_outlined, label: 'Sync to…', onTap: onSyncTo),
+        ActionSheetItem(
+            icon: Icons.delete_outline,
+            label: 'Delete',
+            destructive: true,
+            onTap: onDelete),
+      ]),
     );
   }
 }

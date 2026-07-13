@@ -2,13 +2,17 @@ import 'package:flutter/material.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
-import '../utils/formatting.dart';
 
 /// The recycle bin: soft-deleted notebooks/sections/canvases, restorable for
 /// 30 days (then the GC sweep removes them permanently). Restore clears the
 /// tombstone with a bumped rev, so it propagates through sync like any edit.
 class BinScreen extends StatefulWidget {
-  const BinScreen({super.key});
+  /// Bumped by the host (mobile shell) each time the Bin tab is opened, so the
+  /// kept-alive tab reloads its list — otherwise something deleted elsewhere
+  /// wouldn't appear until the tab was rebuilt.
+  final Listenable? refreshSignal;
+
+  const BinScreen({super.key, this.refreshSignal});
 
   @override
   State<BinScreen> createState() => _BinScreenState();
@@ -18,22 +22,48 @@ class _BinScreenState extends State<BinScreen> {
   final _service = NotebookService();
   List<BinItem>? _items;
 
+  // Keys of rows currently animating out (restore / delete-forever) so the
+  // row collapses + fades before the list actually drops it.
+  final Set<String> _removing = {};
+  static const _kRemoveAnim = Duration(milliseconds: 280);
+
+  String _keyOf(BinItem item) => '${item.type}_${_identityId(item)}';
+
   @override
   void initState() {
     super.initState();
     _load();
+    widget.refreshSignal?.addListener(_load);
+  }
+
+  @override
+  void dispose() {
+    widget.refreshSignal?.removeListener(_load);
+    super.dispose();
   }
 
   Future<void> _load() async {
     final items = await _service.listDeletedItems();
     if (!mounted) return;
-    setState(() => _items = items);
+    setState(() {
+      _items = items;
+      _removing.clear();
+    });
+  }
+
+  /// Animate a row out (collapse + fade) before running [action].
+  Future<void> _removeThen(BinItem item, Future<void> Function() action) async {
+    setState(() => _removing.add(_keyOf(item)));
+    await Future.delayed(_kRemoveAnim);
+    await action();
+    if (mounted) await _load();
   }
 
   Future<void> _restore(BinItem item) async {
-    await _service.restoreBinItem(item);
-    SyncService().dataVersion.value++; // nudge open list screens to reload
-    await _load();
+    await _removeThen(item, () async {
+      await _service.restoreBinItem(item);
+      SyncService().dataVersion.value++; // nudge open list screens to reload
+    });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -73,8 +103,7 @@ class _BinScreenState extends State<BinScreen> {
 
   Future<void> _purge(BinItem item) async {
     if (!await _confirmPurge('"${item.name}"')) return;
-    await _service.purgeBinItem(item);
-    await _load();
+    await _removeThen(item, () => _service.purgeBinItem(item));
   }
 
   Future<void> _emptyBin() async {
@@ -105,71 +134,186 @@ class _BinScreenState extends State<BinScreen> {
       ),
       body: items == null
           ? const Center(child: CircularProgressIndicator())
-          : items.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.delete_outline, size: 48, color: palette.textDim),
-                  const SizedBox(height: 12),
-                  const Text('Bin is empty'),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Deleted items stay here for 30 days',
-                    style: TextStyle(fontSize: 12.5, color: palette.textDim),
-                  ),
-                ],
-              ),
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: items.length,
-              separatorBuilder: (_, _) => const Divider(height: 1),
-              itemBuilder: (context, i) {
-                final item = items[i];
-                final daysLeft = 30 -
-                    DateTime.now().difference(item.deletedAt).inDays;
-                return ListTile(
-                  leading: Icon(switch (item.type) {
-                    BinItemType.notebook => Icons.menu_book_outlined,
-                    BinItemType.section => Icons.description_outlined,
-                    BinItemType.canvas => Icons.crop_portrait,
-                    BinItemType.page => Icons.insert_drive_file_outlined,
-                  }),
-                  title: Text(item.name),
-                  subtitle: Text(
-                    [
-                      'Deleted ${formatShortDate(item.deletedAt)}',
-                      if (item.parentName.isNotEmpty) 'in ${item.parentName}',
-                      if (daysLeft > 0) '$daysLeft day(s) left',
-                    ].join(' · '),
-                    style: TextStyle(fontSize: 12, color: palette.textDim),
-                  ),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.restore),
-                        tooltip: item.parentAlive
-                            ? 'Restore'
-                            : 'Restore its ${switch (item.type) {
-                                BinItemType.canvas => 'section',
-                                BinItemType.page => 'section',
-                                _ => 'notebook',
-                              }} first',
-                        onPressed:
-                            item.parentAlive ? () => _restore(item) : null,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.delete_forever_outlined),
-                        tooltip: 'Delete forever',
-                        onPressed: () => _purge(item),
-                      ),
-                    ],
-                  ),
-                );
-              },
+          : RefreshIndicator(
+              onRefresh: _refresh,
+              child: items.isEmpty
+                  ? ListView(
+                      // A scrollable so pull-to-refresh works on the empty state.
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        SizedBox(
+                          height:
+                              MediaQuery.of(context).size.height * 0.6,
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.delete_outline,
+                                    size: 48, color: palette.textDim),
+                                const SizedBox(height: 12),
+                                const Text('Bin is empty'),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Deleted items stay here for 30 days',
+                                  style: TextStyle(
+                                      fontSize: 12.5, color: palette.textDim),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  : ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
+                      itemCount: items.length,
+                      itemBuilder: (context, i) =>
+                          _binRow(context, palette, items[i]),
+                    ),
             ),
     );
   }
+
+  /// Pull-to-refresh: run a sync round trip, then reload the bin.
+  Future<void> _refresh() async {
+    await SyncService().syncNow();
+    await _load();
+  }
+
+  Widget _binRow(BuildContext context, AppPalette palette, BinItem item) {
+    final theme = Theme.of(context);
+    final daysLeft = 30 - DateTime.now().difference(item.deletedAt).inDays;
+    final railColor = AppPalette.resolveColor(_identityId(item), null);
+    final removing = _removing.contains(_keyOf(item));
+    final meta = [
+      _typeLabel(item.type),
+      if (item.parentName.isNotEmpty) 'in ${item.parentName}',
+      if (daysLeft > 0) '$daysLeft day left',
+    ].join(' · ');
+
+    // Restore / delete-forever collapse the row (height → 0) and fade it out
+    // before _load() drops it from the list.
+    return AnimatedSize(
+      duration: _kRemoveAnim,
+      curve: Curves.easeInOut,
+      alignment: Alignment.topCenter,
+      child: AnimatedOpacity(
+        opacity: removing ? 0 : 1,
+        duration: const Duration(milliseconds: 200),
+        child: removing
+            ? const SizedBox(width: double.infinity)
+            : _binCard(context, theme, palette, item, railColor, meta),
+      ),
+    );
+  }
+
+  Widget _binCard(
+    BuildContext context,
+    ThemeData theme,
+    AppPalette palette,
+    BinItem item,
+    Color railColor,
+    String meta,
+  ) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(kRadius + 2),
+        border: Border.all(color: palette.border),
+      ),
+      padding: const EdgeInsets.fromLTRB(10, 10, 6, 10),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 34,
+            decoration: BoxDecoration(
+              color: railColor,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Icon(
+            switch (item.type) {
+              BinItemType.notebook => Icons.menu_book_outlined,
+              BinItemType.section => Icons.description_outlined,
+              BinItemType.canvas => Icons.crop_portrait,
+              BinItemType.page => Icons.insert_drive_file_outlined,
+              BinItemType.folder => Icons.folder_outlined,
+            },
+            size: 20,
+            color: palette.textDim,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w500),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  meta,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 10.5,
+                    color: palette.textDim,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          TextButton(
+            onPressed: item.parentAlive ? () => _restore(item) : null,
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+            ),
+            child: Text(item.parentAlive
+                ? 'Restore'
+                : 'Restore ${switch (item.type) {
+                    BinItemType.canvas || BinItemType.page => 'section',
+                    BinItemType.folder =>
+                      item.sectionId != null ? 'section' : 'notebook',
+                    _ => 'notebook',
+                  }} first'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_forever_outlined, size: 20),
+            tooltip: 'Delete forever',
+            color: theme.colorScheme.error,
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _purge(item),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _identityId(BinItem item) => switch (item.type) {
+        BinItemType.notebook => item.notebookId,
+        BinItemType.section => item.sectionId ?? item.notebookId,
+        BinItemType.canvas => item.canvasId ?? item.notebookId,
+        BinItemType.page =>
+          item.pageId ?? item.canvasId ?? item.notebookId,
+        BinItemType.folder => item.folderId ?? item.notebookId,
+      };
+
+  String _typeLabel(BinItemType t) => switch (t) {
+        BinItemType.notebook => 'Notebook',
+        BinItemType.section => 'Section',
+        BinItemType.canvas => 'Canvas',
+        BinItemType.page => 'Page',
+        BinItemType.folder => 'Super-section',
+      };
 }

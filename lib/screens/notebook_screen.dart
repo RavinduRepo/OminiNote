@@ -11,7 +11,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
-import 'note_search.dart';
+import 'note_search.dart'; // searchRouteObserver (glow-on-reveal)
 import 'section_screen.dart';
 
 /// Mobile screen 2: a notebook's tree of **sections** + nested super-sections.
@@ -114,7 +114,7 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
   void _openSection(Section section) {
     Navigator.push(
       context,
-      fadeThroughRoute(SectionScreen(section: section)),
+      slideRoute(SectionScreen(section: section)),
     ).then((_) => _reload());
   }
 
@@ -168,15 +168,9 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
     await _reload();
   }
 
+  // No confirm — a deleted super-section (and its contents) is recoverable
+  // from the recycle bin, same as any other delete.
   Future<void> _deleteFolder(FolderNode folder) async {
-    final count = folder.collectLeafIds().length;
-    final ok = await _confirm(
-      'Delete super-section?',
-      count == 0
-          ? '"${folder.name}" will be deleted.'
-          : '"${folder.name}" and its $count section(s) will be permanently deleted.',
-    );
-    if (!ok) return;
     await _service.deleteSectionFolder(_notebook!, folder.id);
     await _reload();
   }
@@ -233,29 +227,6 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
     );
   }
 
-  Future<bool> _confirm(String title, String message) async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -264,11 +235,6 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
       appBar: AppBar(
         title: Text(widget.notebook.name),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.search),
-            tooltip: 'Search',
-            onPressed: () => openNoteSearch(context),
-          ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),
             tooltip: 'Add',

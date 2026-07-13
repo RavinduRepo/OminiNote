@@ -93,6 +93,32 @@ class FolderNode extends TreeNode {
   );
 }
 
+/// A super-section removed to the recycle bin. The whole [FolderNode] subtree
+/// (its child leaf refs + nested folders) is kept so a restore re-links it
+/// intact; the contained leaves' files stay on disk untouched (just hidden,
+/// since the tree no longer references them) until the folder is purged.
+class DeletedFolder {
+  final FolderNode node;
+  DateTime deletedAt;
+  DateTime? purgedAt; // terminal marker (grow-only in merges)
+
+  DeletedFolder({required this.node, required this.deletedAt, this.purgedAt});
+
+  Map<String, dynamic> toJson() => {
+        'node': node.toJson(),
+        'deletedAt': deletedAt.millisecondsSinceEpoch,
+        if (purgedAt != null) 'purgedAt': purgedAt!.millisecondsSinceEpoch,
+      };
+
+  factory DeletedFolder.fromJson(Map<String, dynamic> json) => DeletedFolder(
+        node: FolderNode.fromJson(json['node'] as Map<String, dynamic>),
+        deletedAt: DateTime.fromMillisecondsSinceEpoch(json['deletedAt']),
+        purgedAt: json['purgedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['purgedAt'])
+            : null,
+      );
+}
+
 /// Shared tree helpers used by the service at both levels.
 class TreeOps {
   const TreeOps._();

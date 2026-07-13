@@ -26,6 +26,7 @@ import '../services/pdf_exporter.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/action_sheet.dart';
 import '../widgets/sync_status_icon.dart';
 import 'page_organizer.dart';
 
@@ -51,12 +52,19 @@ class CanvasScreen extends StatefulWidget {
   /// selection instead; popping would dismiss the wrong route.
   final bool embedded;
 
+  /// When embedded (desktop), full-screen still hides this screen's own app
+  /// bar/toolbar (the internal full-screen), and additionally notifies the host
+  /// via this callback so it can collapse its side panes — the canvas then
+  /// fills the whole window. Called with the new full-screen state.
+  final ValueChanged<bool>? onFullScreenChanged;
+
   const CanvasScreen({
     super.key,
     required this.canvas,
     this.onCanvasRenamed,
     this.initialPageId,
     this.embedded = false,
+    this.onFullScreenChanged,
   });
 
   @override
@@ -1008,10 +1016,101 @@ class _CanvasScreenState extends State<CanvasScreen> {
     setState(() {});
   }
 
+  // ── App-bar overflow (sheet on mobile, popup on desktop) ─────────────
+
+  /// Sheet menus when pushed as its own screen (the mobile shell); popup menus
+  /// when embedded in the desktop split-view. `embedded` is the exact signal.
+  bool _useMobileMenus(BuildContext context) => !widget.embedded;
+
+  Widget _buildOverflowMenu(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    if (_useMobileMenus(context)) {
+      return IconButton(
+        icon: Icon(Icons.more_vert, color: palette.textDim),
+        tooltip: 'More',
+        onPressed: () => showActionSheet(context, items: [
+          ActionSheetItem(
+              icon: Icons.fullscreen,
+              label: 'Full screen',
+              onTap: _toggleFullScreen),
+          ActionSheetItem(
+              icon: _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+              label: _showToolbar ? 'Hide tools' : 'Show tools',
+              onTap: () => setState(() => _showToolbar = !_showToolbar)),
+          ActionSheetItem(
+              icon: Icons.edit_outlined,
+              label: 'Rename',
+              onTap: _renameCanvas),
+          ActionSheetItem(
+              icon: Icons.picture_as_pdf_outlined,
+              label: 'Export PDF',
+              onTap: _exportPdf),
+          ActionSheetItem(
+              icon: Icons.grid_view_outlined,
+              label: 'Pages',
+              onTap: _showNavigator),
+          ActionSheetItem(
+              icon: Icons.bookmark_border,
+              label: 'Bookmarks',
+              onTap: _showBookmarks),
+          ActionSheetItem(
+              icon: Icons.attach_file,
+              label: 'Attachments',
+              onTap: _showAttachments),
+          ActionSheetItem(
+              icon: Icons.description_outlined,
+              label: 'Page settings',
+              onTap: _showPageSettings),
+          ActionSheetItem(
+              icon: SettingsService().fingerDraw
+                  ? Icons.check_box_outlined
+                  : Icons.check_box_outline_blank,
+              label: 'Draw with finger',
+              onTap: _toggleFingerDraw),
+        ]),
+      );
+    }
+    return PopupMenuButton<String>(
+      onSelected: (action) {
+        switch (action) {
+          case 'rename':
+            _renameCanvas();
+          case 'export':
+            _exportPdf();
+          case 'navigator':
+            _showNavigator();
+          case 'bookmarks':
+            _showBookmarks();
+          case 'attachments':
+            _showAttachments();
+          case 'page_settings':
+            _showPageSettings();
+          case 'finger_draw':
+            _toggleFingerDraw();
+        }
+      },
+      itemBuilder: (context) => [
+        iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
+        iconMenuItem('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
+        iconMenuItem('navigator', Icons.grid_view_outlined, 'Pages'),
+        iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+        iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
+        iconMenuItem('page_settings', Icons.description_outlined,
+            'Page settings'),
+        // Checkbox glyph reflecting the toggle state, matching the mobile sheet.
+        iconMenuItem(
+            'finger_draw',
+            SettingsService().fingerDraw
+                ? Icons.check_box_outlined
+                : Icons.check_box_outline_blank,
+            'Draw with finger'),
+      ],
+    );
+  }
+
   // ── Add / insert flows ───────────────────────────────────────────────
 
   Future<void> _showAddSheet() async {
-    final c = _controller!;
     final action = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
@@ -1075,7 +1174,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
       ),
     );
     if (!mounted || action == null) return;
+    await _runAddAction(action);
+  }
 
+  /// Runs one Add action. Shared by the mobile Add sheet and the desktop
+  /// top-bar Add dropdown.
+  Future<void> _runAddAction(String action) async {
+    final c = _controller;
+    if (c == null) return;
     switch (action) {
       case 'blank':
         final pos = await _pickInsertPosition(includeTop: false);
@@ -1095,6 +1201,32 @@ class _CanvasScreenState extends State<CanvasScreen> {
         await c.pastePageFromClipboard();
         _toast('Page pasted at the end');
     }
+  }
+
+  /// The Add control: a bottom sheet on mobile, a top-bar dropdown on desktop.
+  Widget _buildAddButton(BuildContext context) {
+    if (_useMobileMenus(context)) {
+      return IconButton(
+        icon: const Icon(Icons.add),
+        tooltip: 'Add',
+        onPressed: _showAddSheet,
+      );
+    }
+    // Desktop: the frequently-used adds (Add page, Image) are direct top-bar
+    // buttons (see the app bar); this "+" holds the rest.
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.add),
+      tooltip: 'More to add',
+      onSelected: _runAddAction,
+      itemBuilder: (context) => [
+        iconMenuItem('horizontal', Icons.swap_horiz, 'Horizontal page'),
+        iconMenuItem('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
+        if (PageClipboard().hasPage.value)
+          iconMenuItem('pastePage', Icons.content_paste_go_outlined,
+              'Paste page'),
+        iconMenuItem('paste', Icons.content_paste, 'Paste'),
+      ],
+    );
   }
 
   Future<InsertPosition?> _pickInsertPosition({bool includeTop = true}) {
@@ -1748,6 +1880,88 @@ class _CanvasScreenState extends State<CanvasScreen> {
       _fullScreenPickerOpen = false;
     });
     _controller?.closeToolOptions();
+    // Desktop host: collapse/expand its side panes to match, so full screen
+    // truly fills the window.
+    widget.onFullScreenChanged?.call(_isFullScreen);
+  }
+
+  // ── Desktop top toolbar (all tools inline, grouped, horizontally scrollable
+  //    so a narrow window never overflows) ────────────────────────────────
+
+  Widget _tbBtn(IconData icon, String tooltip, VoidCallback? onPressed) =>
+      IconButton(
+        icon: Icon(icon, size: 20),
+        tooltip: tooltip,
+        visualDensity: VisualDensity.compact,
+        constraints: const BoxConstraints(minWidth: 38, minHeight: 44),
+        padding: EdgeInsets.zero,
+        onPressed: onPressed,
+      );
+
+  Widget _tbDivider(AppPalette palette) => Container(
+        width: 1,
+        height: 20,
+        margin: const EdgeInsets.symmetric(horizontal: 6),
+        color: palette.border,
+      );
+
+  Widget _buildDesktopToolbar(
+      BuildContext context, CanvasController c, AppPalette palette) {
+    return Row(
+      children: [
+        Flexible(
+          child: Text(
+            widget.canvas.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+          ),
+        ),
+        const SizedBox(width: 12),
+        // The whole tool cluster scrolls horizontally — a shrunk window scrolls
+        // instead of overflowing. Rebuilds with the controller (undo/redo
+        // enablement, paste-page visibility, toolbar-toggle icon).
+        Expanded(
+          child: ListenableBuilder(
+            listenable: c,
+            builder: (context, _) => SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true, // right-align the tools; scroll on a narrow window
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
+                  _tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
+                  _tbDivider(palette),
+                  _tbBtn(Icons.note_add_outlined, 'Add page',
+                      () => _runAddAction('blank')),
+                  _tbBtn(Icons.swap_horiz, 'Horizontal page',
+                      () => _runAddAction('horizontal')),
+                  _tbBtn(Icons.image_outlined, 'Insert image',
+                      () => _runAddAction('image')),
+                  _tbBtn(Icons.picture_as_pdf_outlined, 'Insert PDF',
+                      () => _runAddAction('pdf')),
+                  _tbBtn(Icons.content_paste, 'Paste',
+                      () => _runAddAction('paste')),
+                  if (PageClipboard().hasPage.value)
+                    _tbBtn(Icons.content_paste_go_outlined, 'Paste page',
+                        () => _runAddAction('pastePage')),
+                  _tbDivider(palette),
+                  _tbBtn(Icons.fullscreen, 'Full screen', _toggleFullScreen),
+                  _tbBtn(
+                      _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+                      _showToolbar ? 'Hide tools' : 'Show tools',
+                      () => setState(() => _showToolbar = !_showToolbar)),
+                  _tbDivider(palette),
+                  const SyncStatusIcon(),
+                  _buildOverflowMenu(context),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -1792,88 +2006,46 @@ class _CanvasScreenState extends State<CanvasScreen> {
       );
     }
 
+    final mobile = _useMobileMenus(context);
     return Scaffold(
       backgroundColor: palette.canvas,
       appBar: AppBar(
-        title: Text(widget.canvas.name),
-        actions: [
-          const SyncStatusIcon(),
-          ListenableBuilder(
-            listenable: c,
-            builder: (context, _) => Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.undo),
-                  tooltip: 'Undo',
-                  onPressed: c.canUndo ? c.undo : null,
+        titleSpacing: mobile ? null : 10,
+        title: mobile
+            ? Text(widget.canvas.name)
+            : _buildDesktopToolbar(context, c, palette),
+        actions: mobile
+            ? [
+                const SyncStatusIcon(),
+                ListenableBuilder(
+                  listenable: c,
+                  builder: (context, _) => Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.undo),
+                        tooltip: 'Undo',
+                        onPressed: c.canUndo ? c.undo : null,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.redo),
+                        tooltip: 'Redo',
+                        onPressed: c.canRedo ? c.redo : null,
+                      ),
+                    ],
+                  ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.redo),
-                  tooltip: 'Redo',
-                  onPressed: c.canRedo ? c.redo : null,
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: 'Add',
-            onPressed: _showAddSheet,
-          ),
-          IconButton(
-            icon: const Icon(Icons.fullscreen),
-            tooltip: 'Full screen',
-            onPressed: _toggleFullScreen,
-          ),
-          IconButton(
-            icon: Icon(_showToolbar ? Icons.expand_less : Icons.brush_outlined),
-            tooltip: _showToolbar ? 'Hide tools' : 'Show tools',
-            onPressed: () => setState(() => _showToolbar = !_showToolbar),
-          ),
-          PopupMenuButton<String>(
-            onSelected: (action) {
-              switch (action) {
-                case 'rename':
-                  _renameCanvas();
-                case 'export':
-                  _exportPdf();
-                case 'navigator':
-                  _showNavigator();
-                case 'bookmarks':
-                  _showBookmarks();
-                case 'attachments':
-                  _showAttachments();
-                case 'page_settings':
-                  _showPageSettings();
-                case 'finger_draw':
-                  _toggleFingerDraw();
-              }
-            },
-            itemBuilder: (context) => [
-              const PopupMenuItem(value: 'rename', child: Text('Rename')),
-              const PopupMenuItem(value: 'export', child: Text('Export PDF')),
-              const PopupMenuItem(value: 'navigator', child: Text('Pages')),
-              const PopupMenuItem(value: 'bookmarks', child: Text('Bookmarks')),
-              const PopupMenuItem(
-                value: 'attachments',
-                child: Text('Attachments'),
-              ),
-              const PopupMenuItem(
-                value: 'page_settings',
-                child: Text('Page settings'),
-              ),
-              CheckedPopupMenuItem(
-                value: 'finger_draw',
-                checked: SettingsService().fingerDraw,
-                child: const Text('Draw with finger'),
-              ),
-            ],
-          ),
-          const SizedBox(width: 4),
-        ],
+                _buildAddButton(context),
+                _buildOverflowMenu(context),
+                const SizedBox(width: 4),
+              ]
+            : null,
       ),
       body: Column(
         children: [
+          // Only the fixed tool row lives in the column. Toggling the whole
+          // toolbar (app-bar button) is a deliberate action, so its reflow is
+          // fine — but the per-tool OPTIONS panel opens/closes constantly, so
+          // it floats over the canvas (below) instead of resizing it.
           AnimatedSize(
             duration: const Duration(milliseconds: 200),
             curve: Curves.easeOut,
@@ -1882,7 +2054,23 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 ? _CanvasToolbar(controller: c)
                 : const SizedBox(width: double.infinity),
           ),
-          Expanded(child: _buildCanvasArea(c, palette)),
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(child: _buildCanvasArea(c, palette)),
+                // Tool-options panel: overlaid at the top of the canvas so
+                // showing/hiding it never moves the canvas viewport. Hidden
+                // entirely while the toolbar is toggled off.
+                if (_showToolbar)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: _ToolOptionsPanel(controller: c),
+                  ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -2274,7 +2462,12 @@ Widget _buildEraserOptionsRow(
         margin: const EdgeInsets.symmetric(horizontal: 8),
         color: palette.border,
       ),
-      Icon(Icons.line_weight, size: 18, color: palette.textDim),
+      _ThicknessPreview(
+        color: palette.textDim,
+        size: c.eraserSize.clamp(4, 40),
+        min: 4,
+        max: 40,
+      ),
       SizedBox(
         width: 110,
         child: Slider(
@@ -2330,7 +2523,7 @@ Widget _buildPenOptionsRow(
         margin: const EdgeInsets.symmetric(horizontal: 8),
         color: palette.border,
       ),
-      Icon(Icons.line_weight, size: 18, color: palette.textDim),
+      _ThicknessPreview(color: c.color, size: c.strokeSize, min: 1, max: 20),
       SizedBox(
         width: 110,
         child: Slider(
@@ -2347,6 +2540,44 @@ Widget _buildPenOptionsRow(
       ),
     ],
   );
+}
+
+/// The mockup's thickness "preview": a chip holding a dot whose diameter tracks
+/// the current stroke size, tinted with the tool's color (grey for the eraser).
+class _ThicknessPreview extends StatelessWidget {
+  final Color color;
+  final double size;
+  final double min;
+  final double max;
+
+  const _ThicknessPreview({
+    required this.color,
+    required this.size,
+    required this.min,
+    required this.max,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final t = ((size - min) / (max - min)).clamp(0.0, 1.0);
+    final d = 4 + t * 18; // 4..22px
+    return Container(
+      width: 34,
+      height: 34,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: palette.surface2,
+        border: Border.all(color: palette.border),
+        borderRadius: BorderRadius.circular(kRadius),
+      ),
+      child: Container(
+        width: d,
+        height: d,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+    );
+  }
 }
 
 Widget _buildLassoActionRow(
@@ -2720,7 +2951,6 @@ class _CanvasToolbar extends StatelessWidget {
       listenable: controller,
       builder: (context, _) {
         final c = controller;
-        final contextRow = _buildToolContextRow(context, c, palette);
         return Container(
           width: double.infinity,
           decoration: BoxDecoration(
@@ -2728,39 +2958,90 @@ class _CanvasToolbar extends StatelessWidget {
             border: Border(bottom: BorderSide(color: palette.border)),
           ),
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (final tool in kCanvasToolOrder)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 2),
-                        child: _ToolIconButton(
-                          tool: tool,
-                          active: c.tool == tool,
-                          onTap: () => c.setTool(tool),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 160),
-                curve: Curves.easeOut,
-                alignment: Alignment.topLeft,
-                child: contextRow == null
-                    ? const SizedBox(width: double.infinity)
-                    : Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: contextRow,
-                      ),
-              ),
-            ],
+          // Fixed height: just the tool icon row. The per-tool options panel
+          // is drawn separately as a floating overlay (see _ToolOptionsPanel)
+          // so opening it never resizes/moves the canvas below.
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final tool in kCanvasToolOrder)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                    child: _ToolIconButton(
+                      tool: tool,
+                      active: c.tool == tool,
+                      onTap: () => c.setTool(tool),
+                    ),
+                  ),
+              ],
+            ),
           ),
+        );
+      },
+    );
+  }
+}
+
+/// The per-tool contextual options (colors/size/eraser mode/selection actions/
+/// text style). Rendered as a **floating overlay** pinned to the top of the
+/// canvas — showing/hiding it animates the panel itself (slide + fade) without
+/// ever changing the canvas viewport's size, so the canvas never jumps when
+/// options open or close.
+class _ToolOptionsPanel extends StatelessWidget {
+  final CanvasController controller;
+
+  const _ToolOptionsPanel({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = theme.extension<AppPalette>()!;
+
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final contextRow =
+            _buildToolContextRow(context, controller, palette);
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 180),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: SizeTransition(
+              sizeFactor: animation,
+              axisAlignment: -1,
+              child: child,
+            ),
+          ),
+          child: contextRow == null
+              ? const SizedBox(key: ValueKey('opts-none'), width: double.infinity)
+              // Opaque Listener: the panel floats over the canvas, so it must
+              // swallow pointer-downs itself — otherwise a tap on the panel
+              // (a swatch, or an empty gap) would fall through to the canvas
+              // Listener behind it and close the panel mid-interaction.
+              : Listener(
+                  key: const ValueKey('opts-panel'),
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (_) {},
+                  child: Container(
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surface,
+                      border: Border(bottom: BorderSide(color: palette.border)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withAlpha(28),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                    child: contextRow,
+                  ),
+                ),
         );
       },
     );

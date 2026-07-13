@@ -6,7 +6,6 @@ import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
-import 'bin_screen.dart';
 
 /// Mobile (single-pane) vs desktop (split-view sidebar) shell, or auto-detect
 /// from window width.
@@ -83,22 +82,6 @@ class SettingsScreen extends StatelessWidget {
           const SizedBox(height: 24),
           const _SectionLabel('Storage'),
           _Card(child: _StorageSection()),
-          const SizedBox(height: 24),
-          const _SectionLabel('Recycle bin'),
-          _Card(
-            child: ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('Deleted items'),
-              subtitle: const Text(
-                'Restore notebooks, sections and canvases · kept 30 days',
-              ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const BinScreen()),
-              ),
-            ),
-          ),
           const SizedBox(height: 24),
           const _SectionLabel('Appearance'),
           _Card(
@@ -455,14 +438,6 @@ class _StorageSection extends StatelessWidget {
         final connected = account != null;
         return Column(
           children: [
-            _StorageTile(
-              icon: Icons.folder_outlined,
-              title: 'This device',
-              subtitle: 'Notebooks stored locally',
-              selected: true,
-              onTap: null,
-            ),
-            const Divider(height: 1),
             _StorageTile(
               icon: Icons.cloud_outlined,
               title: 'Google Drive',

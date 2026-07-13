@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
-/// Corner radius used across the app. Small and crisp (Graphite shape language).
-const double kRadius = 6.0;
+/// Corner radius used across the app. Softer than the original crisp Graphite
+/// 6px — the v2 redesign uses rounder cards/controls (mockup ~11-13px on cards,
+/// ~8-10 on small controls); this base + the `kRadius+N` offsets land there.
+const double kRadius = 10.0;
 
 /// Custom color tokens that don't map cleanly onto Material's [ColorScheme].
 /// Read via `Theme.of(context).extension<AppPalette>()!`.
@@ -118,15 +120,17 @@ class AppTheme {
     textDim: Color(0xFF6B7280),
   );
 
+  // v2 redesign: cooler, deeper charcoal (mockup --void/--shell/--surface),
+  // amber accent unchanged in spirit.
   static const _darkPalette = AppPalette(
-    canvas: Color(0xFF1F232C),
-    dot: Color(0xFF3A4150),
-    ink: Color(0xFFE7E9EE),
-    accent: Color(0xFFE8A33D),
-    accentSoft: Color(0x29E8A33D),
-    surface2: Color(0xFF2A2F3A),
-    border: Color(0xFF383E4B),
-    textDim: Color(0xFF9AA1AF),
+    canvas: Color(0xFF14171D), // drawing ground behind pages (mockup void)
+    dot: Color(0xFF2E3542),
+    ink: Color(0xFFE9ECF1),
+    accent: Color(0xFFE9A23B),
+    accentSoft: Color(0x24E9A23B), // ~.14 alpha
+    surface2: Color(0xFF1E232C), // raised inset (search bars, viewport)
+    border: Color(0xFF2A313D), // --line
+    textDim: Color(0xFF98A1AF), // --ink-2
   );
 
   static ThemeData light() => _build(
@@ -141,10 +145,10 @@ class AppTheme {
   static ThemeData dark() => _build(
     brightness: Brightness.dark,
     palette: _darkPalette,
-    scaffold: const Color(0xFF1B1E25),
-    surface: const Color(0xFF22262F),
-    onSurface: const Color(0xFFE7E9EE),
-    onAccent: const Color(0xFF23262F),
+    scaffold: const Color(0xFF12151B), // --shell (screen background)
+    surface: const Color(0xFF171B22), // --surface (cards, app bar, sheets)
+    onSurface: const Color(0xFFE9ECF1),
+    onAccent: const Color(0xFF12151B),
   );
 
   static ThemeData _build({
@@ -279,6 +283,41 @@ Route<T> fadeThroughRoute<T>(Widget page) {
             end: Offset.zero,
           ).animate(curved),
           child: child,
+        ),
+      );
+    },
+  );
+}
+
+/// Horizontal-slide push used for the mobile drill-down (Notebooks → Sections →
+/// Canvases → Canvas): the new page slides in from the right while the page
+/// below parallax-shifts left and dims — the "sliding" feel of the redesign
+/// (mirrors the mockup's `out-r` → `out-l` screen transition). The parallax is
+/// driven by `secondaryAnimation`, so a page shifts out as the next covers it.
+Route<T> slideRoute<T>(Widget page) {
+  const curve = Curves.easeOutCubic;
+  return PageRouteBuilder<T>(
+    transitionDuration: const Duration(milliseconds: 300),
+    reverseTransitionDuration: const Duration(milliseconds: 260),
+    pageBuilder: (_, _, _) => page,
+    transitionsBuilder: (_, animation, secondaryAnimation, child) {
+      final incoming = Tween<Offset>(
+        begin: const Offset(1, 0),
+        end: Offset.zero,
+      ).chain(CurveTween(curve: curve)).animate(animation);
+      final outgoing = Tween<Offset>(
+        begin: Offset.zero,
+        end: const Offset(-0.28, 0),
+      ).chain(CurveTween(curve: curve)).animate(secondaryAnimation);
+      final outFade = Tween<double>(
+        begin: 1,
+        end: 0.35,
+      ).chain(CurveTween(curve: curve)).animate(secondaryAnimation);
+      return SlideTransition(
+        position: outgoing,
+        child: FadeTransition(
+          opacity: outFade,
+          child: SlideTransition(position: incoming, child: child),
         ),
       );
     },

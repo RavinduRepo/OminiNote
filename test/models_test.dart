@@ -500,6 +500,45 @@ void main() {
       expect(decoded.nodes.every((n) => n is LeafNode), isTrue);
     });
 
+    test('deletedFolders (binned super-sections) round-trip with subtree', () {
+      final nb = Notebook(
+        id: 'n1',
+        deviceId: 'test_device',
+        name: 'School',
+        createdAt: DateTime(2026, 1, 2),
+        nodes: [LeafNode('s_live')],
+        deletedFolders: [
+          DeletedFolder(
+            node: FolderNode(
+              id: 'grp1',
+              name: 'Archive',
+              children: [LeafNode('s_a'), LeafNode('s_b')],
+            ),
+            deletedAt: DateTime(2026, 7, 13),
+          ),
+        ],
+      );
+      final decoded = Notebook.fromJson(
+        jsonDecode(jsonEncode(nb.toJson())) as Map<String, dynamic>,
+      );
+      // The deleted folder's sections are NOT in the live tree...
+      expect(decoded.allSectionIds, ['s_live']);
+      // ...but its subtree survives intact in deletedFolders for restore.
+      expect(decoded.deletedFolders.single.node.name, 'Archive');
+      expect(decoded.deletedFolders.single.node.collectLeafIds(),
+          ['s_a', 's_b']);
+      expect(decoded.deletedFolders.single.deletedAt, DateTime(2026, 7, 13));
+
+      // A notebook with no binned folders omits the key entirely.
+      final clean = Notebook(
+        id: 'n2',
+        deviceId: 'test_device',
+        name: 'Clean',
+        createdAt: DateTime(2026, 1, 2),
+      );
+      expect(clean.toJson().containsKey('deletedFolders'), isFalse);
+    });
+
     test('syncTarget round-trips; null → default account, explicit wins', () {
       // Explicit target survives serialization.
       final bound = Notebook(

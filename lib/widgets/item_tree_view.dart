@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/tree.dart';
 import '../theme/app_theme.dart';
+import 'action_sheet.dart';
 
 /// The dragged node plus the container it came from (a notebook id for a
 /// section tree, a section id for a canvas tree) so a drop can tell same- from
@@ -17,7 +18,14 @@ class _FlatEntry {
   final int depth;
   final List<TreeNode> parent;
   final FolderNode? parentFolder; // null → container root
-  const _FlatEntry(this.node, this.depth, this.parent, this.parentFolder);
+  final bool hidden; // inside a collapsed folder — rendered but animated to 0
+  const _FlatEntry(this.node, this.depth, this.parent, this.parentFolder,
+      {this.hidden = false});
+
+  /// Stable identity for keying the row's expand/collapse animation.
+  String get key => node is FolderNode
+      ? 'f_${(node as FolderNode).id}'
+      : 'l_${(node as LeafNode).refId}';
 }
 
 /// A generic drag-reorderable, collapsible tree of leaf items ([T] = Section or
@@ -121,6 +129,42 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
   double get _indent => widget.dense ? 16 : 20;
   double get _fontSize => widget.dense ? 13 : 14.5;
 
+  // Row keys (`_FlatEntry.key`-style) animating out on delete (collapse + fade
+  // before the host reloads the tree without them).
+  final Set<String> _removingIds = {};
+  static const _kRemoveAnim = Duration(milliseconds: 260);
+
+  String _nodeKey(TreeNode node) => node is FolderNode
+      ? 'f_${node.id}'
+      : 'l_${(node as LeafNode).refId}';
+
+  Future<void> _deleteLeaf(T item) async {
+    final key = 'l_${widget.idOf(item)}';
+    setState(() => _removingIds.add(key));
+    await Future.delayed(_kRemoveAnim);
+    widget.onDeleteLeaf(item);
+    if (mounted) _removingIds.remove(key);
+  }
+
+  /// Animate a super-section (and its whole subtree) out, then delete it.
+  Future<void> _deleteFolder(FolderNode folder) async {
+    final keys = <String>{};
+    void collect(TreeNode n) {
+      keys.add(_nodeKey(n));
+      if (n is FolderNode) {
+        for (final c in n.children) {
+          collect(c);
+        }
+      }
+    }
+
+    collect(folder);
+    setState(() => _removingIds.addAll(keys));
+    await Future.delayed(_kRemoveAnim);
+    widget.onDeleteFolder(folder);
+    if (mounted) _removingIds.removeAll(keys);
+  }
+
   /// One vertical hairline per ancestor level, so nesting depth reads at a
   /// glance instead of relying on left padding alone.
   Widget _indentGuides(AppPalette palette, int depth) {
@@ -142,13 +186,17 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
   List<_FlatEntry> _flatten(
     List<TreeNode> nodes,
     int depth,
-    FolderNode? parentFolder,
-  ) {
+    FolderNode? parentFolder, {
+    bool hidden = false,
+  }) {
+    // All descendants are included (so collapse/expand can animate each row);
+    // rows inside a collapsed folder carry `hidden` and render at height 0.
     final out = <_FlatEntry>[];
     for (final node in nodes) {
-      out.add(_FlatEntry(node, depth, nodes, parentFolder));
-      if (node is FolderNode && !node.collapsed) {
-        out.addAll(_flatten(node.children, depth + 1, node));
+      out.add(_FlatEntry(node, depth, nodes, parentFolder, hidden: hidden));
+      if (node is FolderNode) {
+        out.addAll(_flatten(node.children, depth + 1, node,
+            hidden: hidden || node.collapsed));
       }
     }
     return out;
@@ -229,14 +277,31 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final entry in entries) ...[
-          _gap(
-            target: entry.parent,
-            folder: entry.parentFolder,
-            indexOf: () => entry.parent.indexOf(entry.node),
+        for (final entry in entries)
+          // Collapse/expand a super-section: rows inside it animate their
+          // height + fade in BOTH directions (kept in the tree, hidden to 0).
+          AnimatedCrossFade(
+            key: ValueKey('tr_${entry.key}'),
+            duration: const Duration(milliseconds: 260),
+            sizeCurve: Curves.easeInOutCubic,
+            firstCurve: Curves.easeInOutCubic,
+            secondCurve: Curves.easeInOutCubic,
+            crossFadeState: entry.hidden
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            secondChild: const SizedBox(width: double.infinity),
+            firstChild: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _gap(
+                  target: entry.parent,
+                  folder: entry.parentFolder,
+                  indexOf: () => entry.parent.indexOf(entry.node),
+                ),
+                _buildRow(context, palette, entry),
+              ],
+            ),
           ),
-          _buildRow(context, palette, entry),
-        ],
         _gap(
           target: widget.nodes,
           folder: null,
@@ -298,12 +363,26 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
         ? _folderRow(context, palette, entry, node)
         : _leafRow(context, palette, entry, node as LeafNode);
 
-    return LongPressDraggable<_DragData>(
+    final row = LongPressDraggable<_DragData>(
       data: _DragData(node, widget.containerId, entry.parent),
       hapticFeedbackOnStart: true,
       feedback: _dragFeedback(context, palette, node),
       childWhenDragging: Opacity(opacity: 0.35, child: content),
       child: content,
+    );
+
+    // A row (leaf or whole super-section) being deleted collapses + fades out
+    // before the reload drops it.
+    final removing = _removingIds.contains(entry.key);
+    return AnimatedSize(
+      duration: _kRemoveAnim,
+      curve: Curves.easeInOut,
+      alignment: Alignment.topCenter,
+      child: AnimatedOpacity(
+        opacity: removing ? 0 : 1,
+        duration: const Duration(milliseconds: 200),
+        child: removing ? const SizedBox(width: double.infinity) : row,
+      ),
     );
   }
 
@@ -433,6 +512,43 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     T item,
     LeafNode node,
   ) {
+    // Mobile (non-dense): a styled bottom sheet. Desktop keeps the popup.
+    if (!widget.dense) {
+      return IconButton(
+        icon: Icon(Icons.more_vert, size: 18, color: palette.textDim),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+        onPressed: () => showActionSheet(context, items: [
+          ActionSheetItem(
+              icon: Icons.edit_outlined,
+              label: 'Rename',
+              onTap: () => widget.onRenameLeaf(item)),
+          ActionSheetItem(
+              icon: Icons.palette_outlined,
+              label: 'Change color',
+              onTap: () => widget.onColorLeaf(item)),
+          ActionSheetItem(
+              icon: Icons.drive_file_move_outlined,
+              label: 'Move to…',
+              onTap: () => widget.onRelocate(node, copy: false)),
+          ActionSheetItem(
+              icon: Icons.copy_all_outlined,
+              label: 'Copy to…',
+              onTap: () => widget.onRelocate(node, copy: true)),
+          if (widget.onExportLeaf != null)
+            ActionSheetItem(
+                icon: Icons.picture_as_pdf_outlined,
+                label: 'Export to PDF',
+                onTap: () => widget.onExportLeaf?.call(item)),
+          ActionSheetItem(
+              icon: Icons.delete_outline,
+              label: 'Delete',
+              destructive: true,
+              onTap: () => _deleteLeaf(item)),
+        ]),
+      );
+    }
     return PopupMenuButton<String>(
       icon: Icon(Icons.more_vert, size: 18, color: palette.textDim),
       padding: EdgeInsets.zero,
@@ -449,23 +565,19 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
           case 'export':
             widget.onExportLeaf?.call(item);
           case 'delete':
-            widget.onDeleteLeaf(item);
+            _deleteLeaf(item);
         }
       },
       itemBuilder: (context) => [
-        const PopupMenuItem(value: 'rename', child: Text('Rename')),
-        const PopupMenuItem(value: 'color', child: Text('Change color')),
-        const PopupMenuItem(value: 'move', child: Text('Move to…')),
-        const PopupMenuItem(value: 'copy', child: Text('Copy to…')),
+        iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
+        iconMenuItem('color', Icons.palette_outlined, 'Change color'),
+        iconMenuItem('move', Icons.drive_file_move_outlined, 'Move to…'),
+        iconMenuItem('copy', Icons.copy_all_outlined, 'Copy to…'),
         if (widget.onExportLeaf != null)
-          const PopupMenuItem(value: 'export', child: Text('Export to PDF')),
-        PopupMenuItem(
-          value: 'delete',
-          child: Text(
-            'Delete',
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
-        ),
+          iconMenuItem('export', Icons.picture_as_pdf_outlined,
+              'Export to PDF'),
+        iconMenuItem('delete', Icons.delete_outline, 'Delete',
+            color: Theme.of(context).colorScheme.error),
       ],
     );
   }
@@ -582,6 +694,49 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     AppPalette palette,
     FolderNode folder,
   ) {
+    if (!widget.dense) {
+      return IconButton(
+        icon: Icon(Icons.more_vert, size: 18, color: palette.textDim),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+        onPressed: () => showActionSheet(context, items: [
+          ActionSheetItem(
+              icon: Icons.add,
+              label: 'New item',
+              onTap: () => widget.onAddLeafToFolder(folder)),
+          ActionSheetItem(
+              icon: Icons.create_new_folder_outlined,
+              label: 'New super-section',
+              onTap: () => widget.onAddFolderToFolder(folder)),
+          ActionSheetItem(
+              icon: Icons.edit_outlined,
+              label: 'Rename',
+              onTap: () => widget.onRenameFolder(folder)),
+          ActionSheetItem(
+              icon: Icons.palette_outlined,
+              label: 'Change color',
+              onTap: () => widget.onColorFolder(folder)),
+          ActionSheetItem(
+              icon: Icons.drive_file_move_outlined,
+              label: 'Move to…',
+              onTap: () => widget.onRelocate(folder, copy: false)),
+          ActionSheetItem(
+              icon: Icons.copy_all_outlined,
+              label: 'Copy to…',
+              onTap: () => widget.onRelocate(folder, copy: true)),
+          ActionSheetItem(
+              icon: Icons.folder_off_outlined,
+              label: 'Ungroup (keep items)',
+              onTap: () => widget.onUngroup(folder)),
+          ActionSheetItem(
+              icon: Icons.delete_outline,
+              label: 'Delete group + items',
+              destructive: true,
+              onTap: () => _deleteFolder(folder)),
+        ]),
+      );
+    }
     return PopupMenuButton<String>(
       icon: Icon(Icons.more_vert, size: 18, color: palette.textDim),
       padding: EdgeInsets.zero,
@@ -602,31 +757,22 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
           case 'ungroup':
             widget.onUngroup(folder);
           case 'delete':
-            widget.onDeleteFolder(folder);
+            _deleteFolder(folder);
         }
       },
       itemBuilder: (context) => [
-        const PopupMenuItem(value: 'add_leaf', child: Text('New item')),
-        const PopupMenuItem(
-          value: 'add_folder',
-          child: Text('New super-section'),
-        ),
+        iconMenuItem('add_leaf', Icons.add, 'New item'),
+        iconMenuItem('add_folder', Icons.create_new_folder_outlined,
+            'New super-section'),
         const PopupMenuDivider(),
-        const PopupMenuItem(value: 'rename', child: Text('Rename')),
-        const PopupMenuItem(value: 'color', child: Text('Change color')),
-        const PopupMenuItem(value: 'move', child: Text('Move to…')),
-        const PopupMenuItem(value: 'copy', child: Text('Copy to…')),
-        const PopupMenuItem(
-          value: 'ungroup',
-          child: Text('Ungroup (keep items)'),
-        ),
-        PopupMenuItem(
-          value: 'delete',
-          child: Text(
-            'Delete group + items',
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
-        ),
+        iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
+        iconMenuItem('color', Icons.palette_outlined, 'Change color'),
+        iconMenuItem('move', Icons.drive_file_move_outlined, 'Move to…'),
+        iconMenuItem('copy', Icons.copy_all_outlined, 'Copy to…'),
+        iconMenuItem('ungroup', Icons.folder_off_outlined,
+            'Ungroup (keep items)'),
+        iconMenuItem('delete', Icons.delete_outline, 'Delete group + items',
+            color: Theme.of(context).colorScheme.error),
       ],
     );
   }

@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'screens/desktop_shell_screen.dart';
-import 'screens/home_screen.dart';
+import 'screens/mobile_shell_screen.dart';
 import 'screens/note_search.dart';
 import 'services/auth_service.dart';
 import 'services/notebook_service.dart';
@@ -222,7 +222,7 @@ class _RootRouter extends StatelessWidget {
             };
             return isDesktop
                 ? const DesktopShellScreen()
-                : const HomeScreen();
+                : const MobileShellScreen();
           },
         );
       },
