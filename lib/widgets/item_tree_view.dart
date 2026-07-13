@@ -45,8 +45,10 @@ class ItemTreeView<T> extends StatefulWidget {
   final int? Function(T) colorOf;
   final String Function(T) idOf;
 
-  /// Icon drawn on each leaf row, or null to draw no icon (leaf rows already
-  /// carry a colored identity pill, so an icon is optional).
+  /// Icon drawn on each leaf row, tinted in the item's identity color — or
+  /// null for no icon, in which case a short colored pill carries the color
+  /// instead. The two are deliberately exclusive so the leaf kind is readable
+  /// at a glance: sections show a colored icon, canvases a bare pill.
   final IconData? leafIcon;
 
   final String? selectedId;
@@ -463,25 +465,22 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
             children: [
               _indentGuides(palette, entry.depth),
               SizedBox(width: widget.dense ? 12 : 16),
-              // A short colored pill carries the item's identity color and
-              // indents with the tree, keeping leaves visually lighter than
-              // folder and notebook rows.
-              Container(
-                width: 3,
-                height: widget.dense ? 14 : 18,
-                decoration: BoxDecoration(
-                  color: color,
-                  borderRadius: BorderRadius.circular(1.5),
-                ),
-              ),
-              const SizedBox(width: 9),
+              // Identity color: a tinted icon when the row kind has one
+              // (sections), else a short colored pill (canvases) — exclusive
+              // so the leaf kind stays readable at a glance.
               if (widget.leafIcon != null) ...[
-                Icon(
-                  widget.leafIcon,
-                  size: 15,
-                  color: selected ? palette.accent : palette.textDim,
-                ),
+                Icon(widget.leafIcon, size: 15, color: color),
                 const SizedBox(width: 8),
+              ] else ...[
+                Container(
+                  width: 3,
+                  height: widget.dense ? 14 : 18,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(1.5),
+                  ),
+                ),
+                const SizedBox(width: 9),
               ],
               Expanded(
                 child: Text(

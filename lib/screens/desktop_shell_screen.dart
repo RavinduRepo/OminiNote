@@ -785,7 +785,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           const SizedBox(height: 20),
           // Notebooks: return to the canvas view (re-expanding the panes) if a
           // full-pane mode is open, else toggle the left panes collapsed.
-          _railButton(palette, Icons.book_outlined, 'Notebooks',
+          // Filled while the panes are expanded (the mobile nav's selected
+          // look), outlined while collapsed.
+          _railButton(
+              palette,
+              _mainMode == _MainMode.canvas && !_sidebarCollapsed
+                  ? Icons.book
+                  : Icons.book_outlined,
+              'Notebooks',
               active: _mainMode == _MainMode.canvas && !_sidebarCollapsed,
               onTap: () => setState(() {
                     if (_mainMode != _MainMode.canvas) {
@@ -1257,20 +1264,16 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                   height: 44,
                   child: Row(
                     children: [
-                      const SizedBox(width: 6),
-                      AnimatedRotation(
-                        turns: expanded ? 0.25 : 0,
-                        duration: const Duration(milliseconds: 150),
-                        child: Icon(
-                          Icons.chevron_right,
-                          size: 18,
-                          color: palette.textDim,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
+                      const SizedBox(width: 10),
                       // Same glyph as the nav rail's Notebooks destination,
-                      // tinted in the notebook's identity color.
-                      Icon(Icons.book_outlined, size: 18, color: color),
+                      // tinted in the notebook's identity color; filled while
+                      // expanded (mirrors the mobile nav's selected state) —
+                      // no chevron, the icon carries the state.
+                      Icon(
+                        expanded ? Icons.book : Icons.book_outlined,
+                        size: 18,
+                        color: color,
+                      ),
                       const SizedBox(width: 9),
                       Expanded(
                         child: Text(

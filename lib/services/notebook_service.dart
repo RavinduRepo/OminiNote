@@ -1421,19 +1421,21 @@ class NotebookService {
             ));
             continue;
           }
-          // Alive canvas: surface individually-deleted pages.
+          // Alive canvas: surface individually-deleted pages. Page files can
+          // be multi-MB (dense ink), and this scan runs on every Bin open —
+          // so read only the head, never decode the stroke payload.
           final cvAlive = nbAlive && secDeleted is! num;
           final pagesDir = Directory('${cvDir.path}/pages');
           if (!await pagesDir.exists()) continue;
           await for (final pf in pagesDir.list(followLinks: false)) {
             if (pf is! File || !pf.path.endsWith('.json')) continue;
-            final pj = await _readJsonFile(pf);
-            final pDeleted = pj?['deletedAt'];
-            if (pDeleted is! num || pj?['purgedAt'] != null) continue;
+            final head = await _pageTombstoneHead(pf);
+            final pDeletedMs = head?.deletedAt;
+            if (pDeletedMs == null || head!.purged) continue;
             out.add(BinItem(
               type: BinItemType.page,
               name: 'Page',
-              deletedAt: DateTime.fromMillisecondsSinceEpoch(pDeleted.toInt()),
+              deletedAt: DateTime.fromMillisecondsSinceEpoch(pDeletedMs),
               notebookId: nbId,
               sectionId: secId,
               canvasId: cvId,
@@ -1456,6 +1458,37 @@ class NotebookService {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Answers "is this page tombstoned / purged?" from the first bytes of the
+  /// file. [CanvasPage.toJson] serializes the sync envelope (deletedAt,
+  /// purgedAt) before the stroke/object arrays, so the head is decisive
+  /// without decoding a possibly multi-MB body — the difference between the
+  /// Bin opening instantly and janking for seconds on ink-heavy stores.
+  /// Falls back to a full parse if the head doesn't look as expected.
+  Future<({int? deletedAt, bool purged})?> _pageTombstoneHead(File f) async {
+    try {
+      final raf = await f.open();
+      try {
+        final head = String.fromCharCodes(await raf.read(768));
+        final del = RegExp(r'"deletedAt"\s*:\s*(null|\d+)').firstMatch(head);
+        if (del != null) {
+          final v = del.group(1)!;
+          return (
+            deletedAt: v == 'null' ? null : int.parse(v),
+            purged: RegExp(r'"purgedAt"\s*:\s*\d+').hasMatch(head),
+          );
+        }
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {}
+    final pj = await _readJsonFile(f);
+    if (pj == null) return null;
+    return (
+      deletedAt: (pj['deletedAt'] as num?)?.toInt(),
+      purged: pj['purgedAt'] != null,
+    );
   }
 
   /// Restores a tombstoned item: clears `deletedAt`, bumps `rev` (so the
