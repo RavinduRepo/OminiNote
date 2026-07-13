@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/clipboard_images.dart';
+import '../utils/progress_banner.dart';
 import '../utils/html_text.dart';
 import '../utils/markdown_text.dart';
 import '../utils/url_text.dart';
@@ -22,6 +23,7 @@ import '../models/element.dart';
 import '../models/canvas.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
+import '../services/pdf_export_isolate.dart';
 import '../services/pdf_exporter.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
@@ -1783,30 +1785,27 @@ class _CanvasScreenState extends State<CanvasScreen> {
     await c.flushSaves();
     if (!mounted) return;
 
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => const AlertDialog(
-        content: Row(
-          children: [
-            CircularProgressIndicator(),
-            SizedBox(width: 20),
-            Text('Exporting PDF…'),
-          ],
-        ),
-      ),
-    );
+    // Non-modal progress; the PDF builds on a background isolate so the canvas
+    // stays interactive. Empty outline → no bookmarks (same as a plain
+    // single-canvas export).
+    final banner = ProgressBanner.show(context, 'Exporting PDF…');
 
     try {
-      final exporter = SyncfusionPdfExporter();
-      final bytes = await exporter.export(
-        canvas: widget.canvas,
-        pages: c.pages,
-        assetBytes: (assetId) =>
-            _service.assetFile(widget.canvas, assetId).readAsBytes(),
+      final bytes = await exportPdfInIsolate(
+        [
+          PdfExportItem(
+            outline: const [],
+            canvas: widget.canvas,
+            pages: c.pages,
+            assetBytes: (assetId) =>
+                _service.assetFile(widget.canvas, assetId).readAsBytes(),
+          ),
+        ],
+        onProgress: (done, total) =>
+            banner.report(total == 0 ? null : done / total),
       );
+      banner.close();
       if (!mounted) return;
-      Navigator.pop(context); // progress dialog
 
       final fileName =
           '${widget.canvas.name.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_')}.pdf';
@@ -1826,7 +1825,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       }
       _toast('Exported to $savedPath');
     } catch (err) {
-      if (mounted && Navigator.canPop(context)) Navigator.pop(context);
+      banner.close();
       _toast('Export failed: $err');
     }
   }

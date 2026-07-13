@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../services/pdf_export_isolate.dart';
 import '../services/pdf_exporter.dart';
+import 'progress_banner.dart';
 
 /// Runs a multi-level PDF export ([items]) with a progress dialog and a save
 /// dialog, mirroring the per-canvas export flow in `canvas_screen`. Shared by
@@ -22,25 +24,23 @@ Future<void> runTreeExport(
     return;
   }
 
-  showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (context) => AlertDialog(
-      content: Row(
-        children: [
-          const CircularProgressIndicator(),
-          const SizedBox(width: 20),
-          Text('Exporting ${items.length} '
-              'canvas${items.length == 1 ? '' : 'es'}…'),
-        ],
-      ),
-    ),
+  // Non-modal live progress: the PDF is built on a background isolate, so the
+  // app stays usable while a big notebook/section exports.
+  final banner = ProgressBanner.show(
+    context,
+    'Exporting ${items.length} canvas${items.length == 1 ? '' : 'es'}…',
   );
 
   try {
-    final bytes = await SyncfusionPdfExporter().exportTree(items);
+    final bytes = await exportPdfInIsolate(
+      items,
+      onProgress: (done, total) => banner.report(
+        total == 0 ? null : done / total,
+        'Exporting canvas $done of $total…',
+      ),
+    );
+    banner.close();
     if (!context.mounted) return;
-    Navigator.pop(context); // progress dialog
 
     final safe = fileName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
     final savedPath = await FilePicker.platform.saveFile(
@@ -64,7 +64,7 @@ Future<void> runTreeExport(
       ),
     );
   } catch (err) {
-    if (context.mounted && Navigator.canPop(context)) Navigator.pop(context);
+    banner.close();
     messenger.showSnackBar(
       SnackBar(
         content: Text('Export failed: $err'),
