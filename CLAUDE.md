@@ -23,6 +23,8 @@ Sync builds need the gitignored `.dart_defines.json` (OAuth client ids; template
 
 No custom lint config beyond default `package:flutter_lints/flutter.yaml`.
 
+**OneNote importer** (`tools/onenote_importer/`, own README): recovers `.onepkg`/`.one` notes into the app's on-disk store — a Rust extractor built on Joplin's OneNote parser (source npm-fetched into gitignored `.cache/`) dumps `extract.json` + lossless assets, `preview.html` visualizes it, and `convert.dart` (pure Dart, run via `dart run`) emits/installs the store. Section groups → notebook `FolderNode`s, sub-pages → canvas-tree `FolderNode`s, and each infinite OneNote page is tiled into rows/pages with cuts only where no element crosses. Covered by `test/onenote_import_test.dart` (tiling invariants + model round-trip of converted output).
+
 ## Architecture
 
 Single-package Flutter app, no state-management library (plain `ChangeNotifier` + `setState`), no backend — persistence is local JSON files. Key dependencies: `pdfrx` (PDF page **rendering only** — its viewer/gestures are not used), `perfect_freehand` (ink outlines), `syncfusion_flutter_pdf` (vector PDF export; Community License), `file_picker`, `path_provider`, `crypto` (content-addressed assets), `super_clipboard` (OS image/HTML clipboard), `html` (parsing pasted rich-text HTML into styled runs).

@@ -1,0 +1,7 @@
+# Fetched parser source (npm pack @joplin/onenote-converter)
+.cache/
+# Build artifacts
+extractor/target/
+# Extracted/converted user data
+input/
+output/

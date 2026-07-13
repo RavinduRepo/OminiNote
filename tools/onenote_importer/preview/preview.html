@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OneNote Extract Preview</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; display: flex; height: 100vh; overflow: hidden;
+         background: #1c1f26; color: #e9ecf1; }
+  #sidebar { width: 260px; min-width: 260px; overflow-y: auto; border-right: 1px solid #2a313d; padding: 10px; }
+  #sidebar h1 { font-size: 14px; margin: 4px 0 10px; }
+  .section-title { font-weight: 600; margin: 12px 0 4px; color: #e9a23b; }
+  .group-tag { font-weight: 400; font-size: 11px; opacity: .7; }
+  .page-btn { display: block; width: 100%; text-align: left; background: none; border: none; color: inherit;
+              padding: 4px 6px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .page-btn:hover { background: #262c37; }
+  .page-btn.active { background: #3a3423; color: #e9a23b; }
+  .page-btn .lvl { opacity: .5; font-size: 11px; }
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #toolbar { padding: 8px 12px; border-bottom: 1px solid #2a313d; display: flex; gap: 16px; align-items: center; }
+  #toolbar label { display: flex; align-items: center; gap: 5px; }
+  #meta { font-size: 11px; opacity: .7; white-space: pre; }
+  #viewport { flex: 1; overflow: auto; background: #12151b; }
+  #canvas { position: relative; background: #ffffff; margin: 24px; box-shadow: 0 2px 14px rgba(0,0,0,.5);
+            transform-origin: 0 0; }
+  #canvas img { position: absolute; display: block; }
+  #canvas svg { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .text-block { position: absolute; color: #000; }
+  .text-block p { margin: 0 0 2px; white-space: pre-wrap; }
+  .file-chip { position: absolute; background: #f2f2f2; border: 1px solid #bbb; border-radius: 6px;
+               padding: 6px 10px; color: #333; font-size: 12px; text-decoration: none; }
+</style>
+</head>
+<body>
+<div id="sidebar"><h1>OneNote Extract</h1><div id="pages"></div></div>
+<div id="main">
+  <div id="toolbar">
+    <label>Zoom <input id="zoom" type="range" min="0.1" max="3" step="0.05" value="0.75"> <span id="zoomv">75%</span></label>
+    <label><input id="tImg" type="checkbox" checked> Images</label>
+    <label><input id="tInk" type="checkbox" checked> Ink</label>
+    <label><input id="tTxt" type="checkbox" checked> Text</label>
+    <label><input id="tFile" type="checkbox" checked> Files</label>
+    <div id="meta"></div>
+  </div>
+  <div id="viewport"><div id="canvas"></div></div>
+</div>
+<script src="extract.js"></script>
+<script>
+(() => {
+  const d = window.EXTRACT;
+  if (!d) { document.body.textContent = 'extract.js not found — run the extractor first.'; return; }
+
+  // Units: layout in half-inches, ink in HIMETRIC (1/2540 in). Render at 96dpi:
+  const HALF_IN = 48;            // px per half-inch
+  const HM = 96 / 2540;          // px per himetric unit
+  const PAD = 40;                // canvas padding px
+
+  const canvas = document.getElementById('canvas');
+  const meta = document.getElementById('meta');
+  const pagesEl = document.getElementById('pages');
+  let zoom = 0.75, current = null;
+
+  const colorOf = (ref) => {
+    if (ref == null) return 'rgb(0,0,0)';
+    const r = ref & 0xFF, g = (ref >> 8) & 0xFF, b = (ref >> 16) & 0xFF;
+    return `rgb(${r}, ${g}, ${b})`;
+  };
+
+  function itemBounds(p) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const grow = (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); };
+    for (const it of p.items) {
+      if (it.kind === 'image') {
+        const x = (it.xHalfIn ?? 0) * HALF_IN, y = (it.yHalfIn ?? 0) * HALF_IN;
+        grow(x, y); grow(x + (it.wHalfIn ?? 4) * HALF_IN, y + (it.hHalfIn ?? 4) * HALF_IN);
+      } else if (it.kind === 'ink') {
+        const ox = (it.offsetXHalfIn ?? 0) * HALF_IN, oy = (it.offsetYHalfIn ?? 0) * HALF_IN;
+        for (const s of it.strokes) for (const [x, y] of s.points) grow(ox + x * HM, oy + y * HM);
+      } else if (it.kind === 'text' || it.kind === 'file') {
+        const x = (it.xHalfIn ?? 0) * HALF_IN, y = (it.yHalfIn ?? 0) * HALF_IN;
+        grow(x, y); grow(x + ((it.maxWidthHalfIn ?? 10) * HALF_IN), y + 40);
+      }
+    }
+    if (minX === Infinity) { minX = 0; minY = 0; maxX = 400; maxY = 300; }
+    return { minX, minY, maxX, maxY };
+  }
+
+  function render(page) {
+    current = page;
+    canvas.replaceChildren();
+    const b = itemBounds(page);
+    const w = b.maxX - b.minX + PAD * 2, h = b.maxY - b.minY + PAD * 2;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.style.transform = `scale(${zoom})`;
+    const dx = PAD - b.minX, dy = PAD - b.minY;
+
+    const counts = { image: 0, ink: 0, text: 0, file: 0, strokes: 0 };
+
+    for (const it of page.items) {
+      if (it.kind === 'image' && document.getElementById('tImg').checked) {
+        counts.image++;
+        if (!it.asset) continue;
+        const img = document.createElement('img');
+        img.src = it.asset;
+        img.style.left = ((it.xHalfIn ?? 0) * HALF_IN + dx) + 'px';
+        img.style.top = ((it.yHalfIn ?? 0) * HALF_IN + dy) + 'px';
+        if (it.wHalfIn) img.style.width = (it.wHalfIn * HALF_IN) + 'px';
+        if (it.hHalfIn) img.style.height = (it.hHalfIn * HALF_IN) + 'px';
+        img.title = it.filename || '';
+        canvas.appendChild(img);
+      } else if (it.kind === 'ink' && document.getElementById('tInk').checked) {
+        counts.ink++;
+        counts.strokes += it.strokes.length;
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('width', w); svg.setAttribute('height', h);
+        svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        const ox = (it.offsetXHalfIn ?? 0) * HALF_IN + dx, oy = (it.offsetYHalfIn ?? 0) * HALF_IN + dy;
+        for (const s of it.strokes) {
+          if (!s.points.length) continue;
+          let dstr = '';
+          for (let i = 0; i < s.points.length; i++) {
+            const [x, y] = s.points[i];
+            dstr += (i ? 'L' : 'M') + (ox + x * HM).toFixed(1) + ' ' + (oy + y * HM).toFixed(1);
+          }
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', dstr);
+          path.setAttribute('fill', 'none');
+          path.setAttribute('stroke', colorOf(s.colorRef));
+          path.setAttribute('stroke-width', Math.max(0.6, s.widthHm * HM));
+          path.setAttribute('opacity', s.transparency ? ((255 - s.transparency) / 255).toFixed(2) : '1');
+          const round = !s.penTip;
+          path.setAttribute('stroke-linecap', round ? 'round' : 'square');
+          path.setAttribute('stroke-linejoin', round ? 'round' : 'bevel');
+          svg.appendChild(path);
+        }
+        canvas.appendChild(svg);
+      } else if (it.kind === 'text' && document.getElementById('tTxt').checked) {
+        counts.text++;
+        const div = document.createElement('div');
+        div.className = 'text-block';
+        div.style.left = ((it.xHalfIn ?? 0) * HALF_IN + dx) + 'px';
+        div.style.top = ((it.yHalfIn ?? 0) * HALF_IN + dy) + 'px';
+        if (it.maxWidthHalfIn) div.style.maxWidth = (it.maxWidthHalfIn * HALF_IN) + 'px';
+        for (const para of it.paragraphs) {
+          const pEl = document.createElement('p');
+          pEl.style.marginLeft = (para.indent * 14) + 'px';
+          for (const run of para.runs) {
+            const span = document.createElement('span');
+            span.textContent = run.text;
+            if (run.bold) span.style.fontWeight = '700';
+            if (run.italic) span.style.fontStyle = 'italic';
+            if (run.underline) span.style.textDecoration = 'underline';
+            if (run.fontSizeHalfPt) span.style.fontSize = (run.fontSizeHalfPt / 2 * 96 / 72) + 'px';
+            if (run.colorRgb) span.style.color = `rgb(${run.colorRgb.join(',')})`;
+            if (run.highlightRgb) span.style.background = `rgb(${run.highlightRgb.join(',')})`;
+            if (run.font) span.style.fontFamily = run.font;
+            pEl.appendChild(span);
+          }
+          div.appendChild(pEl);
+        }
+        canvas.appendChild(div);
+      } else if (it.kind === 'file' && document.getElementById('tFile').checked) {
+        counts.file++;
+        const a = document.createElement('a');
+        a.className = 'file-chip';
+        a.textContent = '📎 ' + (it.filename || 'file');
+        if (it.asset) a.href = it.asset;
+        a.style.left = ((it.xHalfIn ?? 1) * HALF_IN + dx) + 'px';
+        a.style.top = ((it.yHalfIn ?? 1) * HALF_IN + dy) + 'px';
+        canvas.appendChild(a);
+      }
+    }
+
+    meta.textContent =
+      `${page.title || '(untitled)'} — images: ${counts.image}, ink objects: ${counts.ink} (${counts.strokes} strokes), ` +
+      `text blocks: ${counts.text}, files: ${counts.file}  |  content ${(Math.round(b.maxX - b.minX))}×${Math.round(b.maxY - b.minY)} px @96dpi`;
+  }
+
+  // Sidebar
+  for (const s of d.sections) {
+    const title = document.createElement('div');
+    title.className = 'section-title';
+    title.textContent = s.name;
+    if (s.groupPath && s.groupPath.length) {
+      const tag = document.createElement('span');
+      tag.className = 'group-tag';
+      tag.textContent = '  (' + s.groupPath.join(' / ') + ')';
+      title.appendChild(tag);
+    }
+    pagesEl.appendChild(title);
+    for (const p of s.pages) {
+      const btn = document.createElement('button');
+      btn.className = 'page-btn';
+      const indent = Math.max(0, (p.level || 1) - 1);
+      btn.style.paddingLeft = (6 + indent * 14) + 'px';
+      btn.innerHTML = `${p.title ? '' : '<i>'}${(p.title || '(untitled)').replace(/</g, '&lt;')}${p.title ? '' : '</i>'} <span class="lvl">${indent ? 'sub' : ''}</span>`;
+      btn.onclick = () => {
+        document.querySelectorAll('.page-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        render(p);
+      };
+      pagesEl.appendChild(btn);
+    }
+  }
+
+  document.getElementById('zoom').oninput = (e) => {
+    zoom = Number(e.target.value);
+    document.getElementById('zoomv').textContent = Math.round(zoom * 100) + '%';
+    if (current) canvas.style.transform = `scale(${zoom})`;
+  };
+  for (const id of ['tImg', 'tInk', 'tTxt', 'tFile']) {
+    document.getElementById(id).onchange = () => current && render(current);
+  }
+
+  const first = d.sections.flatMap(s => s.pages)[0];
+  if (first) { document.querySelector('.page-btn')?.classList.add('active'); render(first); }
+})();
+</script>
+</body>
+</html>

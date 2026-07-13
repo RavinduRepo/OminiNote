@@ -1,0 +1,15 @@
+[package]
+name = "onenote_extractor"
+version = "0.1.0"
+edition = "2021"
+description = "Dumps OneNote .one sections to JSON + lossless assets, for import into omininote"
+
+[dependencies]
+# Joplin's OneNote parser source, fetched by ../fetch_parser.ps1 into ../.cache/
+parser = { path = "../.cache/package/parser" }
+parser-utils = { path = "../.cache/package/parser-utils" }
+serde_json = "1"
+time = "0.3"
+
+[profile.release]
+opt-level = 2
