@@ -340,6 +340,9 @@ List<double> computeCuts({
   final merged = mergeIntervals(occupied);
   final cuts = <double>[];
   var cursor = start;
+  // Never leave a sliver band/page: a cut must keep at least this much on
+  // the far side, else we simply don't cut.
+  final minRemainder = math.max(200.0, target * 0.35);
 
   while (end - cursor > target * 1.6) {
     final windowMin = cursor + target * 0.6;
@@ -372,7 +375,7 @@ List<double> computeCuts({
         }
       }
     }
-    if (cut == null || cut <= cursor + 1 || cut >= end - 1) break;
+    if (cut == null || cut <= cursor + 1 || cut >= end - minRemainder) break;
     cuts.add(cut);
     cursor = cut;
   }

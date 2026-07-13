@@ -1,0 +1,222 @@
+--- a/parser/src/local_onestore/file_node/file_node.rs	1985-10-26 13:45:00.000000000 +0530
++++ b/parser/src/local_onestore/file_node/file_node.rs	2026-07-13 11:04:33.867173400 +0530
+@@ -374,7 +374,7 @@
+     pub rid: ExGuid,
+     pub rid_dependent: ExGuid,
+     reserved_time_creation: u64,
+-    revision_role: u32,
++    pub revision_role: u32,
+     odcs_default: u16,
+ }
+ 
+@@ -384,7 +384,7 @@
+     pub rid: ExGuid,
+     /// ID of a dependency revision
+     pub rid_dependent: ExGuid,
+-    revision_role: u32,
++    pub revision_role: u32,
+     odcs_default: u16,
+ }
+ 
+@@ -392,7 +392,7 @@
+ #[allow(dead_code)]
+ pub struct RevisionManifestStart7FND {
+     pub base: RevisionManifestStart6FND,
+-    gctxid: ExGuid,
++    pub gctxid: ExGuid,
+ }
+ 
+ #[derive(Debug, Clone, Parse)]
+--- a/parser/src/local_onestore/objects/revision.rs	1985-10-26 13:45:00.000000000 +0530
++++ b/parser/src/local_onestore/objects/revision.rs	2026-07-13 11:18:02.963279100 +0530
+@@ -23,7 +23,16 @@
+ #[derive(Debug)]
+ pub struct Revision {
+     pub id: ExGuid,
+-    _parent_id: ExGuid,
++    /// The dependency revision (`rid_dependent`) this revision's object
++    /// groups delta against; nil when the revision is self-contained.
++    pub parent_id: ExGuid,
++    /// Revision role from the manifest start node (1 = default content).
++    /// See [MS-ONESTORE 2.1.12].
++    pub revision_role: u32,
++    /// Revision context (`gctxid`) from RevisionManifestStart7FND; nil for
++    /// Start4/Start6. Non-nil contexts hold page version history — the
++    /// current page content lives in the nil (default) context.
++    pub context: ExGuid,
+     pub object_groups: Vec<ObjectGroupList>,
+     pub global_id_tables: Vec<GlobalIdTable>,
+     root_objects: HashMap<RootRole, ExGuid>,
+@@ -76,12 +85,25 @@
+ 
+     fn parse(iterator: &mut FileNodeDataIterator, context: &ParseContext) -> Result<Self> {
+         let start = iterator.next();
+-        let (id, parent_id) = match start {
+-            Some(FileNodeData::RevisionManifestStart4FND(data)) => (data.rid, data.rid_dependent),
+-            Some(FileNodeData::RevisionManifestStart6FND(data)) => (data.rid, data.rid_dependent),
+-            Some(FileNodeData::RevisionManifestStart7FND(data)) => {
+-                (data.base.rid, data.base.rid_dependent)
+-            }
++        let (id, parent_id, revision_role, revision_context) = match start {
++            Some(FileNodeData::RevisionManifestStart4FND(data)) => (
++                data.rid,
++                data.rid_dependent,
++                data.revision_role,
++                ExGuid::fallback(),
++            ),
++            Some(FileNodeData::RevisionManifestStart6FND(data)) => (
++                data.rid,
++                data.rid_dependent,
++                data.revision_role,
++                ExGuid::fallback(),
++            ),
++            Some(FileNodeData::RevisionManifestStart7FND(data)) => (
++                data.base.rid,
++                data.base.rid_dependent,
++                data.base.revision_role,
++                data.gctxid,
++            ),
+             _ => {
+                 return Err(
+                     onestore_parse_error!("Invalid start node for revision: {:?}", start).into(),
+@@ -167,7 +189,9 @@
+ 
+         Ok(Revision {
+             id,
+-            _parent_id: parent_id,
++            parent_id,
++            revision_role,
++            context: revision_context,
+             object_groups,
+             global_id_tables,
+             root_objects,
+--- a/parser/src/local_onestore/objects/object_space.rs	1985-10-26 13:45:00.000000000 +0530
++++ b/parser/src/local_onestore/objects/object_space.rs	2026-07-13 11:18:31.990946900 +0530
+@@ -72,14 +72,75 @@
+             //      .onetoc2 files, which allow references from one ID table to another.
+             let _global_id_tables = &revision.global_id_tables;
+ 
++            self.id_to_revision.insert(revision.id, revision.clone());
++        }
++
++        // Objects must be resolved against the *current* revision's dependency
++        // chain (the revision plus its `rid_dependent` ancestors, child
++        // overriding parent). Flattening every revision's objects into one map
++        // (the old behavior) let page **version-history** revisions — which
++        // appear later in the file and reuse the same object ids — overwrite
++        // the current objects, so edited pages parsed as their oldest
++        // snapshot (observed: pages with content imported empty).
++        let current = self
++            .revision_list
++            .revisions
++            .iter()
++            .rev()
++            .find(|revision| {
++                revision.revision_role == 1
++                    && revision.context.is_nil()
++                    && revision.content_root().is_some()
++            })
++            .or_else(|| {
++                self.revision_list
++                    .revisions
++                    .iter()
++                    .find(|revision| revision.content_root().is_some())
++            })
++            .cloned();
++
++        let mut chain: Vec<Rc<Revision>> = Vec::new();
++        let mut next = current;
++        while let Some(revision) = next {
++            if chain.len() > 4096 || chain.iter().any(|r| r.id == revision.id) {
++                break; // cycle guard
++            }
++            next = if revision.parent_id.is_nil() {
++                None
++            } else {
++                self.id_to_revision.get(&revision.parent_id).cloned()
++            };
++            chain.push(revision);
++        }
++
++        // Walk the chain child-first; within a revision keep the original
++        // last-group-wins order, across revisions the child's entry wins.
++        for revision in &chain {
++            let mut revision_objects: HashMap<ExGuid, Rc<Object>> = HashMap::new();
+             for object_group in &revision.object_groups {
+                 let id_table = &object_group.id_table;
+                 for object_ref in &object_group.objects {
+                     let id = id_table.resolve_id(&object_ref.compact_id)?;
+-                    self.id_to_object.insert(id, object_ref.clone());
++                    revision_objects.insert(id, object_ref.clone());
++                }
++            }
++            for (id, object) in revision_objects {
++                self.id_to_object.entry(id).or_insert(object);
++            }
++        }
++
++        // Fallback for anything the chain didn't reach (e.g. objects only
++        // referenced through metadata revisions): fill gaps in file order
++        // without overwriting chain-resolved objects.
++        for revision in &self.revision_list.revisions {
++            for object_group in &revision.object_groups {
++                let id_table = &object_group.id_table;
++                for object_ref in &object_group.objects {
++                    let id = id_table.resolve_id(&object_ref.compact_id)?;
++                    self.id_to_object.entry(id).or_insert_with(|| object_ref.clone());
+                 }
+             }
+-            self.id_to_revision.insert(revision.id, revision.clone());
+         }
+         Ok(())
+     }
+@@ -90,24 +151,42 @@
+         self.id_to_object.get(&id).map(|result| result.data.clone())
+     }
+ 
++    // The current state of an object space is the *last* revision manifest
++    // declared for (revision role 1 = default content, nil context). Page
++    // version history is stored as additional revisions under non-nil
++    // contexts (RevisionManifestStart7FND's gctxid) — which is why naively
++    // taking the last revision (the old TODO here) returned version-history
++    // data, and taking the first returned the oldest snapshot (empty pages
++    // for anything edited after creation). See [MS-ONESTORE] 2.1.8/2.1.12.
+     fn content_root(&self) -> Option<ExGuid> {
+         self.revision_list
+             .revisions
+             .iter()
+-            // TODO: It would make more sense to use the **last** revision, rather than
+-            //       the first to get the content root. However, doing so seems to return
+-            //       version history information, rather than the true content root.
+-            //       In the future, if there are issues related to importing the wrong versions
+-            //       of pages, look into this.
+-            // .rev()
++            .rev()
++            .filter(|revision| revision.revision_role == 1 && revision.context.is_nil())
+             .find_map(|revision| revision.content_root())
++            // Fallback: first revision with any content root (old behavior),
++            // for files where the role/context filter matches nothing.
++            .or_else(|| {
++                self.revision_list
++                    .revisions
++                    .iter()
++                    .find_map(|revision| revision.content_root())
++            })
+     }
+ 
+     fn metadata_root(&self) -> Option<ExGuid> {
+         self.revision_list
+             .revisions
+             .iter()
+-            // .rev() // TODO: Why does calling .rev() result in the wrong metadata being returned?
++            .rev()
++            .filter(|revision| revision.revision_role == 1 && revision.context.is_nil())
+             .find_map(|revision| revision.metadata_root())
++            .or_else(|| {
++                self.revision_list
++                    .revisions
++                    .iter()
++                    .find_map(|revision| revision.metadata_root())
++            })
+     }
+ }

@@ -33,7 +33,20 @@ The extractor builds against [Joplin's OneNote parser](https://www.npmjs.com/pac
 cd tools/onenote_importer/.cache
 npm pack @joplin/onenote-converter --silent
 tar -xzf joplin-onenote-converter-*.tgz     # creates .cache/package/
+cd package
+patch -p1 < ..\..\patches\parser-current-revision.patch
 ```
+
+**The patch is required.** Upstream, the parser resolves objects by flattening
+every revision of an object space into one map, letting page **version
+history** revisions (later in the file, same object ids) overwrite the current
+objects — any page edited after creation imports as its oldest snapshot
+(observed: pages with heavy ink + screenshots importing completely empty).
+The patch resolves objects through the current revision's `rid_dependent`
+dependency chain (child overrides parent) and picks the current revision as
+the last manifest with revision role 1 in the nil context (non-nil `gctxid`
+contexts hold version history). See [MS-ONESTORE] 2.1.8/2.1.12. Worth
+upstreaming to Joplin.
 
 ### 1. Unpack the .onepkg
 
@@ -110,6 +123,9 @@ conversion, sub-page tree building, and — when a converted store exists under
 `output/` — round-trips the whole store through the app's real models.
 
 ## Notes / limitations
+
+- A page whose ink/images form one continuous region with no crossing-free
+  gap stays on a single (possibly large) page — cutting would slice strokes.
 
 - Text box heights are estimated (the app re-measures on first edit).
 - Ink embedded *inside* a text line (handwriting-as-text) is placed at its
