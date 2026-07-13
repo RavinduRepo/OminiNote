@@ -316,26 +316,13 @@ class _NotebookRow extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
           child: Row(
             children: [
-              // Solid initial chip: notebooks read as the top-level item
-              // (matches the desktop sidebar's collapsed rail).
-              Container(
+              // The nav-rail/desktop book glyph in the notebook's identity
+              // color (matches the desktop sidebar rows; no expanded state on
+              // mobile, so always outlined).
+              SizedBox(
                 width: 38,
                 height: 38,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: identity,
-                  borderRadius: BorderRadius.circular(kRadius),
-                ),
-                child: Text(
-                  notebook.name.isNotEmpty
-                      ? notebook.name[0].toUpperCase()
-                      : '?',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 16,
-                  ),
-                ),
+                child: Icon(Icons.book_outlined, size: 26, color: identity),
               ),
               const SizedBox(width: 12),
               Expanded(
