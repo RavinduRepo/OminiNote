@@ -81,9 +81,14 @@ class _SearchScreenState extends State<_SearchScreen> {
   final _svc = SearchService();
   static const double _rowExtent = 62;
 
+  /// Indexes at/above this size debounce the per-keystroke filter; smaller ones
+  /// filter instantly (no perceptible lag, and no debounce delay to feel).
+  static const int _kInstantFilterMax = 400;
+
   List<SearchResult> _results = [];
   int _highlighted = 0;
   bool _navigated = false; // guards against Enter firing open twice
+  Timer? _filterDebounce;
 
   @override
   void initState() {
@@ -103,6 +108,7 @@ class _SearchScreenState extends State<_SearchScreen> {
 
   @override
   void dispose() {
+    _filterDebounce?.cancel();
     widget.focusSignal?.removeListener(_focusField);
     _fieldFocus.dispose();
     _controller.dispose();
@@ -111,6 +117,19 @@ class _SearchScreenState extends State<_SearchScreen> {
   }
 
   void _onQueryChanged(String q) {
+    _filterDebounce?.cancel();
+    // Small index: filter instantly. Large index: debounce so the O(n) filter
+    // doesn't run on every keystroke.
+    if (widget.index.length < _kInstantFilterMax) {
+      _applyFilter(q);
+    } else {
+      _filterDebounce =
+          Timer(const Duration(milliseconds: 140), () => _applyFilter(q));
+    }
+  }
+
+  void _applyFilter(String q) {
+    if (!mounted) return;
     final query = q.trim();
     setState(() {
       _results = query.isEmpty ? const [] : _svc.filter(widget.index, query);
@@ -246,7 +265,14 @@ class _SearchScreenState extends State<_SearchScreen> {
               controller: _controller,
               focusNode: _fieldFocus,
               onChanged: _onQueryChanged,
-              onSubmitted: (_) => _openHighlighted(),
+              onSubmitted: (_) {
+                // Flush any pending debounced filter so Enter opens a result
+                // matching what's currently typed (setState updates _results
+                // synchronously before _openHighlighted reads it).
+                _filterDebounce?.cancel();
+                _applyFilter(_controller.text);
+                _openHighlighted();
+              },
               textInputAction: TextInputAction.search,
               decoration: const InputDecoration(
                 hintText: 'Search notes & bookmarks',

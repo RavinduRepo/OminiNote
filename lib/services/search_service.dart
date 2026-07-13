@@ -55,6 +55,15 @@ class SearchService {
   /// Walks the whole tree (notebooks → sections → canvases → bookmarks) and
   /// returns a flat index. Reads section.json / canvas.json per item, so this
   /// is O(sections + canvases) file reads — build it when search opens.
+  ///
+  /// The section and canvas reads are the dominant cost (sequential disk I/O on
+  /// a large store), so they run **bounded-concurrently** ([_kReadConcurrency]
+  /// at a time) instead of one-after-another — the index builds far faster
+  /// without flooding the OS with file handles. Result *order* is preserved
+  /// (tree order), and per-item semantics are unchanged (`getSection`/
+  /// `getCanvas` still filter tombstoned items). The tiny structure-only decode
+  /// stays on the main isolate — offloading it wouldn't pay (the models must be
+  /// built here anyway to navigate to results).
   Future<List<SearchResult>> buildIndex() async {
     final out = <SearchResult>[];
     final notebooks = await _service.getNotebooks();
@@ -76,8 +85,10 @@ class SearchService {
           folderId: id,
         ));
       });
-      for (final sectionId in nb.allSectionIds) {
-        final section = await _service.getSection(nb.id, sectionId);
+      final sectionIds = nb.allSectionIds.toList();
+      final sections = await _mapBounded(
+          sectionIds, (id) => _service.getSection(nb.id, id));
+      for (final section in sections) {
         if (section == null) continue;
         out.add(SearchResult(
           kind: SearchKind.section,
@@ -98,10 +109,12 @@ class SearchService {
             folderId: id,
           ));
         });
-        for (final canvasId in section.allCanvasIds) {
-          final canvas = await _service.getCanvas(nb.id, section.id, canvasId);
+        final canvasIds = section.allCanvasIds.toList();
+        final canvases = await _mapBounded(
+            canvasIds, (id) => _service.getCanvas(nb.id, section.id, id));
+        final path = '${nb.name} › ${section.name}';
+        for (final canvas in canvases) {
           if (canvas == null) continue;
-          final path = '${nb.name} › ${section.name}';
           out.add(SearchResult(
             kind: SearchKind.canvas,
             title: canvas.name,
@@ -125,6 +138,29 @@ class SearchService {
       }
     }
     return out;
+  }
+
+  /// Max concurrent section/canvas file reads while building the index.
+  static const int _kReadConcurrency = 8;
+
+  /// Runs [task] over [items] with at most [_kReadConcurrency] in flight,
+  /// returning results in input order. `i = next++` is safe: the isolate is
+  /// single-threaded, so workers only interleave at `await` points.
+  Future<List<R>> _mapBounded<T, R>(
+      List<T> items, Future<R> Function(T) task) async {
+    final results = List<R?>.filled(items.length, null);
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final i = next++;
+        if (i >= items.length) break;
+        results[i] = await task(items[i]);
+      }
+    }
+
+    final n = items.length < _kReadConcurrency ? items.length : _kReadConcurrency;
+    await Future.wait([for (var k = 0; k < n; k++) worker()]);
+    return results.cast<R>();
   }
 
   /// Depth-first walk collecting every super-section (folder) id + name.

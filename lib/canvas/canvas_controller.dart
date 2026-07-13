@@ -2800,6 +2800,7 @@ class CanvasController extends ChangeNotifier {
     canvas.bookmarks.add(bm);
     _markDirty(const {}, structural: true);
     notifyListeners();
+    unawaited(_flushThenReindex());
     return bm;
   }
 
@@ -2807,6 +2808,17 @@ class CanvasController extends ChangeNotifier {
     canvas.bookmarks.removeWhere((b) => b.id == bm.id);
     _markDirty(const {}, structural: true);
     notifyListeners();
+    unawaited(_flushThenReindex());
+  }
+
+  /// Persists the canvas *now* (rather than after the 500ms autosave) and then
+  /// bumps the data-changed signal so the search index reindexes — a bookmark
+  /// add/remove must be searchable without an app restart. Order matters: the
+  /// reindex reads canvas.json from disk, so the flush has to land first, or it
+  /// would race the debounced reindex and read a stale file.
+  Future<void> _flushThenReindex() async {
+    await flushSaves();
+    SyncService().notifyDataChanged();
   }
 
   /// Jumps to a bookmark's page (no-op if that page is gone).
