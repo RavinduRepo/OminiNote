@@ -281,7 +281,7 @@ class CanvasPainter extends CustomPainter {
         ),
       );
       if (outlinePoints.isEmpty) return;
-      outline = Path()..addPolygon(outlinePoints, true);
+      outline = _smoothOutlinePath(outlinePoints);
       stroke.cachedOutline = outline;
     }
 
@@ -293,6 +293,27 @@ class CanvasPainter extends CustomPainter {
             ? stroke.color.withValues(alpha: 0.35)
             : stroke.color,
     );
+  }
+
+  /// Builds the fill path for a `perfect_freehand` outline as a **smooth closed
+  /// curve** instead of a straight-segment polygon. Each outline point is a
+  /// quadratic-bézier control point and the midpoint between consecutive points
+  /// is on-curve — perfect_freehand's own recommended rendering. This rounds
+  /// the facets that a raw `addPolygon` leaves on thick / fast strokes (sparse
+  /// outline points → visible straight edges on curves).
+  static Path _smoothOutlinePath(List<Offset> pts) {
+    final n = pts.length;
+    final path = Path();
+    if (n < 3) return path..addPolygon(pts, true);
+    // Start on-curve at the midpoint of the closing edge (last → first).
+    path.moveTo((pts[n - 1].dx + pts[0].dx) / 2, (pts[n - 1].dy + pts[0].dy) / 2);
+    for (var i = 0; i < n; i++) {
+      final c = pts[i];
+      final next = pts[(i + 1) % n];
+      path.quadraticBezierTo(
+          c.dx, c.dy, (c.dx + next.dx) / 2, (c.dy + next.dy) / 2);
+    }
+    return path..close();
   }
 
   void _paintText(Canvas canvas, TextElement el) {
