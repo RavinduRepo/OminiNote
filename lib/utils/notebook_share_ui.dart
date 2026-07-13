@@ -10,6 +10,7 @@ import '../services/drive_service.dart';
 import '../services/notebook_bundle_service.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
+import 'progress_banner.dart';
 import 'sync_target_ui.dart';
 
 final _bundle = NotebookBundleService();
@@ -25,8 +26,13 @@ String _bundleFileName(String notebookName) {
 /// sheet on mobile, a save-file dialog on desktop.
 Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
   final messenger = ScaffoldMessenger.of(context);
+  // Non-modal progress: the compress runs on a background isolate, so the app
+  // stays usable while a big notebook exports.
+  final banner = ProgressBanner.show(context, 'Exporting “${notebook.name}”…');
   try {
-    final bytes = await _bundle.exportBundle(notebook.id);
+    final bytes =
+        await _bundle.exportBundle(notebook.id, onProgress: banner.report);
+    banner.close();
     final fileName = _bundleFileName(notebook.name);
 
     if (_isMobile) {
@@ -51,6 +57,7 @@ Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
       ));
     }
   } catch (e) {
+    banner.close();
     messenger.showSnackBar(SnackBar(
       content: Text('Couldn\'t export: $e'),
       behavior: SnackBarBehavior.floating,
@@ -183,8 +190,14 @@ Future<Notebook?> importBundleBytes(
   if (target == null || !context.mounted) return null; // cancelled
 
   final messenger = ScaffoldMessenger.of(context);
+  final banner = ProgressBanner.show(context, 'Importing notebook…');
   try {
-    final nb = await _bundle.importBundle(bytes, syncTarget: target.accountId);
+    final nb = await _bundle.importBundle(
+      bytes,
+      syncTarget: target.accountId,
+      onProgress: banner.report,
+    );
+    banner.close();
     if (nb == null) return null;
     if (target.localOnly) {
       await NotebookService().setNotebookLocalOnly(nb.id, true);
@@ -198,6 +211,7 @@ Future<Notebook?> importBundleBytes(
     ));
     return nb;
   } catch (e) {
+    banner.close();
     messenger.showSnackBar(SnackBar(
       content: Text('Couldn\'t import: $e'),
       behavior: SnackBarBehavior.floating,
