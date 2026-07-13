@@ -20,7 +20,26 @@ text — and converts them into omininote's on-disk store.
 - Node/npm — only to fetch the parser source
 - Dart (comes with Flutter) — runs the converter
 
-## Usage
+## Quick start — batch import
+
+Drop any number of `.onepkg` files into `tools\onenote_importer\inbox\`
+(create it or let the script create it), **close the app**, then from the
+repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\onenote_importer\import_all.ps1
+```
+
+Each package becomes one notebook (named after its file), installed into the
+local store and queued for sync — start the app and it uploads everything;
+other devices pull it automatically. Processed packages move to
+`inbox\imported\` so a re-run never duplicates them. The first run bootstraps
+the toolchain automatically (needs `npm`, `git`, `cargo` once; later runs are
+offline). Add `-DryRun` to convert without installing (outputs, including a
+`preview.html` per package, land in `output\<name>-<timestamp>\`), and
+`-InboxDir <dir>` to read packages from somewhere else.
+
+## Manual usage (step by step)
 
 All commands from the repo root unless noted.
 
