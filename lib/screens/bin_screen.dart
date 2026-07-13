@@ -22,6 +22,12 @@ class _BinScreenState extends State<BinScreen> {
   final _service = NotebookService();
   List<BinItem>? _items;
 
+  // `dataVersion` at the last completed load; -1 = never loaded. Entering the
+  // Bin tab reloads only when the store actually changed since (local
+  // delete/restore/purge now bump dataVersion too, not just remote pulls), so
+  // swiping into the Bin no longer rescans the whole store every single time.
+  int _loadedVersion = -1;
+
   // Keys of rows currently animating out (restore / delete-forever) so the
   // row collapses + fades before the list actually drops it.
   final Set<String> _removing = {};
@@ -32,21 +38,36 @@ class _BinScreenState extends State<BinScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
-    widget.refreshSignal?.addListener(_load);
+    // Defer the first (whole-store) scan off the entry/push animation frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _load();
+    });
+    widget.refreshSignal?.addListener(_maybeReload);
   }
 
   @override
   void dispose() {
-    widget.refreshSignal?.removeListener(_load);
+    widget.refreshSignal?.removeListener(_maybeReload);
     super.dispose();
   }
 
+  /// Reload on tab entry only if the store changed since the last load (or we
+  /// never loaded) — the cache that kills the swipe-into-Bin rescan.
+  void _maybeReload() {
+    if (_items == null || SyncService().dataVersion.value != _loadedVersion) {
+      _load();
+    }
+  }
+
   Future<void> _load() async {
+    // Capture BEFORE the async scan: a change landing mid-scan leaves the
+    // version stale, so the next entry reloads (no missed updates).
+    final version = SyncService().dataVersion.value;
     final items = await _service.listDeletedItems();
     if (!mounted) return;
     setState(() {
       _items = items;
+      _loadedVersion = version;
       _removing.clear();
     });
   }
@@ -61,8 +82,7 @@ class _BinScreenState extends State<BinScreen> {
 
   Future<void> _restore(BinItem item) async {
     await _removeThen(item, () async {
-      await _service.restoreBinItem(item);
-      SyncService().dataVersion.value++; // nudge open list screens to reload
+      await _service.restoreBinItem(item); // bumps dataVersion internally now
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(

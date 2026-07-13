@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../services/search_service.dart';
 import '../theme/app_theme.dart';
@@ -66,6 +68,10 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   bool _swipeEnabled = true;
   bool _recheckScheduled = false;
 
+  // Defers the (potentially whole-store) Bin reload until the tab slide has
+  // settled, so the scan never competes with the swipe animation for frames.
+  Timer? _binReloadTimer;
+
   void _scheduleSwipeRecheck() {
     if (_recheckScheduled) return;
     _recheckScheduled = true;
@@ -79,16 +85,26 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
 
   @override
   void dispose() {
+    _binReloadTimer?.cancel();
     _pageController.dispose();
     _binRefresh.dispose();
     _searchFocus.dispose();
     super.dispose();
   }
 
-  // Per-tab side effects on entry (reload the bin, focus the search field).
+  // Per-tab side effects on entry. Search focuses promptly (so the keyboard
+  // comes up), but the Bin reload is deferred/debounced ~350ms — long enough
+  // to clear a tap animation (300ms) or a swipe settle — so any rescan runs
+  // after the motion, not during it. The Bin's own cache then skips the scan
+  // entirely unless the store changed.
   void _onEnterTab(int i) {
-    if (i == _kBin) _binRefresh.value++;
     if (i == _kSearch) _searchFocus.value++;
+    if (i == _kBin) {
+      _binReloadTimer?.cancel();
+      _binReloadTimer = Timer(const Duration(milliseconds: 350), () {
+        if (mounted) _binRefresh.value++;
+      });
+    }
   }
 
   void _selectTab(int i) {
@@ -191,6 +207,10 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
             setState(() => _index = i);
             _scheduleSwipeRecheck(); // the new tab may be drilled in
             _onEnterTab(i); // reload bin / focus search on entry
+            // Landing on any non-Search tab drops the keyboard, so the search
+            // field never holds focus off-tab (which made the keyboard re-pop
+            // when returning to a list from a canvas).
+            if (i != _kSearch) FocusManager.instance.primaryFocus?.unfocus();
           },
           itemBuilder: (context, i) => _buildTabNavigator(i),
         ),

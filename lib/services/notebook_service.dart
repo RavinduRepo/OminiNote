@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
@@ -165,6 +166,7 @@ class NotebookService {
     final data = await _readIndex();
     data[notebook.id] = notebook.toJson();
     await _writeAtomic(notebooksFile, jsonEncode(data));
+    SyncService().notifyDataChanged(); // reindex search + refresh lists
     return notebook;
   }
 
@@ -182,6 +184,7 @@ class NotebookService {
     if (nb == null) return;
     nb.name = name;
     await saveNotebook(nb);
+    SyncService().notifyDataChanged(); // reindex search under the new name
   }
 
   Future<void> setNotebookColor(String notebookId, int? color) async {
@@ -397,6 +400,7 @@ class NotebookService {
     nb.bumpRev(SettingsService().deviceId);
     data[notebookId] = nb.toJson();
     await _writeAtomic(notebooksFile, jsonEncode(data));
+    SyncService().notifyDataChanged(); // surface in the Bin / drop from lists
   }
 
   // ── Sections (containers of canvases) ──────────────────────────────────
@@ -467,12 +471,14 @@ class NotebookService {
       target.add(LeafNode(section.id));
       await saveNotebook(nb);
     }
+    SyncService().notifyDataChanged(); // reindex search + refresh lists
     return section;
   }
 
   Future<void> renameSection(Section section, String name) async {
     section.name = name;
     await saveSection(section);
+    SyncService().notifyDataChanged(); // reindex search under the new name
   }
 
   Future<void> setSectionColor(Section section, int? color) async {
@@ -495,6 +501,7 @@ class NotebookService {
       TreeOps.removeLeaf(nb.nodes, sectionId);
       await saveNotebook(nb);
     }
+    SyncService().notifyDataChanged(); // surface in the Bin / drop from lists
   }
 
   // ── Canvases (drawing surfaces) ────────────────────────────────────────
@@ -580,12 +587,14 @@ class NotebookService {
               section.nodes;
     target.add(LeafNode(canvas.id));
     await saveSection(section);
+    SyncService().notifyDataChanged(); // reindex search + refresh lists
     return canvas;
   }
 
   Future<void> renameCanvas(Canvas canvas, String name) async {
     canvas.name = name;
     await saveCanvas(canvas);
+    SyncService().notifyDataChanged(); // reindex search under the new name
   }
 
   Future<void> setCanvasColor(Canvas canvas, int? color) async {
@@ -605,6 +614,7 @@ class NotebookService {
     }
     TreeOps.removeLeaf(section.nodes, canvasId);
     await saveSection(section);
+    SyncService().notifyDataChanged(); // surface in the Bin / drop from lists
   }
 
   // ── Folders (super-sections) at both levels ────────────────────────────
@@ -623,6 +633,7 @@ class NotebookService {
               notebook.nodes;
     target.add(folder);
     await saveNotebook(notebook);
+    SyncService().notifyDataChanged(); // reindex search (super-sections match)
   }
 
   Future<void> createCanvasFolder(
@@ -637,6 +648,7 @@ class NotebookService {
               section.nodes;
     target.add(folder);
     await saveSection(section);
+    SyncService().notifyDataChanged(); // reindex search (super-sections match)
   }
 
   Future<void> ungroupInNotebook(Notebook notebook, String folderId) async {
@@ -660,6 +672,7 @@ class NotebookService {
     notebook.deletedFolders
         .add(DeletedFolder(node: folder, deletedAt: DateTime.now()));
     await saveNotebook(notebook);
+    SyncService().notifyDataChanged(); // surface in the Bin / drop from lists
   }
 
   /// Soft-deletes a canvas-tree super-section (mirrors [deleteSectionFolder]).
@@ -670,6 +683,7 @@ class NotebookService {
     section.deletedFolders
         .add(DeletedFolder(node: folder, deletedAt: DateTime.now()));
     await saveSection(section);
+    SyncService().notifyDataChanged(); // surface in the Bin / drop from lists
   }
 
   // ── Move / copy (whole nodes: leaves or folder subtrees) ───────────────
@@ -974,6 +988,69 @@ class NotebookService {
   }
 
   // ── Pages (canvas-scoped) ──────────────────────────────────────────────
+  //
+  // jsonEncode/jsonDecode of a page's full stroke/object payload is pure CPU
+  // that runs on the main isolate: it drops frames on dense pages during the
+  // debounced autosave (savePage) and on canvas open (loadPages decodes every
+  // page). Heavy payloads are hopped onto a one-shot background isolate via
+  // Isolate.run; light payloads stay inline, since the isolate spawn + message
+  // copy would cost more than the work itself. The isolate closures capture
+  // only sendable data (JSON maps / strings) and reference a *static* decode
+  // helper, so nothing drags `this` (with its non-sendable File/cache fields)
+  // across the isolate boundary.
+
+  /// A page with at least this many strokes+objects is "heavy" enough that
+  /// offloading its jsonEncode beats the isolate spawn/copy overhead.
+  static const int _kPageOffloadElements = 120;
+
+  /// Read pages in chunks this large so peak memory (raw JSON held + copied to
+  /// the isolate) stays bounded instead of holding the whole canvas at once.
+  static const int _kPageReadChunk = 32;
+
+  /// Total JSON chars in a chunk above which decoding is worth one isolate hop.
+  static const int _kPageDecodeChars = 256 * 1024;
+
+  /// Encodes a page's toJson [map]. When [offload] hops the heavy jsonEncode
+  /// onto a one-shot background isolate; falls back to inline on any isolate
+  /// failure — an isolate hiccup must never drop a save.
+  Future<String> _encodePageJson(Map<String, dynamic> map,
+      {required bool offload}) async {
+    if (!offload) return jsonEncode(map);
+    try {
+      return await Isolate.run(() => jsonEncode(map));
+    } catch (_) {
+      return jsonEncode(map);
+    }
+  }
+
+  /// Decodes a batch of page files' JSON text (pageId → text) in one background
+  /// isolate hop, staying inline for small batches / on isolate failure.
+  Future<Map<String, Map<String, dynamic>>> _decodePageJsons(
+      Map<String, String> raw) async {
+    if (raw.isEmpty) return const {};
+    final chars = raw.values.fold<int>(0, (s, t) => s + t.length);
+    if (chars < _kPageDecodeChars) return _decodePageJsonsSync(raw);
+    try {
+      return await Isolate.run(() => _decodePageJsonsSync(raw));
+    } catch (_) {
+      return _decodePageJsonsSync(raw);
+    }
+  }
+
+  /// Pure, isolate-safe (static, no `this`) batch JSON decode. Per-file decode
+  /// errors are swallowed so that page simply won't appear in the result —
+  /// exactly what the old inline `try/catch` per page did (→ a fresh blank
+  /// page is created for it in [loadPages]).
+  static Map<String, Map<String, dynamic>> _decodePageJsonsSync(
+      Map<String, String> raw) {
+    final out = <String, Map<String, dynamic>>{};
+    raw.forEach((id, text) {
+      try {
+        out[id] = jsonDecode(text) as Map<String, dynamic>;
+      } catch (_) {}
+    });
+    return out;
+  }
 
   /// Loads every page referenced by [canvas.rows]. A page whose file carries
   /// a tombstone (`deletedAt` set — soft-deleted on this or another device) is
@@ -986,16 +1063,36 @@ class NotebookService {
     final pages = <String, CanvasPage>{};
     var pruned = false;
 
+    // Phase 1+2 — read each referenced page file's JSON text (async I/O) and
+    // decode it, in bounded-size chunks so a heavy chunk's decode is hopped off
+    // the main isolate without ever holding the whole canvas in memory at once.
+    // A missing/unreadable file is simply absent from `decoded` → Phase 3 makes
+    // a fresh blank page for it, exactly as the old inline path did.
+    final pageIds = [for (final row in canvas.rows) ...row.pageIds];
+    final decoded = <String, Map<String, dynamic>>{};
+    for (var i = 0; i < pageIds.length; i += _kPageReadChunk) {
+      final raw = <String, String>{};
+      for (final pageId in pageIds.skip(i).take(_kPageReadChunk)) {
+        final file = _pageFile(canvas, pageId);
+        if (await file.exists()) {
+          try {
+            raw[pageId] = await file.readAsString();
+          } catch (_) {}
+        }
+      }
+      decoded.addAll(await _decodePageJsons(raw));
+    }
+
+    // Phase 3 — build models + prune tombstoned pages (main isolate: fromJson
+    // touches ui/model objects that can't cross the isolate boundary).
     for (final row in List.of(canvas.rows)) {
       final keep = <String>[];
       for (final pageId in row.pageIds) {
-        final file = _pageFile(canvas, pageId);
         CanvasPage? loaded;
-        if (await file.exists()) {
+        final map = decoded[pageId];
+        if (map != null) {
           try {
-            loaded = CanvasPage.fromJson(
-              jsonDecode(await file.readAsString()) as Map<String, dynamic>,
-            );
+            loaded = CanvasPage.fromJson(map);
           } catch (_) {}
         }
         if (loaded != null) {
@@ -1044,7 +1141,21 @@ class NotebookService {
 
   Future<void> savePage(Canvas canvas, CanvasPage page) async {
     page.bumpRev(SettingsService().deviceId);
-    await _writeAtomic(_pageFile(canvas, page.id), jsonEncode(page.toJson()));
+    // toJson must run on the main isolate (it walks live elements, whose
+    // transient cachedOutline Path can't cross the boundary); only the heavy
+    // jsonEncode of the resulting pure-data map is offloaded, for dense pages.
+    // Tombstone/purge saves stay inline: they're one-offs whose write must land
+    // promptly and not lose an ordering race to an in-flight pre-delete autosave
+    // of the same page (deletePage fires its save via `unawaited`).
+    final offload = page.deletedAt == null &&
+        page.purgedAt == null &&
+        page.strokes.length + page.objects.length >= _kPageOffloadElements;
+    final content = await _encodePageJson(page.toJson(), offload: offload);
+    await _writeAtomic(_pageFile(canvas, page.id), content);
+    // A tombstoned page here means a delete just happened (CanvasController
+    // .deletePage) — nudge the Bin / lists so it appears without a full
+    // rescan. Ordinary drawing autosaves (deletedAt == null) must NOT bump.
+    if (page.deletedAt != null) SyncService().notifyDataChanged();
   }
 
   Future<void> deletePageFile(Canvas canvas, String pageId) async {
@@ -1540,6 +1651,7 @@ class NotebookService {
         await restoreFolder(
             item.notebookId, item.sectionId, item.folderId!);
     }
+    SyncService().notifyDataChanged(); // refresh the Bin + re-link into lists
   }
 
   /// Restores a soft-deleted super-section: moves its [FolderNode] subtree out
@@ -1667,6 +1779,7 @@ class NotebookService {
       case BinItemType.folder:
         await purgeFolder(item.notebookId, item.sectionId, item.folderId!);
     }
+    SyncService().notifyDataChanged(); // refresh the Bin after a permanent purge
   }
 
   /// Permanently purges a soft-deleted super-section: drops its `deletedFolders`

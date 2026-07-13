@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/search_service.dart';
@@ -86,7 +88,9 @@ class _SearchScreenState extends State<_SearchScreen> {
   @override
   void initState() {
     super.initState();
-    _results = _svc.filter(widget.index, '');
+    // Empty query → a hint, not the whole index: rendering a row per item
+    // before anything is typed is wasteful and not useful.
+    _results = const [];
     if (widget.autofocus) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _focusField());
     }
@@ -107,8 +111,9 @@ class _SearchScreenState extends State<_SearchScreen> {
   }
 
   void _onQueryChanged(String q) {
+    final query = q.trim();
     setState(() {
-      _results = _svc.filter(widget.index, q);
+      _results = query.isEmpty ? const [] : _svc.filter(widget.index, query);
       _highlighted = 0;
     });
     if (_scroll.hasClients) _scroll.jumpTo(0);
@@ -145,6 +150,10 @@ class _SearchScreenState extends State<_SearchScreen> {
   void _open(SearchResult r) {
     if (_navigated) return;
     _navigated = true;
+    // Drop the keyboard as we leave search — otherwise the field keeps focus in
+    // the (kept-alive) Search tab and the keyboard re-pops when the shell is
+    // revealed again (e.g. popping back from a canvas opened from a result).
+    _fieldFocus.unfocus();
     final navigator = Navigator.of(context);
     // Was this search screen *pushed* as a route (desktop overlay / old mobile
     // flow) or *embedded* as a tab (mobile shell)? A pushed one can pop — and
@@ -163,7 +172,7 @@ class _SearchScreenState extends State<_SearchScreen> {
         setState(() {
           _navigated = false;
           _controller.clear();
-          _results = _svc.filter(widget.index, '');
+          _results = const []; // back to the empty-query hint state
           _highlighted = 0;
         });
       }
@@ -250,8 +259,8 @@ class _SearchScreenState extends State<_SearchScreen> {
       body: _results.isEmpty
           ? Center(
               child: Text(
-                _controller.text.isEmpty
-                    ? 'No notes yet'
+                _controller.text.trim().isEmpty
+                    ? 'Search your notes & bookmarks'
                     : 'No matches for "${_controller.text}"',
                 style: TextStyle(color: palette.textDim),
               ),
@@ -358,18 +367,29 @@ class NoteSearchView extends StatefulWidget {
 
 class _NoteSearchViewState extends State<NoteSearchView> {
   List<SearchResult>? _index;
+  Timer? _rebuildDebounce;
 
   @override
   void initState() {
     super.initState();
-    _rebuild();
-    SyncService().dataVersion.addListener(_rebuild);
+    _rebuild(); // first index build immediately
+    SyncService().dataVersion.addListener(_scheduleRebuild);
   }
 
   @override
   void dispose() {
-    SyncService().dataVersion.removeListener(_rebuild);
+    _rebuildDebounce?.cancel();
+    SyncService().dataVersion.removeListener(_scheduleRebuild);
     super.dispose();
+  }
+
+  // A local add/rename/delete (and remote sync pulls) bump dataVersion so the
+  // index refreshes — newly-created items become searchable without an app
+  // restart. Debounced so a burst (creating several items, a flurry of pulls)
+  // coalesces into one full-store reindex instead of one per change.
+  void _scheduleRebuild() {
+    _rebuildDebounce?.cancel();
+    _rebuildDebounce = Timer(const Duration(milliseconds: 400), _rebuild);
   }
 
   Future<void> _rebuild() async {
