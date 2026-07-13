@@ -868,6 +868,42 @@ void install(Directory outDir, Map<String, dynamic> notebookJson) {
 
   indexFile.writeAsStringSync(
       const JsonEncoder.withIndent(' ').convert(index));
+
+  // Seed the sync journal with every installed file. The app only uploads
+  // files marked dirty through its own save path (mirrors what the in-app
+  // bundle import does via SyncService.uploadNotebook) — without this the
+  // notebook entry syncs via notebooks.json but the content files never
+  // reach Drive, so other devices see only the empty skeleton.
+  final rels = <String>['notebooks.json'];
+  void walk(Directory dir) {
+    for (final entity in dir.listSync(recursive: true)) {
+      if (entity is File) {
+        var rel = entity.path
+            .replaceAll('\\', '/')
+            .substring(store.path.replaceAll('\\', '/').length);
+        if (rel.startsWith('/')) rel = rel.substring(1);
+        rels.add(rel);
+      }
+    }
+  }
+
+  walk(dstRoot);
+  final journalFile = File('${store.path}/sync_journal.json');
+  Map<String, dynamic> journal = {};
+  if (journalFile.existsSync()) {
+    try {
+      journal = jsonDecode(journalFile.readAsStringSync())
+          as Map<String, dynamic>;
+    } catch (_) {}
+  }
+  final dirty = <String>{
+    ...List<String>.from(journal['dirty'] as List? ?? const []),
+    ...rels,
+  };
+  journal['dirty'] = dirty.toList();
+  journalFile.writeAsStringSync(jsonEncode(journal), flush: true);
+  stderr.writeln('Queued ${rels.length} files for sync upload.');
+
   stderr.writeln('Installed notebook "$nbId" into ${store.path}');
   stderr.writeln('Start omininote to see it. (If the app was running, restart it.)');
 }

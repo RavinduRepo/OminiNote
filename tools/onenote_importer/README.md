@@ -89,8 +89,19 @@ dart run tools/onenote_importer/convert.dart tools/onenote_importer/output/mynot
 
 `--install` backs up `notebooks.json` (`.bak-<ts>`) and merges the imported
 notebook into the local store (`%APPDATA%\io.github.ravinduRepo\omininote`).
-The notebook imports as **local-only** (`syncTarget: null`); attach it to an
-account from the app if you want it synced.
+The notebook imports with `syncTarget: null`, which the app treats as **the
+default signed-in account** — it will sync like any other notebook.
+
+`--install` also seeds `sync_journal.json` with every installed file. This is
+required for sync: the app only uploads files marked dirty through its own
+save path, so files written directly to the store would otherwise never reach
+Drive — the notebook *entry* still syncs via `notebooks.json`, leaving other
+devices with an empty skeleton (notebook + folder tree, no content). This
+mirrors what the in-app bundle import does via `SyncService.uploadNotebook`.
+If an import was installed without the journal seed, Settings → **Repair
+sync** on the importing device achieves the same (full resync pushes local
+files the Drive lacks). Other devices need no app update — the imported data
+is ordinary schema-v1 store JSON.
 
 ## Mapping
 
