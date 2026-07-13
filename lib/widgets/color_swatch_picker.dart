@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
+import 'color_wheel_picker.dart';
 
 /// Result of the color picker. [color] null means "use the default identity
 /// color". A null *return* from [showColorSwatchPicker] means dismissed.
@@ -52,6 +53,19 @@ Future<ColorChoice?> showColorSwatchPicker(
                         ColorChoice(color.toARGB32()),
                       ),
                     ),
+                  _WheelSwatch(
+                    // A custom color that is none of the curated swatches
+                    // lights the wheel dot up as the active choice.
+                    selected: current != null &&
+                        AppPalette.swatchColors
+                            .every((c) => c.toARGB32() != current),
+                    currentColor: current,
+                    ring: palette.accent,
+                    onPicked: (color) => Navigator.pop(
+                      context,
+                      ColorChoice(color.toARGB32()),
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 18),
@@ -70,6 +84,68 @@ Future<ColorChoice?> showColorSwatchPicker(
       );
     },
   );
+}
+
+/// The rainbow "more colors" swatch: opens the full color wheel. When a
+/// custom (non-curated) color is active it shows the selection ring and the
+/// current color in its center.
+class _WheelSwatch extends StatelessWidget {
+  final bool selected;
+  final int? currentColor;
+  final Color ring;
+  final ValueChanged<Color> onPicked;
+
+  const _WheelSwatch({
+    required this.selected,
+    required this.currentColor,
+    required this.ring,
+    required this.onPicked,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () async {
+        final picked = await showColorWheelPicker(
+          context,
+          initial: Color(currentColor ?? 0xFFE9A23B),
+        );
+        if (picked != null) onPicked(picked);
+      },
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? ring : Colors.transparent,
+            width: 3,
+          ),
+        ),
+        child: Padding(
+          padding: EdgeInsets.all(selected ? 3 : 0),
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: kColorWheelGradient,
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: selected
+                ? Container(
+                    width: 18,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: Color(currentColor!),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                  )
+                : const Icon(Icons.colorize, color: Colors.white, size: 17),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _Swatch extends StatelessWidget {

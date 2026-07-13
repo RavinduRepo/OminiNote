@@ -1257,35 +1257,18 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                   height: 44,
                   child: Row(
                     children: [
-                      const SizedBox(width: 6),
-                      AnimatedRotation(
-                        turns: expanded ? 0.25 : 0,
-                        duration: const Duration(milliseconds: 150),
-                        child: Icon(
-                          Icons.chevron_right,
-                          size: 18,
-                          color: palette.textDim,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Container(
-                        width: 20,
-                        height: 20,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: color,
-                          borderRadius: BorderRadius.circular(5),
-                        ),
-                        child: Text(
-                          notebook.name.isNotEmpty
-                              ? notebook.name[0].toUpperCase()
-                              : '?',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 11,
-                          ),
-                        ),
+                      const SizedBox(width: 8),
+                      _NotebookChipToggle(
+                        color: color,
+                        initial: notebook.name.isNotEmpty
+                            ? notebook.name[0].toUpperCase()
+                            : '?',
+                        expanded: expanded,
+                        onTap: () => setState(() {
+                          expanded
+                              ? _expanded.remove(notebook.id)
+                              : _expanded.add(notebook.id);
+                        }),
                       ),
                       const SizedBox(width: 9),
                       Expanded(
@@ -1427,6 +1410,92 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               ),
             ),
           );
+  }
+}
+
+/// The notebook's colored initial chip doubling as its expand/collapse
+/// control: shows the initial at rest, morphs into a rotating chevron on
+/// hover (the chip is the only colored element of the row, so the affordance
+/// lives where the eye already is — no separate chevron column).
+class _NotebookChipToggle extends StatefulWidget {
+  final Color color;
+  final String initial;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  const _NotebookChipToggle({
+    required this.color,
+    required this.initial,
+    required this.expanded,
+    required this.onTap,
+  });
+
+  @override
+  State<_NotebookChipToggle> createState() => _NotebookChipToggleState();
+}
+
+class _NotebookChipToggleState extends State<_NotebookChipToggle> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    // Chevron only while hovering — at rest the chip stays the notebook's
+    // identity (its initial); expansion state is already visible in the row
+    // highlight and the tree below.
+    final showChevron = _hovered;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOut,
+          width: 22,
+          height: 22,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: widget.color,
+            borderRadius: BorderRadius.circular(6),
+            boxShadow: _hovered
+                ? [
+                    BoxShadow(
+                      color: widget.color.withValues(alpha: 0.45),
+                      blurRadius: 6,
+                      offset: const Offset(0, 1),
+                    ),
+                  ]
+                : const [],
+          ),
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 140),
+            transitionBuilder: (child, anim) =>
+                ScaleTransition(scale: anim, child: child),
+            child: showChevron
+                ? AnimatedRotation(
+                    key: const ValueKey('chevron'),
+                    turns: widget.expanded ? 0.25 : 0,
+                    duration: const Duration(milliseconds: 150),
+                    child: const Icon(
+                      Icons.chevron_right,
+                      size: 16,
+                      color: Colors.white,
+                    ),
+                  )
+                : Text(
+                    widget.initial,
+                    key: const ValueKey('initial'),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11.5,
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

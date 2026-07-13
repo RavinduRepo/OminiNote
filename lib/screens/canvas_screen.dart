@@ -27,6 +27,7 @@ import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/action_sheet.dart';
+import '../widgets/color_wheel_picker.dart';
 import '../widgets/sync_status_icon.dart';
 import 'page_organizer.dart';
 
@@ -2513,6 +2514,19 @@ Widget _buildPenOptionsRow(
                     },
                   ),
                 ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: _WheelDot(
+                  current: c.color,
+                  selected: _presetColors
+                      .every((p) => p.toARGB32() != c.color.toARGB32()),
+                  ringColor: palette.accent,
+                  onPicked: (color) {
+                    c.color = color;
+                    c.notifyRepaint();
+                  },
+                ),
+              ),
             ],
           ),
         ),
@@ -2798,6 +2812,16 @@ Widget _buildTextStyleRow(
                 onTap: () => c.setTextColor(preset),
               ),
             ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 3),
+            child: _WheelDot(
+              current: c.textColor,
+              selected: _presetColors
+                  .every((p) => p.toARGB32() != c.textColor.toARGB32()),
+              ringColor: palette.accent,
+              onPicked: c.setTextColor,
+            ),
+          ),
           if (showActions) ...[
             divider(),
             _SelAction(
@@ -3198,6 +3222,66 @@ class _ColorDot extends StatelessWidget {
             color: color,
             border: Border.all(color: borderColor, width: 1),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The rainbow "more colors" dot at the end of a color row: opens the full
+/// color wheel. [selected] (the active color isn't one of the presets) shows
+/// the ring and the current custom color in the dot's center.
+class _WheelDot extends StatelessWidget {
+  final Color current;
+  final bool selected;
+  final Color ringColor;
+  final ValueChanged<Color> onPicked;
+
+  const _WheelDot({
+    required this.current,
+    required this.selected,
+    required this.ringColor,
+    required this.onPicked,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () async {
+        final picked = await showColorWheelPicker(context, initial: current);
+        if (picked != null) onPicked(picked);
+      },
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+        width: 26,
+        height: 26,
+        padding: EdgeInsets.all(selected ? 3 : 0),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? ringColor : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        child: Container(
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: kColorWheelGradient,
+          ),
+          alignment: Alignment.center,
+          child: selected
+              ? Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    color: current,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                )
+              : const Icon(Icons.colorize, color: Colors.white, size: 12),
         ),
       ),
     );
