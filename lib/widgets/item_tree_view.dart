@@ -280,36 +280,54 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
       mainAxisSize: MainAxisSize.min,
       children: [
         for (final entry in entries)
-          // Collapse/expand a super-section: rows inside it animate their
-          // height + fade in BOTH directions (kept in the tree, hidden to 0).
-          AnimatedCrossFade(
-            key: ValueKey('tr_${entry.key}'),
-            duration: const Duration(milliseconds: 260),
-            sizeCurve: Curves.easeInOutCubic,
-            firstCurve: Curves.easeInOutCubic,
-            secondCurve: Curves.easeInOutCubic,
-            crossFadeState: entry.hidden
-                ? CrossFadeState.showSecond
-                : CrossFadeState.showFirst,
-            secondChild: const SizedBox(width: double.infinity),
-            firstChild: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _gap(
-                  target: entry.parent,
-                  folder: entry.parentFolder,
-                  indexOf: () => entry.parent.indexOf(entry.node),
-                ),
-                _buildRow(context, palette, entry),
-              ],
+          // Only rows inside a super-section can be hidden by a collapse, so
+          // only they need the AnimatedCrossFade (animates height+fade both
+          // ways, kept in the tree at height 0 while hidden). Root-level rows
+          // (no parent folder) can NEVER be hidden, so the crossfade is pure
+          // overhead — one AnimationController per row — and they render
+          // directly. Big win for flat trees (a notebook of sections / section
+          // of canvases with no groups). Keyed the same either way so reorder
+          // identity is stable. (Perf 07/14/26.)
+          if (entry.parentFolder == null)
+            KeyedSubtree(
+              key: ValueKey('tr_${entry.key}'),
+              child: _entryBlock(context, palette, entry),
+            )
+          else
+            AnimatedCrossFade(
+              key: ValueKey('tr_${entry.key}'),
+              duration: const Duration(milliseconds: 260),
+              sizeCurve: Curves.easeInOutCubic,
+              firstCurve: Curves.easeInOutCubic,
+              secondCurve: Curves.easeInOutCubic,
+              crossFadeState: entry.hidden
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              secondChild: const SizedBox(width: double.infinity),
+              firstChild: _entryBlock(context, palette, entry),
             ),
-          ),
         _gap(
           target: widget.nodes,
           folder: null,
           indexOf: () => widget.nodes.length,
           tall: true,
         ),
+      ],
+    );
+  }
+
+  /// The insertion-gap + row for one flattened entry — the `firstChild` of the
+  /// collapse animation, or rendered directly for never-hideable root rows.
+  Widget _entryBlock(BuildContext context, AppPalette palette, _FlatEntry entry) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _gap(
+          target: entry.parent,
+          folder: entry.parentFolder,
+          indexOf: () => entry.parent.indexOf(entry.node),
+        ),
+        _buildRow(context, palette, entry),
       ],
     );
   }
