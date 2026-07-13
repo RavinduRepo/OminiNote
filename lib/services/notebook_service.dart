@@ -13,6 +13,17 @@ import 'pdf_exporter.dart';
 import 'settings_service.dart';
 import 'sync_service.dart';
 
+/// One canvas to export, collected in tree order: its outline [path] up to (not
+/// including) the canvas name, plus the ids needed to load it. Loading is
+/// deferred so canvases can be read bounded-concurrently while order is kept.
+class _ExportLeaf {
+  final List<String> path;
+  final String notebookId;
+  final String sectionId;
+  final String canvasId;
+  const _ExportLeaf(this.path, this.notebookId, this.sectionId, this.canvasId);
+}
+
 /// File-based persistence for the **Notebook → Section → Canvas** model.
 ///
 /// Layout on disk (storage v2):
@@ -1255,78 +1266,81 @@ class NotebookService {
   // the exporter can emit a nested PDF outline (topic/sub-topic bookmarks).
 
   Future<List<PdfExportItem>> collectNotebookExportItems(Notebook nb) async {
-    final items = <PdfExportItem>[];
-    await _walkNotebookForExport(nb, nb.nodes, [nb.name], items);
-    return items;
+    final leaves = <_ExportLeaf>[];
+    await _collectNotebookLeaves(nb, nb.nodes, [nb.name], leaves);
+    return _loadExportLeaves(leaves);
   }
 
   Future<List<PdfExportItem>> collectSectionExportItems(
     Section section, {
     List<String> prefix = const [],
   }) async {
-    final items = <PdfExportItem>[];
-    await _walkSectionForExport(
+    final leaves = <_ExportLeaf>[];
+    _collectSectionLeaves(
       section,
       section.nodes,
       [...prefix, section.name],
-      items,
+      leaves,
     );
-    return items;
+    return _loadExportLeaves(leaves);
   }
 
-  Future<void> _walkNotebookForExport(
+  Future<void> _collectNotebookLeaves(
     Notebook nb,
     List<TreeNode> nodes,
     List<String> path,
-    List<PdfExportItem> out,
+    List<_ExportLeaf> out,
   ) async {
     for (final node in nodes) {
       if (node is FolderNode) {
-        await _walkNotebookForExport(nb, node.children, [...path, node.name], out);
+        await _collectNotebookLeaves(
+            nb, node.children, [...path, node.name], out);
       } else if (node is LeafNode) {
         final section = await getSection(nb.id, node.refId);
         if (section == null) continue;
-        await _walkSectionForExport(
-          section,
-          section.nodes,
-          [...path, section.name],
-          out,
-        );
+        _collectSectionLeaves(
+            section, section.nodes, [...path, section.name], out);
       }
     }
   }
 
-  Future<void> _walkSectionForExport(
+  void _collectSectionLeaves(
     Section section,
     List<TreeNode> nodes,
     List<String> path,
-    List<PdfExportItem> out,
-  ) async {
+    List<_ExportLeaf> out,
+  ) {
     for (final node in nodes) {
       if (node is FolderNode) {
-        await _walkSectionForExport(
-          section,
-          node.children,
-          [...path, node.name],
-          out,
-        );
+        _collectSectionLeaves(section, node.children, [...path, node.name], out);
       } else if (node is LeafNode) {
-        final canvas = await getCanvas(
-          section.notebookId,
-          section.id,
-          node.refId,
-        );
-        if (canvas == null) continue;
-        final pages = await loadPages(canvas);
-        out.add(PdfExportItem(
-          outline: [...path, canvas.name],
-          canvas: canvas,
-          pages: pages,
-          assetBytes: (assetId) async =>
-              Uint8List.fromList(await assetFile(canvas, assetId).readAsBytes()),
-        ));
+        out.add(_ExportLeaf(
+            path, section.notebookId, section.id, node.refId));
       }
     }
+  }
+
+  /// Loads each collected leaf's canvas + pages **bounded-concurrently** (the
+  /// canvas/page reads are the bulk of export prep) while keeping tree/outline
+  /// order; a null (missing canvas) is dropped. (Perf 07/14/26.)
+  Future<List<PdfExportItem>> _loadExportLeaves(List<_ExportLeaf> leaves) async {
+    final loaded = await _mapBounded<_ExportLeaf, PdfExportItem?>(
+      leaves,
+      (leaf) async {
+        final canvas =
+            await getCanvas(leaf.notebookId, leaf.sectionId, leaf.canvasId);
+        if (canvas == null) return null;
+        final pages = await loadPages(canvas);
+        return PdfExportItem(
+          outline: [...leaf.path, canvas.name],
+          canvas: canvas,
+          pages: pages,
+          assetBytes: (assetId) async => Uint8List.fromList(
+              await assetFile(canvas, assetId).readAsBytes()),
+        );
+      },
+    );
+    return [for (final item in loaded) ?item];
   }
 
   /// Copies every asset referenced by [page] from the [src] canvas's asset dir
