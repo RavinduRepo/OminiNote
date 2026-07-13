@@ -236,21 +236,50 @@ ConvertedElement? convertFile(
   return ConvertedElement(json, Box(x, y, x + w, y + h), isStroke: false);
 }
 
+/// Estimated laid-out height of a text item, in points. Crude wrap estimate —
+/// the app re-measures text on first edit; this is used for bboxes and for
+/// stacking outline flows. Blank paragraphs count as one line.
+double estimateTextHeightPt(List<dynamic> paragraphs, double widthPt) {
+  var estHeight = 0.0;
+  for (final p in paragraphs) {
+    final para = p as Map<String, dynamic>;
+    final indent = (para['indent'] as num?)?.toInt() ?? 0;
+    final paraRuns = (para['runs'] as List?) ?? [];
+    var paraLen = indent * 2;
+    var paraFontSize = 11.0;
+    for (final r in paraRuns) {
+      final run = r as Map<String, dynamic>;
+      paraFontSize = math.max(
+          paraFontSize, ((run['fontSizeHalfPt'] as num?) ?? 22) / 2.0);
+      paraLen += ((run['text'] as String?) ?? '').length;
+    }
+    final charsPerLine = math.max(8, (widthPt / (paraFontSize * 0.55)).floor());
+    final lines = math.max(1, (paraLen / charsPerLine).ceil());
+    estHeight += lines * paraFontSize * 1.3 + 2;
+  }
+  return estHeight;
+}
+
 ConvertedElement? convertText(Map<String, dynamic> item, int updatedMs) {
   final paragraphs = (item['paragraphs'] as List?) ?? [];
   if (paragraphs.isEmpty) return null;
 
   final runs = <Map<String, dynamic>>[];
-  var estHeight = 0.0;
-  var maxLineLen = 0;
   final widthPt = ((item['maxWidthHalfIn'] as num?) ?? 12) * kHalfInToPt;
 
   for (var i = 0; i < paragraphs.length; i++) {
     final para = paragraphs[i] as Map<String, dynamic>;
     final indent = (para['indent'] as num?)?.toInt() ?? 0;
     final paraRuns = (para['runs'] as List?) ?? [];
-    var paraLen = indent * 2;
-    var paraFontSize = 11.0;
+
+    // Blank paragraph: one empty line (extractor trims trailing blanks).
+    if (paraRuns.isEmpty) {
+      if (i < paragraphs.length - 1) {
+        runs.add({'t': '\n', 's': 11.0, 'b': false, 'i': false,
+                  'c': 0xFF000000, 'f': 'sans'});
+      }
+      continue;
+    }
 
     for (var j = 0; j < paraRuns.length; j++) {
       final r = paraRuns[j] as Map<String, dynamic>;
@@ -261,8 +290,6 @@ ConvertedElement? convertText(Map<String, dynamic> item, int updatedMs) {
       }
       if (text.isEmpty) continue;
       final fontSize = ((r['fontSizeHalfPt'] as num?) ?? 22) / 2.0;
-      paraFontSize = math.max(paraFontSize, fontSize);
-      paraLen += (r['text'] as String? ?? '').length;
       runs.add({
         't': text,
         's': fontSize,
@@ -273,15 +300,9 @@ ConvertedElement? convertText(Map<String, dynamic> item, int updatedMs) {
         if (r['hyperlink'] != null) 'l': r['hyperlink'],
       });
     }
-
-    // Crude wrap estimate for the bbox (the app re-measures text on edit).
-    final charsPerLine =
-        math.max(8, (widthPt / (paraFontSize * 0.55)).floor());
-    final lines = math.max(1, (paraLen / charsPerLine).ceil());
-    estHeight += lines * paraFontSize * 1.3 + 2;
-    maxLineLen = math.max(maxLineLen, paraLen);
   }
   if (runs.isEmpty) return null;
+  final estHeight = estimateTextHeightPt(paragraphs, widthPt);
 
   final x = ((item['xHalfIn'] as num?) ?? 0) * kHalfInToPt;
   final y = ((item['yHalfIn'] as num?) ?? 0) * kHalfInToPt;
@@ -304,6 +325,50 @@ ConvertedElement? convertText(Map<String, dynamic> item, int updatedMs) {
   };
   return ConvertedElement(json, Box(x, y, x + widthPt, y + h),
       isStroke: false);
+}
+
+// ── Outline flow layout ──────────────────────────────────────────────────
+
+/// Vertical gap between stacked items of one outline, in points.
+const double kFlowGapPt = 6.0;
+
+/// Height one flow item occupies, in points.
+double flowItemHeightPt(Map<String, dynamic> item) {
+  switch (item['kind']) {
+    case 'text':
+      final widthPt = ((item['maxWidthHalfIn'] as num?) ?? 12) * kHalfInToPt;
+      return estimateTextHeightPt((item['paragraphs'] as List?) ?? [], widthPt);
+    case 'image':
+      return ((item['hHalfIn'] as num?) ?? 8) * kHalfInToPt;
+    case 'file':
+      return 48.0;
+    default:
+      return 0.0;
+  }
+}
+
+/// OneNote lays an outline's contents (text paragraphs, images, files) out as
+/// a vertical flow, but the extractor can only give every item the outline's
+/// own offset — so multiple images in one text box would land stacked on one
+/// spot. Restore the flow: items sharing an `outlineId` are stacked top-down
+/// in `outlineSeq` (document) order, each starting where the previous ended.
+/// Mutates the items' `yHalfIn` in place.
+void applyOutlineFlow(List<dynamic> items) {
+  final groups = <int, List<Map<String, dynamic>>>{};
+  for (final it in items) {
+    final m = it as Map<String, dynamic>;
+    final oid = (m['outlineId'] as num?)?.toInt();
+    if (oid != null) (groups[oid] ??= []).add(m);
+  }
+  for (final group in groups.values) {
+    group.sort((a, b) => ((a['outlineSeq'] as num?) ?? 0)
+        .compareTo((b['outlineSeq'] as num?) ?? 0));
+    var cursorPt = ((group.first['yHalfIn'] as num?) ?? 0) * kHalfInToPt;
+    for (final m in group) {
+      m['yHalfIn'] = cursorPt / kHalfInToPt;
+      cursorPt += flowItemHeightPt(m) + kFlowGapPt;
+    }
+  }
 }
 
 // ── Tiling: cut the infinite OneNote page into omininote pages ──────────
@@ -718,7 +783,9 @@ class Converter {
     final assets = AssetResolver(
         extractDir, Directory('${outDir.path}/$canvasDir/assets'));
 
-    // Convert every item into absolute-content-space elements.
+    // Restore each outline's vertical flow, then convert every item into
+    // absolute-content-space elements.
+    applyOutlineFlow(page['items'] as List);
     final elements = <ConvertedElement>[];
     for (final it in (page['items'] as List)) {
       final item = it as Map<String, dynamic>;

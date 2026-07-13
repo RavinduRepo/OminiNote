@@ -67,6 +67,46 @@
     return `rgb(${r}, ${g}, ${b})`;
   };
 
+  // Mirror of the converter's outline flow: stack items sharing an outlineId
+  // top-down in outlineSeq order (text height estimated the same crude way).
+  const FLOW_GAP_PT = 6, PT = HALF_IN / 36; // px per point
+  function estTextHeightPt(item) {
+    const widthPt = (item.maxWidthHalfIn ?? 12) * 36;
+    let h = 0;
+    for (const para of item.paragraphs || []) {
+      let len = (para.indent || 0) * 2, size = 11;
+      for (const r of para.runs || []) {
+        size = Math.max(size, (r.fontSizeHalfPt ?? 22) / 2);
+        len += (r.text || '').length;
+      }
+      const cpl = Math.max(8, Math.floor(widthPt / (size * 0.55)));
+      h += Math.max(1, Math.ceil(len / cpl)) * size * 1.3 + 2;
+    }
+    return h;
+  }
+  function flowHeightPt(item) {
+    if (item.kind === 'text') return estTextHeightPt(item);
+    if (item.kind === 'image') return (item.hHalfIn ?? 8) * 36;
+    if (item.kind === 'file') return 48;
+    return 0;
+  }
+  function applyOutlineFlow(page) {
+    const groups = new Map();
+    for (const it of page.items) {
+      if (it.outlineId == null) continue;
+      if (!groups.has(it.outlineId)) groups.set(it.outlineId, []);
+      groups.get(it.outlineId).push(it);
+    }
+    for (const group of groups.values()) {
+      group.sort((a, b) => (a.outlineSeq ?? 0) - (b.outlineSeq ?? 0));
+      let cursorPt = (group[0].yHalfIn ?? 0) * 36;
+      for (const it of group) {
+        it.yHalfIn = cursorPt / 36;
+        cursorPt += flowHeightPt(it) + FLOW_GAP_PT;
+      }
+    }
+  }
+
   function itemBounds(p) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const grow = (x, y) => { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); };
@@ -89,6 +129,7 @@
   function render(page) {
     current = page;
     canvas.replaceChildren();
+    applyOutlineFlow(page);
     const b = itemBounds(page);
     const w = b.maxX - b.minX + PAD * 2, h = b.maxY - b.minY + PAD * 2;
     canvas.style.width = w + 'px';

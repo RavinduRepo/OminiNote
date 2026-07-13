@@ -122,6 +122,72 @@ void main() {
     });
   });
 
+  group('applyOutlineFlow', () {
+    Map<String, dynamic> flowImage(int seq, double hHalfIn) => {
+          'kind': 'image',
+          'outlineId': 1,
+          'outlineSeq': seq,
+          'xHalfIn': 2.0,
+          'yHalfIn': 3.0,
+          'wHalfIn': 10.0,
+          'hHalfIn': hHalfIn,
+        };
+
+    test('images sharing an outline stack top-down in seq order', () {
+      // Extractor emits them all at the outline offset; seq order shuffled.
+      final items = [flowImage(2, 4), flowImage(0, 8), flowImage(1, 2)];
+      applyOutlineFlow(items);
+      final bySeq = [...items]..sort((a, b) =>
+          (a['outlineSeq'] as int).compareTo(b['outlineSeq'] as int));
+      // First item keeps the outline position.
+      expect(bySeq[0]['yHalfIn'], 3.0);
+      // Each next starts below the previous one's extent.
+      final y0End = 3.0 * kHalfInToPt + 8 * kHalfInToPt;
+      expect((bySeq[1]['yHalfIn'] as num) * kHalfInToPt,
+          greaterThanOrEqualTo(y0End));
+      final y1End =
+          (bySeq[1]['yHalfIn'] as num) * kHalfInToPt + 2 * kHalfInToPt;
+      expect((bySeq[2]['yHalfIn'] as num) * kHalfInToPt,
+          greaterThanOrEqualTo(y1End));
+    });
+
+    test('text between images consumes vertical space', () {
+      final items = [
+        {
+          'kind': 'text',
+          'outlineId': 7,
+          'outlineSeq': 0,
+          'yHalfIn': 0.0,
+          'maxWidthHalfIn': 12.0,
+          'paragraphs': [
+            {
+              'indent': 0,
+              'runs': [
+                {'text': 'a line of text', 'fontSizeHalfPt': 22}
+              ]
+            },
+            {'indent': 0, 'runs': []}, // blank line still takes space
+          ],
+        },
+        flowImage(1, 4)..['outlineId'] = 7,
+      ];
+      applyOutlineFlow(items);
+      final textH = estimateTextHeightPt(
+          items[0]['paragraphs'] as List, 12.0 * kHalfInToPt);
+      expect(textH, greaterThan(20)); // two lines estimated
+      expect((items[1]['yHalfIn'] as num) * kHalfInToPt,
+          closeTo(textH + kFlowGapPt, 0.01));
+    });
+
+    test('items without outlineId are untouched', () {
+      final items = [
+        {'kind': 'image', 'xHalfIn': 1.0, 'yHalfIn': 9.0, 'hHalfIn': 4.0},
+      ];
+      applyOutlineFlow(items);
+      expect(items[0]['yHalfIn'], 9.0);
+    });
+  });
+
   group('buildPageTree', () {
     test('sub-pages nest under their parent by level', () {
       final tree = buildPageTree([

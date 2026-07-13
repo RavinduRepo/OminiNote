@@ -249,21 +249,66 @@ fn file_json(file: &EmbeddedFile, assets: &mut AssetStore, pos: (Option<f32>, Op
     })
 }
 
-/// Walk an outline: rich text becomes paragraphs (in reading order); images,
-/// files and ink found inside become their own items positioned at the
-/// outline's offset.
+/// Per-outline walk state: collects paragraphs and flushes them (interleaved
+/// with images/files, in document order) as sequenced flow items, so a
+/// consumer can stack the outline's contents vertically the way OneNote laid
+/// them out. `outline_seq` orders items within one `outline_id`.
+struct OutlineFlow {
+    outline_id: u64,
+    seq: u32,
+    paragraphs: Vec<Value>,
+    pos: (Option<f32>, Option<f32>),
+    max_width: Option<f32>,
+}
+
+impl OutlineFlow {
+    fn flush_text(&mut self, items: &mut Vec<Value>) {
+        // Trailing blank paragraphs carry no content and no layout meaning.
+        while matches!(
+            self.paragraphs.last().and_then(|p| p["runs"].as_array()),
+            Some(runs) if runs.is_empty()
+        ) {
+            self.paragraphs.pop();
+        }
+        if self.paragraphs.is_empty() {
+            return;
+        }
+        items.push(json!({
+            "kind": "text",
+            "xHalfIn": self.pos.0,
+            "yHalfIn": self.pos.1,
+            "maxWidthHalfIn": self.max_width,
+            "outlineId": self.outline_id,
+            "outlineSeq": self.seq,
+            "paragraphs": std::mem::take(&mut self.paragraphs),
+        }));
+        self.seq += 1;
+    }
+
+    fn push_flow_item(&mut self, mut item: Value, items: &mut Vec<Value>) {
+        self.flush_text(items);
+        item["outlineId"] = json!(self.outline_id);
+        item["outlineSeq"] = json!(self.seq);
+        self.seq += 1;
+        items.push(item);
+    }
+}
+
+/// Walk an outline in document order: rich text accumulates as paragraphs;
+/// images/files interrupt the text (flushing it) and take the next slot in
+/// the outline's vertical flow. Ink is positioned absolutely and bypasses
+/// the flow.
 fn walk_outline_items(
     outline_items: &[OutlineItem],
     indent: u32,
-    pos: (Option<f32>, Option<f32>),
-    paragraphs: &mut Vec<Value>,
+    flow: &mut OutlineFlow,
     items: &mut Vec<Value>,
     assets: &mut AssetStore,
 ) {
     for item in outline_items {
         match item {
             OutlineItem::Group(group) => {
-                walk_outline_items(group.outlines(), indent, pos, paragraphs, items, assets);
+                walk_outline_items(group.outlines(), indent, flow, items, assets);
             }
             OutlineItem::Element(el) => {
                 for content in el.contents() {
@@ -275,8 +320,8 @@ fn walk_outline_items(
                                     let mut ink_items = vec![];
                                     collect_ink(container.ink(), true, &mut ink_items);
                                     for mut it in ink_items {
-                                        it["offsetXHalfIn"] = json!(pos.0.unwrap_or(0.0));
-                                        it["offsetYHalfIn"] = json!(pos.1.unwrap_or(0.0));
+                                        it["offsetXHalfIn"] = json!(flow.pos.0.unwrap_or(0.0));
+                                        it["offsetYHalfIn"] = json!(flow.pos.1.unwrap_or(0.0));
                                         items.push(it);
                                     }
                                 }
@@ -299,19 +344,21 @@ fn walk_outline_items(
                             } else {
                                 runs
                             };
-                            if !runs.is_empty() {
-                                paragraphs.push(json!({
-                                    "indent": indent,
-                                    "runs": runs,
-                                    "styleId": text.paragraph_style().style_id(),
-                                }));
-                            }
+                            // Blank paragraphs (empty runs) still occupy a
+                            // line of vertical space in the flow.
+                            flow.paragraphs.push(json!({
+                                "indent": indent,
+                                "runs": runs,
+                                "styleId": text.paragraph_style().style_id(),
+                            }));
                         }
                         Content::Image(image) => {
-                            items.push(image_json(image, assets, pos, true));
+                            let item = image_json(image, assets, flow.pos, true);
+                            flow.push_flow_item(item, items);
                         }
                         Content::EmbeddedFile(file) => {
-                            items.push(file_json(file, assets, pos));
+                            let item = file_json(file, assets, flow.pos);
+                            flow.push_flow_item(item, items);
                         }
                         Content::Ink(ink) => {
                             let mut ink_items = vec![];
@@ -330,8 +377,7 @@ fn walk_outline_items(
                                     walk_outline_items(
                                         &cell_items,
                                         indent + 1,
-                                        pos,
-                                        paragraphs,
+                                        flow,
                                         items,
                                         assets,
                                     );
@@ -341,25 +387,27 @@ fn walk_outline_items(
                         Content::Unknown => {}
                     }
                 }
-                walk_outline_items(el.children(), indent + 1, pos, paragraphs, items, assets);
+                walk_outline_items(el.children(), indent + 1, flow, items, assets);
             }
         }
     }
 }
 
-fn outline_items(outline: &Outline, items: &mut Vec<Value>, assets: &mut AssetStore) {
-    let pos = (outline.offset_horizontal(), outline.offset_vertical());
-    let mut paragraphs = vec![];
-    walk_outline_items(outline.items(), 0, pos, &mut paragraphs, items, assets);
-    if !paragraphs.is_empty() {
-        items.push(json!({
-            "kind": "text",
-            "xHalfIn": pos.0,
-            "yHalfIn": pos.1,
-            "maxWidthHalfIn": outline.layout_max_width(),
-            "paragraphs": paragraphs,
-        }));
-    }
+fn outline_items(
+    outline: &Outline,
+    outline_id: u64,
+    items: &mut Vec<Value>,
+    assets: &mut AssetStore,
+) {
+    let mut flow = OutlineFlow {
+        outline_id,
+        seq: 0,
+        paragraphs: vec![],
+        pos: (outline.offset_horizontal(), outline.offset_vertical()),
+        max_width: outline.layout_max_width(),
+    };
+    walk_outline_items(outline.items(), 0, &mut flow, items, assets);
+    flow.flush_text(items);
 }
 
 fn collect_one_files(
@@ -398,12 +446,15 @@ fn unix_ms(t: time::UtcDateTime) -> i64 {
     (t.unix_timestamp_nanos() / 1_000_000) as i64
 }
 
-fn page_json(page: &Page, assets: &mut AssetStore) -> Value {
+fn page_json(page: &Page, assets: &mut AssetStore, outline_counter: &mut u64) -> Value {
     let mut items: Vec<Value> = vec![];
 
     for content in page.contents() {
         match content {
-            PageContent::Outline(outline) => outline_items(outline, &mut items, assets),
+            PageContent::Outline(outline) => {
+                *outline_counter += 1;
+                outline_items(outline, *outline_counter, &mut items, assets)
+            }
             PageContent::Image(image) => {
                 let pos = (image.offset_horizontal(), image.offset_vertical());
                 items.push(image_json(image, assets, pos, false));
@@ -458,6 +509,7 @@ fn main() {
     let mut assets = AssetStore::new(out_dir.join("assets")).expect("cannot create assets dir");
     let mut sections: Vec<Value> = vec![];
     let mut had_errors = false;
+    let mut outline_counter: u64 = 0;
 
     for (input, group_path) in &inputs {
         let input_str = input.to_string_lossy().to_string();
@@ -468,7 +520,7 @@ fn main() {
                 let mut pages: Vec<Value> = vec![];
                 for series in section.page_series() {
                     for page in series.pages() {
-                        pages.push(page_json(page, &mut assets));
+                        pages.push(page_json(page, &mut assets, &mut outline_counter));
                     }
                     if series.has_errors() {
                         for err in series.errors() {
