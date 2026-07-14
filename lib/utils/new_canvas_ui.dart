@@ -5,6 +5,7 @@ import '../models/canvas.dart';
 import '../models/section.dart';
 import '../services/notebook_service.dart';
 import '../widgets/action_sheet.dart';
+import 'progress_overlay.dart';
 
 /// What kind of canvas the "New canvas" sheet should create.
 enum NewCanvasKind { empty, pdf }
@@ -44,6 +45,7 @@ Future<NewCanvasKind?> pickNewCanvasKind(BuildContext context) {
 /// [section]. Returns the new canvas, or null if the user cancelled the picker
 /// (or no file came back). The canvas name is the PDF's file name (sans `.pdf`).
 Future<Canvas?> pickAndCreatePdfCanvas(
+  BuildContext context,
   Section section, {
   String? parentFolderId,
 }) async {
@@ -59,10 +61,17 @@ Future<Canvas?> pickAndCreatePdfCanvas(
   if (name.toLowerCase().endsWith('.pdf')) {
     name = name.substring(0, name.length - 4);
   }
-  return NotebookService().createCanvasFromPdf(
-    section,
-    name.isEmpty ? 'PDF' : name,
-    bytes,
-    parentFolderId: parentFolderId,
-  );
+  if (!context.mounted) return null;
+  final progress = ProgressOverlay.show(context, 'Opening PDF…');
+  try {
+    return await NotebookService().createCanvasFromPdf(
+      section,
+      name.isEmpty ? 'PDF' : name,
+      bytes,
+      parentFolderId: parentFolderId,
+      onProgress: progress.report,
+    );
+  } finally {
+    progress.close();
+  }
 }

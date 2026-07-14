@@ -91,7 +91,8 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
     if (kind == null || !mounted) return;
     final Canvas canvas;
     if (kind == NewCanvasKind.pdf) {
-      final c = await pickAndCreatePdfCanvas(_section!, parentFolderId: folderId);
+      final c =
+          await pickAndCreatePdfCanvas(context, _section!, parentFolderId: folderId);
       if (c == null) return;
       canvas = c;
     } else {

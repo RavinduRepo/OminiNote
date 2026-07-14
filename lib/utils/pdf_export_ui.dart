@@ -3,7 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../services/pdf_export_isolate.dart';
 import '../services/pdf_exporter.dart';
-import 'progress_banner.dart';
+import 'progress_overlay.dart';
 
 /// Runs a multi-level PDF export ([items]) with a progress dialog and a save
 /// dialog, mirroring the per-canvas export flow in `canvas_screen`. Shared by
@@ -26,7 +26,7 @@ Future<void> runTreeExport(
 
   // Non-modal live progress: the PDF is built on a background isolate, so the
   // app stays usable while a big notebook/section exports.
-  final banner = ProgressBanner.show(
+  final banner = ProgressOverlay.show(
     context,
     'Exporting ${items.length} canvas${items.length == 1 ? '' : 'es'}…',
   );
@@ -34,10 +34,7 @@ Future<void> runTreeExport(
   try {
     final bytes = await exportPdfInIsolate(
       items,
-      onProgress: (done, total) => banner.report(
-        total == 0 ? null : done / total,
-        'Exporting canvas $done of $total…',
-      ),
+      onProgress: (fraction, label) => banner.report(fraction, label),
     );
     banner.close();
     if (!context.mounted) return;

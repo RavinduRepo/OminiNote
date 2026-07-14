@@ -570,7 +570,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (kind == null || !mounted) return;
     final Canvas canvas;
     if (kind == NewCanvasKind.pdf) {
-      final c = await pickAndCreatePdfCanvas(section, parentFolderId: folderId);
+      final c =
+          await pickAndCreatePdfCanvas(context, section, parentFolderId: folderId);
       if (c == null) return;
       canvas = c;
     } else {

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import '../models/canvas.dart';
 import '../models/section.dart';
 import '../services/notebook_service.dart';
 import '../screens/canvas_screen.dart';
 import '../widgets/location_picker.dart';
+import 'progress_overlay.dart';
 
 enum _PdfDest { here, choose, cancel }
 
@@ -51,7 +53,18 @@ Future<void> openPdfIntoApp(
   }
   if (section == null || !context.mounted) return;
 
-  final canvas = await service.createCanvasFromPdf(section, pdfName, pdfBytes);
+  final progress = ProgressOverlay.show(context, 'Importing PDF…');
+  final Canvas canvas;
+  try {
+    canvas = await service.createCanvasFromPdf(
+      section,
+      pdfName,
+      pdfBytes,
+      onProgress: progress.report,
+    );
+  } finally {
+    progress.close();
+  }
   if (!context.mounted) return;
   await Navigator.of(context).push(
     MaterialPageRoute(builder: (_) => CanvasScreen(canvas: canvas)),

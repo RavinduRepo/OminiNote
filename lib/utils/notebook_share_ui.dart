@@ -10,7 +10,7 @@ import '../services/drive_service.dart';
 import '../services/notebook_bundle_service.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
-import 'progress_banner.dart';
+import 'progress_overlay.dart';
 import 'sync_target_ui.dart';
 
 final _bundle = NotebookBundleService();
@@ -28,33 +28,43 @@ Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
   final messenger = ScaffoldMessenger.of(context);
   // Non-modal progress: the compress runs on a background isolate, so the app
   // stays usable while a big notebook exports.
-  final banner = ProgressBanner.show(context, 'Exporting “${notebook.name}”…');
+  final banner = ProgressOverlay.show(context, 'Exporting “${notebook.name}”…');
   try {
-    final bytes =
+    // Streamed to a temp file (memory-safe) — we move/copy the file itself
+    // rather than ever holding the whole bundle in memory.
+    final zipPath =
         await _bundle.exportBundle(notebook.id, onProgress: banner.report);
     banner.close();
     final fileName = _bundleFileName(notebook.name);
+    final zipFile = File(zipPath);
 
     if (_isMobile) {
-      final dir = await getTemporaryDirectory();
-      final path = '${dir.path}/$fileName';
-      await File(path).writeAsBytes(bytes, flush: true);
+      // Rename to a friendly name in-place, then hand the file to the share
+      // sheet (left in temp for the sheet to read; the OS cleans temp).
+      final named = '${(await getTemporaryDirectory()).path}/$fileName';
+      final shareFile = named == zipPath ? zipFile : await zipFile.rename(named);
       await SharePlus.instance.share(
-        ShareParams(files: [XFile(path)], subject: notebook.name),
+        ShareParams(files: [XFile(shareFile.path)], subject: notebook.name),
       );
     } else {
       final saved = await FilePicker.platform.saveFile(
         dialogTitle: 'Save notebook copy',
         fileName: fileName,
       );
-      if (saved == null) return; // cancelled
-      final ext = '.${NotebookBundleService.kExtension}';
-      final out = saved.endsWith(ext) ? saved : '$saved$ext';
-      await File(out).writeAsBytes(bytes, flush: true);
-      messenger.showSnackBar(SnackBar(
-        content: Text('Saved ${out.split(Platform.pathSeparator).last}'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      if (saved != null) {
+        final ext = '.${NotebookBundleService.kExtension}';
+        final out = saved.endsWith(ext) ? saved : '$saved$ext';
+        await zipFile.copy(out); // copy the file, no bytes in memory
+        messenger.showSnackBar(SnackBar(
+          content: Text('Saved ${out.split(Platform.pathSeparator).last}'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+      if (await zipFile.exists()) {
+        try {
+          await zipFile.delete();
+        } catch (_) {}
+      }
     }
   } catch (e) {
     banner.close();
@@ -88,9 +98,17 @@ Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
 
   _showProgress(context, 'Creating link…');
   try {
-    final bytes = await _bundle.exportBundle(notebook.id);
+    // Streamed to a temp file; read it back only for the upload, then clean up.
+    final zipPath = await _bundle.exportBundle(notebook.id);
+    final zipFile = File(zipPath);
+    final bytes = await zipFile.readAsBytes();
     final fileId = await DriveManager.forAccount(accountId)
         .uploadSharedBundle(_bundleFileName(notebook.name), bytes);
+    if (await zipFile.exists()) {
+      try {
+        await zipFile.delete();
+      } catch (_) {}
+    }
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
     if (fileId == null) {
       messenger.showSnackBar(const SnackBar(
@@ -190,7 +208,7 @@ Future<Notebook?> importBundleBytes(
   if (target == null || !context.mounted) return null; // cancelled
 
   final messenger = ScaffoldMessenger.of(context);
-  final banner = ProgressBanner.show(context, 'Importing notebook…');
+  final banner = ProgressOverlay.show(context, 'Importing notebook…');
   try {
     final nb = await _bundle.importBundle(
       bytes,

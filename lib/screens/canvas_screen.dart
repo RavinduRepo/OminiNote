@@ -11,7 +11,7 @@ import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/clipboard_images.dart';
 import '../utils/ink_contrast.dart';
-import '../utils/progress_banner.dart';
+import '../utils/progress_overlay.dart';
 import '../utils/html_text.dart';
 import '../utils/markdown_text.dart';
 import '../utils/url_text.dart';
@@ -1866,7 +1866,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // Non-modal progress; the PDF builds on a background isolate so the canvas
     // stays interactive. Empty outline → no bookmarks (same as a plain
     // single-canvas export).
-    final banner = ProgressBanner.show(context, 'Exporting PDF…');
+    final banner = ProgressOverlay.show(context, 'Exporting PDF…');
 
     try {
       final bytes = await exportPdfInIsolate(
@@ -1877,10 +1877,11 @@ class _CanvasScreenState extends State<CanvasScreen> {
             pages: c.pages,
             assetBytes: (assetId) =>
                 _service.assetFile(widget.canvas, assetId).readAsBytes(),
+            assetPath: (assetId) =>
+                _service.assetFile(widget.canvas, assetId).path,
           ),
         ],
-        onProgress: (done, total) =>
-            banner.report(total == 0 ? null : done / total),
+        onProgress: (fraction, label) => banner.report(fraction, label),
       );
       banner.close();
       if (!mounted) return;

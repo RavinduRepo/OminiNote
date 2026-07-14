@@ -715,7 +715,9 @@ class NotebookService {
     String name,
     List<int> pdfBytes, {
     String? parentFolderId,
+    void Function(double fraction, String label)? onProgress,
   }) async {
+    onProgress?.call(0.03, 'Reading PDF…');
     final canvas = _newCanvas(section.notebookId, section.id, name);
     final assetId = await putAsset(canvas, pdfBytes, 'pdf');
     final targetWidth = canvas.defaultPageWidth;
@@ -723,7 +725,8 @@ class NotebookService {
     try {
       final doc = await PdfDocument.openFile(assetFile(canvas, assetId).path);
       try {
-        for (var i = 0; i < doc.pages.length; i++) {
+        final count = doc.pages.length;
+        for (var i = 0; i < count; i++) {
           final p = doc.pages[i];
           final scale = p.width > 0 ? targetWidth / p.width : 1.0;
           final page = CanvasPage(
@@ -736,6 +739,10 @@ class NotebookService {
           );
           canvas.rows.add(PageRow(id: newId(), pageIds: [page.id]));
           await savePage(canvas, page);
+          onProgress?.call(
+            0.1 + 0.85 * (i + 1) / count,
+            'Adding page ${i + 1} of $count…',
+          );
         }
       } finally {
         await doc.dispose();
@@ -1448,6 +1455,7 @@ class NotebookService {
           pages: pages,
           assetBytes: (assetId) async => Uint8List.fromList(
               await assetFile(canvas, assetId).readAsBytes()),
+          assetPath: (assetId) => assetFile(canvas, assetId).path,
         );
       },
     );

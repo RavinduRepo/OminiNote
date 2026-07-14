@@ -92,10 +92,10 @@ void main() {
     () async {
       final onMain = await SyncfusionPdfExporter().exportTree([buildItem()]);
 
-      final progress = <List<int>>[];
+      final progress = <double>[];
       final iso = await exportPdfInIsolate(
         [buildItem()],
-        onProgress: (done, total) => progress.add([done, total]),
+        onProgress: (fraction, label) => progress.add(fraction),
       );
 
       final a = sf.PdfDocument(inputBytes: onMain);
@@ -110,9 +110,9 @@ void main() {
       a.dispose();
       b.dispose();
 
-      // Progress ran to completion (1 of 1 canvas).
+      // Progress ran to completion (fraction reaches 1.0).
       expect(progress.isNotEmpty, isTrue);
-      expect(progress.last, [1, 1]);
+      expect(progress.last, closeTo(1.0, 1e-9));
 
       // Real content (stroke + text + grid pattern) was drawn.
       expect(iso.length, greaterThan(1000));
