@@ -1,4 +1,6 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:perfect_freehand/perfect_freehand.dart';
 import '../models/canvas_page.dart';
@@ -6,6 +8,13 @@ import '../models/element.dart';
 import 'canvas_controller.dart';
 import 'canvas_layout.dart';
 import 'text_measure.dart';
+
+/// Cached page-local pattern geometry, keyed by (pattern, page size). Lives at
+/// module scope so it survives the painter being rebuilt (a new [CanvasPainter]
+/// is constructed on every widget rebuild, but repaints reuse the instance);
+/// the geometry is a pure function of the key, so sharing it is safe.
+final Map<String, Float32List> _patternGeomCache = {};
+const int _kPatternGeomCacheMax = 48;
 
 /// Paints the whole canvas: visible pages (background color/pattern or PDF
 /// bitmap), their elements, the in-progress stroke/lasso, and screen-space
@@ -403,52 +412,80 @@ class CanvasPainter extends CustomPainter {
   void _paintPattern(Canvas canvas, Rect rect, PageBackground bg) {
     if (bg.pattern == BgPattern.blank) return;
 
+    // Geometry (line endpoints / dot centers, page-local) is a pure function of
+    // pattern + page size, so it's built once and cached — the per-frame work
+    // collapses to a single drawRawPoints. Line COLOR (from the live page bg)
+    // and WIDTH (zoom-dependent hairline) stay per-frame, so the cache needs no
+    // invalidation and a page-colour change stays live without a rebuild.
+    final geom = _patternGeometry(bg.pattern, rect.width, rect.height);
+    if (geom.isEmpty) return;
+
     final isDark = bg.color.computeLuminance() < 0.4;
     final lineColor = isDark
         ? Colors.white.withValues(alpha: 0.14)
         : const Color(0xFF3B4A6B).withValues(alpha: 0.13);
-    final paint = Paint()
-      ..color = lineColor
-      ..strokeWidth = 1 / controller.zoom.clamp(0.5, 4);
+    final z = controller.zoom.clamp(0.5, 4);
+
+    canvas.save();
+    canvas.translate(rect.left, rect.top);
+    if (bg.pattern == BgPattern.dotted) {
+      // Round cap + width 2r reproduces the old drawCircle(r) dots exactly.
+      final paint = Paint()
+        ..color = lineColor
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = (1.4 / z) * 2;
+      canvas.drawRawPoints(ui.PointMode.points, geom, paint);
+    } else {
+      final paint = Paint()
+        ..color = lineColor
+        ..strokeWidth = 1 / z;
+      canvas.drawRawPoints(ui.PointMode.lines, geom, paint);
+    }
+    canvas.restore();
+  }
+
+  /// Page-local pattern geometry for [pattern] on a [w]×[h] page, cached by
+  /// (pattern, size) — the endpoint/dot list doesn't depend on colour or zoom.
+  /// Ruled/grid entries are segment endpoint PAIRS (drawn `PointMode.lines`);
+  /// dotted entries are dot centres (drawn `PointMode.points`). Mirrors the old
+  /// per-frame loops exactly, so the appearance is unchanged.
+  Float32List _patternGeometry(BgPattern pattern, double w, double h) {
+    final key = '${pattern.index}:${w.toStringAsFixed(1)}x${h.toStringAsFixed(1)}';
+    final cached = _patternGeomCache[key];
+    if (cached != null) return cached;
 
     const spacing = 26.0;
-    switch (bg.pattern) {
+    final pts = <double>[];
+    switch (pattern) {
       case BgPattern.ruled:
-        for (var y = rect.top + spacing * 1.5;
-            y < rect.bottom - 8;
-            y += spacing) {
-          canvas.drawLine(
-            Offset(rect.left + 20, y),
-            Offset(rect.right - 20, y),
-            paint,
-          );
+        for (var y = spacing * 1.5; y < h - 8; y += spacing) {
+          pts..add(20)..add(y)..add(w - 20)..add(y);
         }
       case BgPattern.grid:
-        for (var x = rect.left + spacing; x < rect.right; x += spacing) {
-          canvas.drawLine(
-            Offset(x, rect.top),
-            Offset(x, rect.bottom),
-            paint,
-          );
+        for (var x = spacing; x < w; x += spacing) {
+          pts..add(x)..add(0)..add(x)..add(h);
         }
-        for (var y = rect.top + spacing; y < rect.bottom; y += spacing) {
-          canvas.drawLine(
-            Offset(rect.left, y),
-            Offset(rect.right, y),
-            paint,
-          );
+        for (var y = spacing; y < h; y += spacing) {
+          pts..add(0)..add(y)..add(w)..add(y);
         }
       case BgPattern.dotted:
-        final dotPaint = Paint()..color = lineColor;
-        final r = 1.4 / controller.zoom.clamp(0.5, 4);
-        for (var x = rect.left + spacing; x < rect.right; x += spacing) {
-          for (var y = rect.top + spacing; y < rect.bottom; y += spacing) {
-            canvas.drawCircle(Offset(x, y), r, dotPaint);
+        for (var x = spacing; x < w; x += spacing) {
+          for (var y = spacing; y < h; y += spacing) {
+            pts..add(x)..add(y);
           }
         }
       case BgPattern.blank:
         break;
     }
+
+    final list = Float32List.fromList(pts);
+    // Tiny keyspace in practice (A4 default + a few PDF-normalized widths); a
+    // rare wholesale clear is cheaper than tracking LRU for so few entries.
+    if (_patternGeomCache.length >= _kPatternGeomCacheMax) {
+      _patternGeomCache.clear();
+    }
+    _patternGeomCache[key] = list;
+    return list;
   }
 
   void _paintCenteredLabel(Canvas canvas, Rect rect, String label) {
