@@ -108,6 +108,7 @@ Future<Map<String, dynamic>> _serializeItem(PdfExportItem item) async {
   }
 
   final placed = <String, List<Map<String, dynamic>>>{};
+  var laidOut = 0;
   for (final p in item.pages.values) {
     for (final el in zOrderedElements(p).whereType<TextElement>()) {
       final frags = placedRunFragments(el);
@@ -121,6 +122,10 @@ Future<Map<String, dynamic>> _serializeItem(PdfExportItem item) async {
             'run': f.run.toJson(),
           },
       ];
+      // Text layout (placedRunFragments -> TextPainter) is engine-bound, so it
+      // runs on the main isolate. Yield every so often so a text-heavy canvas
+      // can't block the UI thread long enough to trip an ANR.
+      if (++laidOut % 24 == 0) await Future<void>.delayed(Duration.zero);
     }
   }
 
