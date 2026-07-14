@@ -326,21 +326,64 @@ class DriveService {
     return parentId;
   }
 
-  /// Permanently deletes a folder and every descendant on Drive (one API
-  /// call — `files.delete` on a folder id is recursive and bypasses trash),
-  /// then drops all index/cache entries under it. Idempotent: a folder
-  /// already gone (deleted by another device) is a no-op, so every device
-  /// can safely enforce a purge.
+  /// Deletes a folder and everything under it on Drive, **best-effort**, then
+  /// drops all index/cache entries under it.
+  ///
+  /// We can't use a single cascading `files.delete(folderId)`: under the
+  /// `drive.file` scope Drive refuses to recursively delete a folder unless it
+  /// can confirm write access to *every* descendant (403 "not granted write
+  /// access to all of the children"). So instead we walk the subtree and delete
+  /// each app-created file/subfolder **individually** — which `drive.file` does
+  /// allow — bottom-up. A 404 (already gone) or 403 (a genuinely non-owned
+  /// leftover we can't touch) is skipped, not fatal: this is downstream
+  /// *cleanup*, so removing what we own and moving on is correct — the purge
+  /// itself is enforced by the grow-only `purgedAt` marker + content-path
+  /// filtering, never by this delete succeeding. Network errors propagate so
+  /// the caller keeps it queued for retry. Idempotent: a re-run 404s on
+  /// already-deleted ids.
   Future<void> deleteFolder(String folderPath) async {
     final id = await _findFolderId(folderPath);
     if (id != null) {
-      try {
-        await _drive.files.delete(id);
-      } on gd.DetailedApiRequestError catch (e) {
-        if (e.status != 404) rethrow;
-      }
+      await _deleteSubtree(id); // descendants first (app-owned files/folders)
+      await _deleteOne(id); // then the folder itself
     }
     forgetUnder(folderPath);
+  }
+
+  /// Deletes every descendant of [folderId] bottom-up (recurses into subfolders
+  /// before deleting them). Does not delete [folderId] itself.
+  Future<void> _deleteSubtree(String folderId) async {
+    final children = <gd.File>[];
+    String? token;
+    do {
+      final resp = await _drive.files.list(
+        q: "'$folderId' in parents and trashed=false",
+        spaces: 'drive',
+        pageSize: 1000,
+        pageToken: token,
+        $fields: 'nextPageToken,files(id,mimeType)',
+      );
+      children.addAll(resp.files ?? const []);
+      token = resp.nextPageToken;
+    } while (token != null);
+
+    for (final c in children) {
+      final cid = c.id;
+      if (cid == null) continue;
+      if (c.mimeType == _kAppMimeFolder) await _deleteSubtree(cid);
+      await _deleteOne(cid);
+    }
+  }
+
+  /// Deletes one file/folder id, swallowing 404 (already gone) and 403 (a
+  /// non-owned item we can't delete under `drive.file`). Other errors (incl.
+  /// [SocketException]) propagate.
+  Future<void> _deleteOne(String id) async {
+    try {
+      await _drive.files.delete(id);
+    } on gd.DetailedApiRequestError catch (e) {
+      if (e.status != 404 && e.status != 403) rethrow;
+    }
   }
 
   /// Drops file-index and folder-cache entries at or under [prefix].
