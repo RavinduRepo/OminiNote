@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
+import 'action_sheet.dart';
 import 'color_wheel_picker.dart';
 
 /// Result of the color picker. [color] null means "use the default identity
@@ -18,10 +19,12 @@ Future<ColorChoice?> showColorSwatchPicker(
 }) {
   return showModalBottomSheet<ColorChoice>(
     context: context,
+    isScrollControlled: true,
     builder: (context) {
       final theme = Theme.of(context);
       final palette = theme.extension<AppPalette>()!;
-      return SafeArea(
+      return scrollableSheetBody(
+        context,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
           child: Column(

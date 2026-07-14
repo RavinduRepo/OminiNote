@@ -1,6 +1,39 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 
+/// Fraction of the screen height a modal bottom sheet may grow to before its
+/// content scrolls — keeps sheets bottom-anchored (not full-screen) while
+/// still fitting short screens. Pair the helpers below with
+/// `showModalBottomSheet(isScrollControlled: true, ...)`.
+const double kSheetMaxHeightFactor = 0.9;
+
+/// Wraps fixed (non-list) modal-sheet [child] so it scrolls instead of
+/// overflowing on short screens: SafeArea + a height cap + a scroll view.
+Widget scrollableSheetBody(BuildContext context, {required Widget child}) {
+  return SafeArea(
+    child: ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * kSheetMaxHeightFactor,
+      ),
+      child: SingleChildScrollView(child: child),
+    ),
+  );
+}
+
+/// Like [scrollableSheetBody] but for sheets that already own a scrollable
+/// (e.g. a `Flexible` + `ListView`): SafeArea + a height cap, no outer scroll
+/// view (which would fight the inner one).
+Widget cappedSheetBody(BuildContext context, {required Widget child}) {
+  return SafeArea(
+    child: ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * kSheetMaxHeightFactor,
+      ),
+      child: child,
+    ),
+  );
+}
+
 /// A [PopupMenuItem] with a leading icon (desktop menus, to match the mobile
 /// action sheets). Pass [color] (e.g. the theme error color) to tint a
 /// destructive item.
