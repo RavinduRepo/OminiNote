@@ -67,6 +67,26 @@ class SettingsService {
     await _persist();
   }
 
+  /// Which ink types get their colour lightness-flipped for visibility when a
+  /// page background crosses light↔dark (device-local, remembered per type).
+  /// Highlighter defaults off — a translucent highlight tuned for light paper
+  /// often reads fine on dark, so it's opt-in.
+  bool inkAdjustPen = true;
+  bool inkAdjustHighlighter = false;
+  bool inkAdjustText = true;
+
+  Future<void> setInkAdjustPrefs({bool? pen, bool? highlighter, bool? text}) async {
+    if ((pen == null || pen == inkAdjustPen) &&
+        (highlighter == null || highlighter == inkAdjustHighlighter) &&
+        (text == null || text == inkAdjustText)) {
+      return;
+    }
+    inkAdjustPen = pen ?? inkAdjustPen;
+    inkAdjustHighlighter = highlighter ?? inkAdjustHighlighter;
+    inkAdjustText = text ?? inkAdjustText;
+    await _persist();
+  }
+
   // ── Sync-related fields ─────────────────────────────────────────────────
 
   /// Stable identifier for this installation, generated once and persisted.
@@ -159,6 +179,9 @@ class SettingsService {
     fingerDraw = data['fingerDraw'] == true;
     eraserPartial = data['eraserPartial'] == true;
     eraserSize = (data['eraserSize'] as num?)?.toDouble() ?? 10.0;
+    inkAdjustPen = data['inkAdjustPen'] != false; // default true
+    inkAdjustHighlighter = data['inkAdjustHighlighter'] == true; // default false
+    inkAdjustText = data['inkAdjustText'] != false; // default true
     autoPageColor.value = data['autoPageColor'] != false; // default true
     if (data['defaultPageBackground'] is Map<String, dynamic>) {
       defaultPageBackground.value = PageBackground.fromJson(
@@ -274,6 +297,9 @@ class SettingsService {
         'fingerDraw': fingerDraw,
         'eraserPartial': eraserPartial,
         'eraserSize': eraserSize,
+        'inkAdjustPen': inkAdjustPen,
+        'inkAdjustHighlighter': inkAdjustHighlighter,
+        'inkAdjustText': inkAdjustText,
         'autoPageColor': autoPageColor.value,
         'defaultPageBackground': defaultPageBackground.value.toJson(),
         'deviceId': deviceId,

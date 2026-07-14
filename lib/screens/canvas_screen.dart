@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/clipboard_images.dart';
+import '../utils/ink_contrast.dart';
 import '../utils/progress_banner.dart';
 import '../utils/html_text.dart';
 import '../utils/markdown_text.dart';
@@ -1116,11 +1117,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
   Future<void> _showAddSheet() async {
     final action = await showModalBottomSheet<String>(
       context: context,
-      builder: (context) => SafeArea(
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
+      isScrollControlled: true,
+      builder: (context) => scrollableSheetBody(
+        context,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
               const SizedBox(height: 8),
               const _SheetLabel('Pages'),
               ListTile(
@@ -1173,7 +1175,6 @@ class _CanvasScreenState extends State<CanvasScreen> {
               const SizedBox(height: 8),
             ],
           ),
-        ),
       ),
     );
     if (!mounted || action == null) return;
@@ -1235,7 +1236,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
   Future<InsertPosition?> _pickInsertPosition({bool includeTop = true}) {
     return showModalBottomSheet<InsertPosition>(
       context: context,
-      builder: (context) => SafeArea(
+      isScrollControlled: true,
+      builder: (context) => scrollableSheetBody(
+        context,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1273,7 +1276,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final c = _controller!;
     final mode = await showModalBottomSheet<String>(
       context: context,
-      builder: (context) => SafeArea(
+      isScrollControlled: true,
+      builder: (context) => scrollableSheetBody(
+        context,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1472,9 +1477,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final current = c.currentPageLayout;
     if (current == null) return;
     final page = c.pages[current.pageId]!;
+    final settings = SettingsService();
+    final originalColor = page.background.color;
     var color = page.background.color;
     var pattern = page.background.pattern;
     var asDefault = false;
+    var adjPen = settings.inkAdjustPen;
+    var adjHl = settings.inkAdjustHighlighter;
+    var adjText = settings.inkAdjustText;
 
     const presets = [
       Color(0xFFFFFFFF), // white
@@ -1486,9 +1496,16 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     final apply = await showModalBottomSheet<bool>(
       context: context,
+      isScrollControlled: true,
       builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) => SafeArea(
-          child: Padding(
+        builder: (context, setSheetState) {
+          // Offer the ink-visibility adjustment only when the picked colour
+          // crosses light↔dark relative to the page's current background.
+          final crossing =
+              isDarkBackground(originalColor) != isDarkBackground(color);
+          return scrollableSheetBody(
+            context,
+            child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1549,6 +1566,42 @@ class _CanvasScreenState extends State<CanvasScreen> {
                   value: asDefault,
                   onChanged: (v) => setSheetState(() => asDefault = v ?? false),
                 ),
+                if (crossing) ...[
+                  const SizedBox(height: 8),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  const _SheetLabel('Adjust ink so it stays visible'),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Flips the lightness of ink (keeps the colour) so it stays '
+                    'readable on the new background.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).hintColor,
+                        ),
+                  ),
+                  const SizedBox(height: 4),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: const Text('Pen strokes'),
+                    value: adjPen,
+                    onChanged: (v) => setSheetState(() => adjPen = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: const Text('Highlighter'),
+                    value: adjHl,
+                    onChanged: (v) => setSheetState(() => adjHl = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: const Text('Text'),
+                    value: adjText,
+                    onChanged: (v) => setSheetState(() => adjText = v ?? false),
+                  ),
+                ],
                 const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
@@ -1560,15 +1613,36 @@ class _CanvasScreenState extends State<CanvasScreen> {
               ],
             ),
           ),
-        ),
+          );
+        },
       ),
     );
 
     if (apply == true) {
+      final wasDark = isDarkBackground(originalColor);
+      final willBeDark = isDarkBackground(color);
       c.setPageBackground(
         current.pageId,
         PageBackground(color: color, pattern: pattern),
         asSectionDefault: asDefault,
+      );
+      // Only when the background actually crossed light↔dark and at least one
+      // ink type is enabled. Scope matches the "apply to all" choice.
+      if (wasDark != willBeDark && (adjPen || adjHl || adjText)) {
+        final ids = asDefault
+            ? c.pages.keys.toSet()
+            : {current.pageId};
+        c.adjustInkForContrast(
+          ids,
+          pen: adjPen,
+          highlighter: adjHl,
+          text: adjText,
+        );
+      }
+      await settings.setInkAdjustPrefs(
+        pen: adjPen,
+        highlighter: adjHl,
+        text: adjText,
       );
     }
   }
@@ -1590,7 +1664,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final c = _controller!;
     await showModalBottomSheet<void>(
       context: context,
-      builder: (context) => SafeArea(
+      isScrollControlled: true,
+      builder: (context) => cappedSheetBody(
+        context,
         child: ListenableBuilder(
           listenable: c,
           builder: (context, _) {
@@ -1693,7 +1769,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final c = _controller!;
     await showModalBottomSheet<void>(
       context: context,
-      builder: (context) => SafeArea(
+      isScrollControlled: true,
+      builder: (context) => cappedSheetBody(
+        context,
         child: ListenableBuilder(
           listenable: c,
           builder: (context, _) {

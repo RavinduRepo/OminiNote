@@ -12,6 +12,7 @@ import '../services/render_cache.dart';
 import '../services/settings_service.dart';
 import '../services/sync/merge_engine.dart';
 import '../services/sync_service.dart';
+import '../utils/ink_contrast.dart';
 import '../utils/url_text.dart';
 import 'canvas_layout.dart';
 import 'page_picture_cache.dart';
@@ -1824,6 +1825,89 @@ class CanvasController extends ChangeNotifier {
           _replaceElements(pageId, after);
         },
         revert: () => _replaceElements(pageId, before),
+      ),
+    );
+  }
+
+  /// Reflects ink lightness (keep hue) so it stays visible after a page
+  /// background crosses light↔dark. Applies to the enabled types — [pen]
+  /// strokes, [highlighter] strokes, [text] (box + each run) — across
+  /// [pageIds]. One undoable op that `_stamp`s every mutated element, so it
+  /// syncs like any recolor. Mirrors [applyColorToSelection]'s do/redo/undo
+  /// shape (mutate-in-place + guarded replace), extended to many pages.
+  void adjustInkForContrast(
+    Set<String> pageIds, {
+    bool pen = false,
+    bool highlighter = false,
+    bool text = false,
+  }) {
+    if (!pen && !highlighter && !text) return;
+
+    final targetsByPage = <String, List<CanvasElement>>{};
+    final before = <String, List<CanvasElement>>{};
+    for (final pid in pageIds) {
+      final page = pages[pid];
+      if (page == null) continue;
+      final targets = <CanvasElement>[];
+      for (final s in page.strokes) {
+        final isHl = s.tool == StrokeTool.highlighter;
+        if ((isHl && highlighter) || (!isHl && pen)) targets.add(s);
+      }
+      if (text) {
+        for (final o in page.objects) {
+          if (o is TextElement) targets.add(o);
+        }
+      }
+      if (targets.isEmpty) continue;
+      targetsByPage[pid] = targets;
+      before[pid] = [for (final el in targets) el.deepCopy()];
+    }
+    if (targetsByPage.isEmpty) return;
+
+    final touched = <CanvasElement>[];
+    targetsByPage.forEach((pid, targets) {
+      for (final el in targets) {
+        switch (el) {
+          case StrokeElement():
+            el.color = reflectLightnessForContrast(el.color);
+            el.invalidateCache();
+          case TextElement():
+            el.color = reflectLightnessForContrast(el.color);
+            for (final r in el.runs) {
+              r.color = reflectLightnessForContrast(r.color);
+            }
+          default:
+            break;
+        }
+        touched.add(el);
+      }
+    });
+    _stamp(touched);
+
+    final after = <String, List<CanvasElement>>{
+      for (final pid in targetsByPage.keys)
+        pid: [for (final el in targetsByPage[pid]!) el.deepCopy()],
+    };
+    final dirty = targetsByPage.keys.toSet();
+    var applied = true;
+    _doOp(
+      _CanvasOp(
+        label: 'Adjust ink for contrast',
+        dirtyPageIds: dirty,
+        apply: () {
+          if (applied) {
+            applied = false;
+            return;
+          }
+          for (final pid in after.keys) {
+            _replaceElements(pid, after[pid]!);
+          }
+        },
+        revert: () {
+          for (final pid in before.keys) {
+            _replaceElements(pid, before[pid]!);
+          }
+        },
       ),
     );
   }

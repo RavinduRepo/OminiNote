@@ -103,6 +103,94 @@ void main() {
     });
   });
 
+  group('CanvasController.adjustInkForContrast', () {
+    test(
+      'flips enabled ink lightness (keeps hue), skips highlighter when off, '
+      'stamps mutated elements, and undo restores originals',
+      () {
+        final pen = StrokeElement(
+          id: 'p',
+          deviceId: 'test_device',
+          z: '0|a0:',
+          tool: StrokeTool.pen,
+          color: const Color(0xFF000000),
+          size: 3,
+          points: [StrokePoint(0, 0, 0.5), StrokePoint(10, 10, 0.5)],
+        );
+        final hl = StrokeElement(
+          id: 'h',
+          deviceId: 'test_device',
+          z: '0|a1:',
+          tool: StrokeTool.highlighter,
+          color: const Color(0xFFEAD24B),
+          size: 8,
+          points: [StrokePoint(0, 0, 0.5), StrokePoint(10, 10, 0.5)],
+        );
+        final txt = TextElement(
+          id: 't',
+          deviceId: 'test_device',
+          rect: const Rect.fromLTWH(0, 0, 100, 20),
+          color: const Color(0xFF000000),
+          runs: [
+            TextRun(
+              text: 'hi',
+              fontSize: 16,
+              bold: false,
+              italic: false,
+              color: const Color(0xFF000000),
+              fontFamily: 'sans',
+            ),
+          ],
+        );
+        final page = CanvasPage(id: 'a', deviceId: 'test_device');
+        page.strokes.addAll([pen, hl]);
+        page.objects.add(txt);
+        final section = Canvas(
+          id: 's3',
+          notebookId: 'n1',
+          sectionId: 's1',
+          name: 'T3',
+          createdAt: DateTime(2026, 7, 14),
+          rows: [PageRow(id: 'r1', pageIds: ['a'])],
+        );
+        final controller =
+            CanvasController(canvas: section, pages: {'a': page});
+
+        final penRev0 = pen.rev;
+        final hlRev0 = hl.rev;
+        final txtRev0 = txt.rev;
+
+        controller.adjustInkForContrast(
+          {'a'},
+          pen: true,
+          highlighter: false,
+          text: true,
+        );
+
+        StrokeElement s(String id) =>
+            controller.pages['a']!.strokes.firstWhere((e) => e.id == id);
+        TextElement t() =>
+            controller.pages['a']!.objects.whereType<TextElement>().first;
+
+        // Pen + text flip black → white; highlighter is left alone (off).
+        expect(s('p').color.toARGB32(), 0xFFFFFFFF);
+        expect(t().color.toARGB32(), 0xFFFFFFFF);
+        expect(t().runs.first.color.toARGB32(), 0xFFFFFFFF);
+        expect(s('h').color.toARGB32(), 0xFFEAD24B);
+
+        // Mutated elements are stamped (rev bumped) for sync; highlighter isn't.
+        expect(s('p').rev, greaterThan(penRev0));
+        expect(t().rev, greaterThan(txtRev0));
+        expect(s('h').rev, hlRev0);
+
+        controller.undo();
+        expect(s('p').color.toARGB32(), 0xFF000000);
+        expect(t().color.toARGB32(), 0xFF000000);
+        expect(t().runs.first.color.toARGB32(), 0xFF000000);
+      },
+    );
+  });
+
   group('CanvasController.reorderPages (preserve rows)', () {
     CanvasController make() {
       final pages = {
