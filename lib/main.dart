@@ -13,6 +13,7 @@ import 'services/settings_service.dart';
 import 'services/sync_service.dart';
 import 'theme/app_theme.dart';
 import 'utils/notebook_share_ui.dart';
+import 'utils/open_pdf_ui.dart';
 
 /// A `.omninote` file path or `omninote://` URI the desktop OS launched us with
 /// (Linux/Windows forward argv to the Dart entrypoint). Consumed once by the app
@@ -28,7 +29,10 @@ void main(List<String> args) async {
   // as a command-line argument (double-click a .omninote / tap a link).
   if (Platform.isLinux || Platform.isWindows) {
     for (final a in args) {
-      if (a.startsWith('omninote://') || a.toLowerCase().endsWith('.omninote')) {
+      final lower = a.toLowerCase();
+      if (a.startsWith('omninote://') ||
+          lower.endsWith('.omninote') ||
+          lower.endsWith('.pdf')) {
         _initialDesktopOpen = a;
         break;
       }
@@ -120,6 +124,8 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   void _handleDesktopOpen(String item) {
     if (item.startsWith('omninote://')) {
       _handleLink(item);
+    } else if (item.toLowerCase().endsWith('.pdf')) {
+      _handlePdfOpen(item);
     } else {
       _importFromPath(item);
     }
@@ -132,11 +138,45 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
       _handleLink(files.first.path);
       return;
     }
-    final f = files.firstWhere(
-      (m) => m.path.toLowerCase().endsWith('.omninote'),
-      orElse: () => files.first,
-    );
-    _importFromPath(f.path);
+    // Prefer a recognized type (a bundle or a PDF), else the first file.
+    String? path;
+    for (final ext in ['.omninote', '.pdf']) {
+      for (final m in files) {
+        if (m.path.toLowerCase().endsWith(ext)) {
+          path = m.path;
+          break;
+        }
+      }
+      if (path != null) break;
+    }
+    path ??= files.first.path;
+    if (path.toLowerCase().endsWith('.pdf')) {
+      _handlePdfOpen(path);
+    } else {
+      _importFromPath(path);
+    }
+  }
+
+  /// A PDF opened *with* the app (Android open-with / share, desktop launch
+  /// arg, macOS openFile). Reads it and routes into the open-PDF flow (ask
+  /// where, then create a PDF-backed canvas and open it).
+  Future<void> _handlePdfOpen(String path) async {
+    List<int> bytes;
+    try {
+      bytes = await File(path).readAsBytes();
+    } catch (_) {
+      return;
+    }
+    var name = path.split(Platform.pathSeparator).last.split('/').last;
+    if (name.toLowerCase().endsWith('.pdf')) {
+      name = name.substring(0, name.length - 4);
+    }
+    if (name.isEmpty) name = 'PDF';
+    // Run after a frame so the navigator/context is available (cold start).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _navigatorKey.currentContext;
+      if (ctx != null) openPdfIntoApp(ctx, bytes, name);
+    });
   }
 
   void _handleLink(String uriStr) {

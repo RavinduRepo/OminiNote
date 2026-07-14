@@ -56,6 +56,19 @@
                 <data android:mimeType="application/zip"/>
                 <data android:mimeType="application/octet-stream"/>
             </intent-filter>
+            <!-- Open a PDF with the app ("Open with" / share): it lands in this
+                 device's default target notebook as an annotatable canvas. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:mimeType="application/pdf"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/pdf"/>
+            </intent-filter>
             <!-- omninote:// share links (Stage 3): tapping one opens the app and
                  imports the shared notebook. -->
             <intent-filter>

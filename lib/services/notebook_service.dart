@@ -379,6 +379,18 @@ class NotebookService {
     return (notebook: fresh, section: section);
   }
 
+  /// Display name of the current default target (for a prompt), **without**
+  /// creating anything: the marked notebook's name if it still exists, else
+  /// "Quick Notes". Use before [resolveDefaultTarget], which does create.
+  Future<String> defaultTargetLabel() async {
+    final markedId = SettingsService().defaultNotebookId;
+    if (markedId != null) {
+      final nb = await getNotebook(markedId);
+      if (nb != null) return nb.name;
+    }
+    return _kQuickNotesName;
+  }
+
   /// This device's local-only "Quick Notes" notebook, or a freshly created one
   /// marked local-only (so it never syncs — each device keeps its own).
   Future<Notebook> _findOrCreateQuickNotes() async {
