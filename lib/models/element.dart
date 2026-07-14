@@ -112,6 +112,11 @@ class StrokeElement extends CanvasElement {
   /// Cached rendered outline; invalidated whenever geometry changes.
   Path? cachedOutline;
 
+  /// Cached point-bounding box (padded), invalidated with [cachedOutline].
+  /// The eraser hit-scan pre-filters on this, so recomputing it per pointer
+  /// move over every committed stroke would defeat the point of the filter.
+  Rect? _cachedBounds;
+
   StrokeElement({
     int schemaVersion = 1,
     required super.id,
@@ -133,11 +138,16 @@ class StrokeElement extends CanvasElement {
          deletedAt: deletedAt,
        );
 
-  void invalidateCache() => cachedOutline = null;
+  void invalidateCache() {
+    cachedOutline = null;
+    _cachedBounds = null;
+  }
 
   @override
   Rect get bounds {
-    if (points.isEmpty) return Rect.zero;
+    final cached = _cachedBounds;
+    if (cached != null) return cached;
+    if (points.isEmpty) return Rect.zero; // degenerate; don't cache
     var minX = points.first.x, maxX = points.first.x;
     var minY = points.first.y, maxY = points.first.y;
     for (final p in points) {
@@ -147,7 +157,8 @@ class StrokeElement extends CanvasElement {
       if (p.y > maxY) maxY = p.y;
     }
     final pad = size;
-    return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+    return _cachedBounds =
+        Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
   }
 
   @override

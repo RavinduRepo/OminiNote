@@ -755,6 +755,15 @@ class CanvasController extends ChangeNotifier {
   // this gesture (new ids; committed together with the removals as one op).
   final Map<String, List<StrokeElement>> _segAccum = {};
 
+  // Pages whose ink changed during the in-progress erase gesture. While a page
+  // is in here the painter draws its committed elements DIRECTLY rather than
+  // re-recording the page picture on every erased stroke; the set is cleared
+  // and the pages re-recorded once when the gesture commits/cancels.
+  final Set<String> _erasingPageIds = {};
+
+  /// True while [pageId] is mid-erase (painter bypasses its picture cache).
+  bool isErasingPage(String pageId) => _erasingPageIds.contains(pageId);
+
   /// Partial mode splits strokes at the erased gap instead of removing them
   /// whole. Device-local preference (screen persists via SettingsService).
   bool eraserPartial = false;
@@ -926,7 +935,11 @@ class CanvasController extends ChangeNotifier {
     lassoPoints = null;
     _gesturePageId = null;
     // Erase already applied live — commit what happened rather than losing it.
-    if (_eraseAccum.isNotEmpty || _segAccum.isNotEmpty) {
+    // (_erasingPageIds guards the case where only own-segments changed, so the
+    // painter's direct-draw bypass is always torn down.)
+    if (_eraseAccum.isNotEmpty ||
+        _segAccum.isNotEmpty ||
+        _erasingPageIds.isNotEmpty) {
       _commitErase();
       return;
     }
@@ -945,6 +958,14 @@ class CanvasController extends ChangeNotifier {
     var changed = false;
     for (var i = page.strokes.length - 1; i >= 0; i--) {
       final el = page.strokes[i];
+      // Cheap bbox reject before the per-segment scan. `el.bounds` is padded by
+      // the stroke's own width, so inflating by the eraser radius stays
+      // conservative — anything `_strokeHit` could hit is inside this rect.
+      if (!el.bounds
+          .inflate(eraserSize + el.size / 2)
+          .contains(local)) {
+        continue;
+      }
       if (!_strokeHit(el, local)) continue;
       changed = true;
 
@@ -970,7 +991,10 @@ class CanvasController extends ChangeNotifier {
       }
     }
     if (changed) {
-      pictureCache.invalidate(page.id);
+      // Don't re-record the whole page picture mid-gesture — mark the page as
+      // erasing so the painter draws its (now-reduced) ink directly, and defer
+      // a single re-record to _commitErase.
+      _erasingPageIds.add(page.id);
       notifyListeners();
     }
   }
@@ -1033,11 +1057,25 @@ class CanvasController extends ChangeNotifier {
   }
 
   void _commitErase() {
+    // End the painter's direct-draw bypass and refresh the picture from the
+    // final ink. Invalidate here (not per erased stroke) so the whole-page
+    // re-record happens once. The op below re-invalidates its dirty pages too;
+    // a redundant invalidate is a no-op, but this also covers any erasing page
+    // the op's dirty set might miss.
+    final erasingPages = Set.of(_erasingPageIds);
+    _erasingPageIds.clear();
+    for (final id in erasingPages) {
+      pictureCache.invalidate(id);
+    }
+
     final accum = Map.of(_eraseAccum);
     final segs = Map.of(_segAccum);
     _eraseAccum.clear();
     _segAccum.clear();
-    if (accum.isEmpty && segs.isEmpty) return;
+    if (accum.isEmpty && segs.isEmpty) {
+      if (erasingPages.isNotEmpty) notifyListeners();
+      return;
+    }
 
     // The live gesture (_eraseAt) already removed the erased strokes and added
     // the survivor segments; this op just makes it undoable and sync-safe.

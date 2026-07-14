@@ -120,19 +120,30 @@ class CanvasPainter extends CustomPainter {
             page.objects.any((o) => o.id == editingId)
         ? editingId // text overlay open on this page
         : null;
-    controller.pictureCache.paint(
-      canvas,
-      page.id,
-      skippedElementId: skipped,
-      record: (c) {
-        _recordComplete = true;
-        for (final el in zOrderedElements(page)) {
-          if (el.id == skipped) continue;
-          _paintElement(c, el);
-        }
-        return _recordComplete;
-      },
-    );
+    if (controller.isErasingPage(page.id)) {
+      // Active erase gesture: draw the (live, already-reduced) committed
+      // elements straight onto the canvas instead of re-recording the page
+      // picture on every erased stroke. _commitErase invalidates the cache
+      // once at gesture end so the normal cached path resumes next frame.
+      for (final el in zOrderedElements(page)) {
+        if (el.id == skipped) continue;
+        _paintElement(canvas, el);
+      }
+    } else {
+      controller.pictureCache.paint(
+        canvas,
+        page.id,
+        skippedElementId: skipped,
+        record: (c) {
+          _recordComplete = true;
+          for (final el in zOrderedElements(page)) {
+            if (el.id == skipped) continue;
+            _paintElement(c, el);
+          }
+          return _recordComplete;
+        },
+      );
+    }
 
     // In-progress stroke on this page.
     if (controller.activeStrokePageId == page.id &&
