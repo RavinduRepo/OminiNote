@@ -7,6 +7,7 @@ import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
 import '../services/search_service.dart';
+import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
@@ -398,6 +399,15 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (choice == null) return;
     notebook.color = choice.color;
     await _service.saveNotebook(notebook);
+    if (mounted) setState(() {});
+  }
+
+  /// Toggle this device's default landing notebook (device-local; where quick
+  /// PDF imports / opened PDFs go). Tapping the current default clears it.
+  Future<void> _toggleDefaultNotebook(Notebook notebook) async {
+    final settings = SettingsService();
+    final makeDefault = settings.defaultNotebookId != notebook.id;
+    await settings.setDefaultNotebook(makeDefault ? notebook.id : null);
     if (mounted) setState(() {});
   }
 
@@ -1347,6 +1357,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           ),
                         ),
                       ),
+                      if (SettingsService().defaultNotebookId == notebook.id)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 2),
+                          child: Icon(Icons.star_rounded,
+                              size: 14, color: palette.accent),
+                        ),
                       PopupMenuButton<String>(
                         icon: Icon(Icons.add, size: 18, color: palette.textDim),
                         tooltip: 'Add',
@@ -1383,6 +1399,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               shareNotebookLink(context, notebook);
                             case 'sync':
                               _pickSyncTarget(notebook);
+                            case 'default':
+                              _toggleDefaultNotebook(notebook);
                             case 'delete':
                               _deleteNotebook(notebook);
                           }
@@ -1397,6 +1415,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               'share', Icons.ios_share, 'Send a copy'),
                           iconMenuItem('sharelink', Icons.link, 'Share link'),
                           iconMenuItem('sync', Icons.sync_outlined, 'Sync to…'),
+                          iconMenuItem(
+                              'default',
+                              SettingsService().defaultNotebookId == notebook.id
+                                  ? Icons.star_rounded
+                                  : Icons.star_border_rounded,
+                              SettingsService().defaultNotebookId == notebook.id
+                                  ? 'Remove as default target'
+                                  : 'Set as default target'),
                           iconMenuItem('delete', Icons.delete_outline, 'Delete',
                               color: Theme.of(context).colorScheme.error),
                         ],
