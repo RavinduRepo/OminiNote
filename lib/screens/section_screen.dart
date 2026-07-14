@@ -6,6 +6,7 @@ import '../models/tree.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/new_canvas_ui.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
@@ -86,13 +87,22 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
   // ── Actions ─────────────────────────────────────────────────────────
 
   Future<void> _addCanvas({String? folderId}) async {
-    final name = await _prompt(title: 'New canvas', hint: 'Canvas name');
-    if (name == null || name.isEmpty) return;
-    final canvas = await _service.createCanvas(
-      _section!,
-      name,
-      parentFolderId: folderId,
-    );
+    final kind = await pickNewCanvasKind(context);
+    if (kind == null || !mounted) return;
+    final Canvas canvas;
+    if (kind == NewCanvasKind.pdf) {
+      final c = await pickAndCreatePdfCanvas(_section!, parentFolderId: folderId);
+      if (c == null) return;
+      canvas = c;
+    } else {
+      final name = await _prompt(title: 'New canvas', hint: 'Canvas name');
+      if (name == null || name.isEmpty) return;
+      canvas = await _service.createCanvas(
+        _section!,
+        name,
+        parentFolderId: folderId,
+      );
+    }
     await _reload();
     if (!mounted) return;
     // Root navigator so the canvas editor covers the mobile bottom nav bar.

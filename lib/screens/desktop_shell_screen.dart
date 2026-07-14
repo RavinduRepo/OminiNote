@@ -16,6 +16,7 @@ import '../widgets/location_picker.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
+import '../utils/new_canvas_ui.dart';
 import 'canvas_screen.dart';
 import 'note_search.dart';
 import '../widgets/action_sheet.dart';
@@ -555,13 +556,22 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Future<void> _addCanvas({String? folderId}) async {
     final section = _selectedSection;
     if (section == null) return;
-    final name = await _prompt(title: 'New canvas', hint: 'Canvas name');
-    if (name == null || name.isEmpty) return;
-    final canvas = await _service.createCanvas(
-      section,
-      name,
-      parentFolderId: folderId,
-    );
+    final kind = await pickNewCanvasKind(context);
+    if (kind == null || !mounted) return;
+    final Canvas canvas;
+    if (kind == NewCanvasKind.pdf) {
+      final c = await pickAndCreatePdfCanvas(section, parentFolderId: folderId);
+      if (c == null) return;
+      canvas = c;
+    } else {
+      final name = await _prompt(title: 'New canvas', hint: 'Canvas name');
+      if (name == null || name.isEmpty) return;
+      canvas = await _service.createCanvas(
+        section,
+        name,
+        parentFolderId: folderId,
+      );
+    }
     await _reloadSelectedSection();
     if (mounted) setState(() => _selectedCanvas = canvas);
   }
