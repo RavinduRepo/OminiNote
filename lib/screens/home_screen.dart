@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/notebook.dart';
 import '../services/notebook_service.dart';
+import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
@@ -114,6 +115,15 @@ class _HomeScreenState extends State<HomeScreen> {
     await _notebookService.deleteNotebook(notebook.id);
     _removingId = null;
     _loadNotebooks();
+  }
+
+  /// Toggle this device's default landing notebook (device-local; where quick
+  /// PDF imports / opened PDFs go). Tapping the current default clears it.
+  Future<void> _toggleDefaultNotebook(Notebook notebook) async {
+    final settings = SettingsService();
+    final makeDefault = settings.defaultNotebookId != notebook.id;
+    await settings.setDefaultNotebook(makeDefault ? notebook.id : null);
+    if (mounted) setState(() {});
   }
 
   Future<void> _reorderNotebooks(int oldIndex, int newIndex) async {
@@ -254,6 +264,10 @@ class _HomeScreenState extends State<HomeScreen> {
                               onShareLink: () => _shareNotebookLink(notebook),
                               onSyncTo: () => _pickSyncTarget(notebook),
                               onDelete: () => _deleteNotebook(notebook),
+                              isDefault: SettingsService().defaultNotebookId ==
+                                  notebook.id,
+                              onSetDefault: () =>
+                                  _toggleDefaultNotebook(notebook),
                             ),
                           ),
                         ),
@@ -282,6 +296,8 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onShareLink;
   final VoidCallback onSyncTo;
   final VoidCallback onDelete;
+  final bool isDefault;
+  final VoidCallback onSetDefault;
 
   const _NotebookRow({
     required this.notebook,
@@ -293,6 +309,8 @@ class _NotebookRow extends StatelessWidget {
     required this.onShareLink,
     required this.onSyncTo,
     required this.onDelete,
+    required this.isDefault,
+    required this.onSetDefault,
   });
 
   @override
@@ -329,14 +347,25 @@ class _NotebookRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      notebook.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            notebook.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        if (isDefault) ...[
+                          const SizedBox(width: 6),
+                          Icon(Icons.star_rounded,
+                              size: 16, color: palette.accent),
+                        ],
+                      ],
                     ),
                     const SizedBox(height: 3),
                     Text(
@@ -358,6 +387,8 @@ class _NotebookRow extends StatelessWidget {
                 onShareLink: onShareLink,
                 onSyncTo: onSyncTo,
                 onDelete: onDelete,
+                isDefault: isDefault,
+                onSetDefault: onSetDefault,
               ),
             ],
           ),
@@ -375,6 +406,8 @@ class _RowMenu extends StatelessWidget {
   final VoidCallback onShareLink;
   final VoidCallback onSyncTo;
   final VoidCallback onDelete;
+  final bool isDefault;
+  final VoidCallback onSetDefault;
   const _RowMenu({
     required this.onRename,
     required this.onColor,
@@ -383,6 +416,8 @@ class _RowMenu extends StatelessWidget {
     required this.onShareLink,
     required this.onSyncTo,
     required this.onDelete,
+    required this.isDefault,
+    required this.onSetDefault,
   });
 
   @override
@@ -407,6 +442,12 @@ class _RowMenu extends StatelessWidget {
             icon: Icons.link, label: 'Share link', onTap: onShareLink),
         ActionSheetItem(
             icon: Icons.sync_outlined, label: 'Sync to…', onTap: onSyncTo),
+        ActionSheetItem(
+            icon: isDefault ? Icons.star_rounded : Icons.star_border_rounded,
+            label: isDefault
+                ? 'Remove as default target'
+                : 'Set as default target',
+            onTap: onSetDefault),
         ActionSheetItem(
             icon: Icons.delete_outline,
             label: 'Delete',

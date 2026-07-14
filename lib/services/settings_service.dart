@@ -125,6 +125,18 @@ class SettingsService {
     await _persist();
   }
 
+  /// The notebook this device drops quick imports / opened PDFs into. A
+  /// **per-device** pointer (settings.json, never synced) — two devices on the
+  /// same account may each mark a different notebook. Null ⇒ fall back to a
+  /// local-only "Quick Notes" notebook (see [NotebookService.resolveDefaultTarget]).
+  String? defaultNotebookId;
+
+  Future<void> setDefaultNotebook(String? id) async {
+    if (defaultNotebookId == id) return;
+    defaultNotebookId = id;
+    await _persist();
+  }
+
   /// Per-canvas last viewport (canvasId → {z, x, y}) so a canvas reopens
   /// where the user left it. Device-local by design — zoom/pan depend on this
   /// screen, so it lives in settings.json (never synced). Capped so it can't
@@ -204,6 +216,7 @@ class SettingsService {
     }
     final lastSyncStr = data['lastSyncAt'] as String?;
     lastSyncAt = lastSyncStr != null ? DateTime.tryParse(lastSyncStr) : null;
+    defaultNotebookId = data['defaultNotebookId'] as String?;
     if (data['localOnlyNotebooks'] is List) {
       localOnlyNotebooks =
           Set<String>.from((data['localOnlyNotebooks'] as List).cast<String>());
@@ -307,6 +320,7 @@ class SettingsService {
         'driveChangesTokens': _driveChangesTokens,
         'lastSyncAt': lastSyncAt?.toIso8601String(),
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
+        'defaultNotebookId': defaultNotebookId,
         'canvasViewports': _canvasViewports,
       }),
     );

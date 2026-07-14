@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:pdfrx/pdfrx.dart' show PdfDocument;
 import '../models/canvas.dart';
 import '../models/canvas_page.dart';
 import '../models/notebook.dart';
@@ -359,6 +360,49 @@ class NotebookService {
   Future<void> setNotebookLocalOnly(String notebookId, bool local) =>
       SettingsService().setNotebookLocalOnly(notebookId, local);
 
+  static const _kQuickNotesName = 'Quick Notes';
+  static const _kQuickSectionName = 'Quick Section';
+
+  /// This device's landing spot for a quick import / opened PDF: the notebook
+  /// marked default on **this device** ([SettingsService.defaultNotebookId]) if
+  /// it still exists, else a find-or-create **local-only** "Quick Notes". The
+  /// default marker is deliberately device-local, so two devices on the same
+  /// account can point at different notebooks without collision. Always returns
+  /// a live [Section] to add canvases to (creating a "Quick Section" if the
+  /// notebook has none).
+  Future<({Notebook notebook, Section section})> resolveDefaultTarget() async {
+    final markedId = SettingsService().defaultNotebookId;
+    var nb = markedId == null ? null : await getNotebook(markedId);
+    nb ??= await _findOrCreateQuickNotes();
+    final section = await _firstOrNewSection(nb.id);
+    final fresh = await getNotebook(nb.id) ?? nb;
+    return (notebook: fresh, section: section);
+  }
+
+  /// This device's local-only "Quick Notes" notebook, or a freshly created one
+  /// marked local-only (so it never syncs — each device keeps its own).
+  Future<Notebook> _findOrCreateQuickNotes() async {
+    final localOnly = SettingsService().localOnlyNotebooks;
+    for (final n in await getNotebooks()) {
+      if (n.name == _kQuickNotesName && localOnly.contains(n.id)) return n;
+    }
+    final nb = await createNotebook(_kQuickNotesName);
+    await setNotebookLocalOnly(nb.id, true);
+    return nb;
+  }
+
+  /// The first live section of [notebookId], or a fresh "Quick Section".
+  Future<Section> _firstOrNewSection(String notebookId) async {
+    final nb = await getNotebook(notebookId);
+    if (nb != null) {
+      for (final sid in nb.allSectionIds) {
+        final s = await getSection(notebookId, sid);
+        if (s != null) return s;
+      }
+    }
+    return createSection(notebookId, _kQuickSectionName);
+  }
+
   /// Removes local copies of notebooks that sync to [accountId] (keeping
   /// local-only ones and other accounts' notebooks), **without tombstoning** —
   /// so removing that account is clean and re-adding it later re-downloads them.
@@ -646,6 +690,61 @@ class NotebookService {
     target.add(LeafNode(canvas.id));
     await saveSection(section);
     SyncService().notifyDataChanged(); // reindex search + refresh lists
+    return canvas;
+  }
+
+  /// Creates a canvas seeded **directly** with [pdfBytes] as PDF-backed pages
+  /// (one per PDF page, normalized to the canvas's default width) — no blank
+  /// starter page — adds it to [section], and returns it. Shared by the canvas
+  /// list's "Open PDF" option and the OS open-with flow. Falls back to a single
+  /// blank page if the PDF can't be read, so a canvas is never left empty.
+  Future<Canvas> createCanvasFromPdf(
+    Section section,
+    String name,
+    List<int> pdfBytes, {
+    String? parentFolderId,
+  }) async {
+    final canvas = _newCanvas(section.notebookId, section.id, name);
+    final assetId = await putAsset(canvas, pdfBytes, 'pdf');
+    final targetWidth = canvas.defaultPageWidth;
+
+    try {
+      final doc = await PdfDocument.openFile(assetFile(canvas, assetId).path);
+      try {
+        for (var i = 0; i < doc.pages.length; i++) {
+          final p = doc.pages[i];
+          final scale = p.width > 0 ? targetWidth / p.width : 1.0;
+          final page = CanvasPage(
+            id: newId(),
+            deviceId: SettingsService().deviceId,
+            width: targetWidth,
+            height: p.height * scale,
+            background: const PageBackground(),
+            source: PdfSource(assetId: assetId, pageIndex: i),
+          );
+          canvas.rows.add(PageRow(id: newId(), pageIds: [page.id]));
+          await savePage(canvas, page);
+        }
+      } finally {
+        await doc.dispose();
+      }
+    } catch (_) {
+      // Leave rows empty; the guard below seeds a blank page.
+    }
+
+    if (canvas.rows.isEmpty) {
+      await _writeCanvasWithDefaultPage(canvas);
+    } else {
+      await saveCanvas(canvas);
+    }
+
+    final target = parentFolderId == null
+        ? section.nodes
+        : TreeOps.findFolder(section.nodes, parentFolderId)?.children ??
+              section.nodes;
+    target.add(LeafNode(canvas.id));
+    await saveSection(section);
+    SyncService().notifyDataChanged();
     return canvas;
   }
 
