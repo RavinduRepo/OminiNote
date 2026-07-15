@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:googleapis/drive/v3.dart' as gd;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -193,6 +194,11 @@ class DriveService {
     return _upload(drivePath, bytes, 'application/json');
   }
 
+  /// Uploads already-encoded JSON bytes (create or update) — skips the
+  /// main-isolate utf8 round-trip for callers that have the file bytes.
+  Future<String?> uploadJsonBytes(String drivePath, List<int> bytes) =>
+      _upload(drivePath, bytes, 'application/json');
+
   /// Uploads a binary asset. Content-addressed: if a file already exists at the
   /// path we treat it as identical (assets never change) and skip.
   Future<String?> uploadBinary(String drivePath, List<int> bytes) async {
@@ -282,9 +288,19 @@ class DriveService {
     return _collect(media.stream);
   }
 
+  /// Bytes above this hop to a background isolate for the utf8 decode
+  /// (matches SyncService's merge offload gate); smaller stay inline.
+  static const int _kDecodeOffloadBytes = 256 * 1024;
+
   Future<String?> downloadJsonById(String fileId) async {
     final bytes = await downloadById(fileId);
-    return bytes == null ? null : utf8.decode(bytes);
+    if (bytes == null) return null;
+    if (bytes.length < _kDecodeOffloadBytes) return utf8.decode(bytes);
+    try {
+      return await Isolate.run(() => utf8.decode(bytes));
+    } catch (_) {
+      return utf8.decode(bytes);
+    }
   }
 
   Future<void> deleteFile(String drivePath) async {

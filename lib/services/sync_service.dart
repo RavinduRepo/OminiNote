@@ -462,7 +462,10 @@ class SyncService {
       if (_isAsset(rel)) {
         await drive.uploadBinary(rel, await file.readAsBytes());
       } else {
-        await drive.uploadJson(rel, await file.readAsString());
+        // Bytes straight through — readAsString + uploadJson's utf8.encode
+        // was a decode+re-encode round-trip of the whole file on the main
+        // isolate (real CPU for dense pages while the user is drawing).
+        await drive.uploadJsonBytes(rel, await file.readAsBytes());
       }
     } catch (e) {
       if (e is SocketException) rethrow;
@@ -676,7 +679,7 @@ class SyncService {
       _markDirty(rel);
     }
     await _applyPurgeMarkers(rel, result.content);
-    _notifyOpenCanvas(rel, result.content);
+    await _notifyOpenCanvas(rel, result.content);
     return result.changedLocal;
   }
 
@@ -737,7 +740,12 @@ class SyncService {
   }
 
   /// Routes a pulled file to the open canvas's live listener (if any).
-  void _notifyOpenCanvas(String rel, String mergedContent) {
+  ///
+  /// This fires exactly when the user has the pulled canvas open (likely
+  /// drawing on it), so the dense-page `jsonDecode` is offloaded above the
+  /// same size gate as the merge; `CanvasPage.fromJson` + the live merge stay
+  /// on-main (they build/touch live ui/model objects).
+  Future<void> _notifyOpenCanvas(String rel, String mergedContent) async {
     final m = RegExp(r'/canvases/([^/]+)/(canvas\.json|pages/[^/]+\.json)$')
         .firstMatch(rel);
     if (m == null) return;
@@ -747,12 +755,25 @@ class SyncService {
       if (m.group(2) == 'canvas.json') {
         listener.onStructure();
       } else {
-        final page = CanvasPage.fromJson(
-            jsonDecode(mergedContent) as Map<String, dynamic>);
+        final page = CanvasPage.fromJson(await _decodeJsonMap(mergedContent));
         listener.onPage(page);
       }
     } catch (e) {
       debugPrint('Live-merge listener error: $e');
+    }
+  }
+
+  /// Decodes a JSON object, hopping to a background isolate above the merge
+  /// size gate; inline below it and on any isolate failure.
+  static Future<Map<String, dynamic>> _decodeJsonMap(String text) async {
+    if (text.length < _kMergeOffloadChars) {
+      return jsonDecode(text) as Map<String, dynamic>;
+    }
+    try {
+      return await Isolate.run(
+          () => jsonDecode(text) as Map<String, dynamic>);
+    } catch (_) {
+      return jsonDecode(text) as Map<String, dynamic>;
     }
   }
 
