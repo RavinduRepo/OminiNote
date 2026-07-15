@@ -187,34 +187,64 @@ Future<Notebook?> importNotebookCopy(BuildContext context) async {
     type: _isMobile ? FileType.any : FileType.custom,
     allowedExtensions:
         _isMobile ? null : const [NotebookBundleService.kExtension],
-    withData: true,
+    // Keep bytes out of RAM: with `withData` off, file_picker returns a
+    // (cached) file path we stream the extraction from. This is the OOM fix's
+    // caller half — loading a big bundle's bytes here defeated it.
+    withData: false,
   );
   if (picked == null || picked.files.isEmpty) return null;
   final f = picked.files.first;
-  final bytes = f.bytes ??
-      (f.path != null ? await File(f.path!).readAsBytes() : null);
+  // Prefer the path: importing from a file streams the extraction from disk
+  // (memory-safe — the OOM fix), so we never hold the whole bundle in RAM.
+  // file_picker always provides a (cached) path here since `withData` is off;
+  // fall back to bytes only if some platform surprises us.
+  if (f.path != null) {
+    if (!context.mounted) return null;
+    return importBundleFileUi(context, f.path!);
+  }
+  final bytes = f.bytes;
   if (bytes == null) return null;
-
   if (!context.mounted) return null;
   return importBundleBytes(context, bytes);
 }
 
-/// Imports already-loaded bundle [bytes] as a new notebook: asks which account,
-/// installs it (fresh ids), kicks its upload, and refreshes open lists. Shared
-/// by the file-picker import and the "open a .omninote file with the app" path.
-Future<Notebook?> importBundleBytes(
-    BuildContext context, List<int> bytes) async {
+/// Imports the `.omninote` file at [zipPath] as a new notebook (fresh ids).
+/// The extraction streams from disk, so a large bundle never sits fully in RAM.
+/// Used by the file-picker import and the "open a .omninote file with the app"
+/// path (both hand us a real file path).
+Future<Notebook?> importBundleFileUi(BuildContext context, String zipPath) =>
+    _runImport(
+      context,
+      (target, report) =>
+          _bundle.importBundleFile(zipPath, syncTarget: target, onProgress: report),
+    );
+
+/// Imports already-loaded bundle [bytes] as a new notebook. Kept for byte
+/// sources (a downloaded share-link body) that can't hand us a path; the bundle
+/// service writes the bytes to a temp file so the extraction still streams.
+Future<Notebook?> importBundleBytes(BuildContext context, List<int> bytes) =>
+    _runImport(
+      context,
+      (target, report) =>
+          _bundle.importBundle(bytes, syncTarget: target, onProgress: report),
+    );
+
+/// Shared import finish: asks which account, runs [doImport], installs the
+/// notebook (fresh ids), kicks its upload, and refreshes open lists.
+Future<Notebook?> _runImport(
+  BuildContext context,
+  Future<Notebook?> Function(
+    String? syncTarget,
+    void Function(double fraction, String label) onProgress,
+  ) doImport,
+) async {
   final target = await chooseNewNotebookAccount(context);
   if (target == null || !context.mounted) return null; // cancelled
 
   final messenger = ScaffoldMessenger.of(context);
   final banner = ProgressOverlay.show(context, 'Importing notebook…');
   try {
-    final nb = await _bundle.importBundle(
-      bytes,
-      syncTarget: target.accountId,
-      onProgress: banner.report,
-    );
+    final nb = await doImport(target.accountId, banner.report);
     banner.close();
     if (nb == null) return null;
     if (target.localOnly) {

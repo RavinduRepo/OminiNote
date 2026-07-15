@@ -14,6 +14,7 @@ import 'services/sync_service.dart';
 import 'theme/app_theme.dart';
 import 'utils/notebook_share_ui.dart';
 import 'utils/open_pdf_ui.dart';
+import 'utils/progress_overlay.dart';
 
 /// A `.omninote` file path or `omninote://` URI the desktop OS launched us with
 /// (Linux/Windows forward argv to the Dart entrypoint). Consumed once by the app
@@ -74,12 +75,17 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Global open-with / share-link callbacks only have the root Navigator's
+    // own context (no Overlay ancestor), so give ProgressOverlay a way to reach
+    // the navigator's overlay directly. See progressOverlayFallback's doc.
+    progressOverlayFallback = () => _navigatorKey.currentState?.overlay;
     _setupIncomingFiles();
   }
 
   @override
   void dispose() {
     _intentSub?.cancel();
+    progressOverlayFallback = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -188,17 +194,13 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _importFromPath(String path) async {
-    List<int> bytes;
-    try {
-      bytes = await File(path).readAsBytes();
-    } catch (_) {
-      return;
-    }
+  void _importFromPath(String path) {
+    // Stream the import straight from the file (memory-safe — the OOM fix);
+    // don't read the whole bundle into RAM here.
     // Run after a frame so the navigator/context is available (cold start).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ctx = _navigatorKey.currentContext;
-      if (ctx != null) importBundleBytes(ctx, bytes);
+      if (ctx != null) importBundleFileUi(ctx, path);
     });
   }
 
