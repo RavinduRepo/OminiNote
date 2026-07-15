@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omininote/models/canvas.dart';
@@ -680,6 +681,60 @@ void main() {
       text.scaleBy(0.5, Offset.zero);
       expect(text.rect, const Rect.fromLTWH(5, 5, 100, 40)); // moved, not sized
       expect(text.fontSize, 16); // unchanged
+    });
+  });
+
+  group('scaleXY (non-uniform stretch)', () {
+    test('stroke scales points per axis; width uses the geometric mean', () {
+      final s = StrokeElement(
+        id: 's',
+        deviceId: 'd',
+        z: '0|a0:',
+        tool: StrokeTool.pen,
+        color: const Color(0xFF000000),
+        size: 4,
+        points: [StrokePoint(0, 0, 0.5), StrokePoint(10, 10, 0.5)],
+      );
+      s.scaleXY(2, 1, Offset.zero); // stretch x only, anchor at origin
+      expect(s.points[1].x, 20);
+      expect(s.points[1].y, 10); // y unchanged
+      expect(s.size, closeTo(4 * math.sqrt(2), 1e-9));
+    });
+
+    test('image stretches its rect per axis', () {
+      final img = ImageElement(
+        id: 'i',
+        deviceId: 'd',
+        rect: const Rect.fromLTWH(0, 0, 10, 10),
+        assetId: 'a',
+      );
+      img.scaleXY(3, 2, Offset.zero);
+      expect(img.rect, const Rect.fromLTWH(0, 0, 30, 20));
+    });
+
+    test('text keeps its size (moves only)', () {
+      final t = TextElement(
+        id: 't',
+        deviceId: 'd',
+        rect: const Rect.fromLTWH(10, 10, 100, 40),
+        text: 'hi',
+        color: const Color(0xFF000000),
+      );
+      t.scaleXY(2, 2, Offset.zero);
+      expect(t.rect, const Rect.fromLTWH(20, 20, 100, 40)); // moved, not sized
+    });
+
+    test('attachment keeps its aspect (moves only)', () {
+      final a = AttachmentElement(
+        id: 'at',
+        deviceId: 'd',
+        rect: const Rect.fromLTWH(10, 0, 30, 20),
+        assetId: 'a',
+        name: 'f.pdf',
+        mime: 'application/pdf',
+      );
+      a.scaleXY(2, 3, Offset.zero);
+      expect(a.rect, const Rect.fromLTWH(20, 0, 30, 20)); // pos scaled, size kept
     });
   });
 

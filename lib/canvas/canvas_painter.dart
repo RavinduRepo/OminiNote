@@ -567,6 +567,22 @@ class CanvasPainter extends CustomPainter {
       canvas.drawRect(r, handleFill);
       canvas.drawRect(r, handleStroke);
     }
+    // Side handles (non-uniform stretch) — mirror hitTestSelection's gating:
+    // only on axes long enough not to crowd the corners; no vertical handles
+    // for text (its height follows the wrapped content).
+    const minForSide = 48.0;
+    final sides = <Offset>[
+      if (rect.width >= minForSide) ...[rect.centerLeft, rect.centerRight],
+      if (rect.height >= minForSide && !controller.selectionIsTextOnly) ...[
+        rect.topCenter,
+        rect.bottomCenter,
+      ],
+    ];
+    for (final s in sides) {
+      final r = Rect.fromCircle(center: s, radius: 5);
+      canvas.drawRect(r, handleFill);
+      canvas.drawRect(r, handleStroke);
+    }
     canvas.drawCircle(rotatePos, 7, handleFill);
     canvas.drawCircle(rotatePos, 7, handleStroke);
   }

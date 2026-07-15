@@ -25,8 +25,22 @@ import 'text_measure.dart';
 /// The active tool on the canvas.
 enum CanvasTool { pen, highlighter, eraser, lasso, text, shape }
 
-/// What a pointer drag over the current selection does.
-enum SelectionHit { none, move, resizeTL, resizeTR, resizeBL, resizeBR, rotate }
+/// What a pointer drag over the current selection does. The corner handles
+/// scale uniformly; the side handles (`resizeL/R/T/B`) stretch/squash along one
+/// axis (non-uniform).
+enum SelectionHit {
+  none,
+  move,
+  resizeTL,
+  resizeTR,
+  resizeBL,
+  resizeBR,
+  resizeL,
+  resizeR,
+  resizeT,
+  resizeB,
+  rotate,
+}
 
 /// Where to place an inserted blank page / PDF.
 enum InsertPosition { top, aboveCurrent, belowCurrent, end }
@@ -1640,6 +1654,18 @@ class CanvasController extends ChangeNotifier {
     if (near(rect.topRight)) return SelectionHit.resizeTR;
     if (near(rect.bottomLeft)) return SelectionHit.resizeBL;
     if (near(rect.bottomRight)) return SelectionHit.resizeBR;
+    // Side handles (non-uniform stretch), only when the box is big enough on
+    // that axis so they don't overlap the corners. Text has no vertical
+    // handles (its height follows the wrapped content — a T/B drag is a no-op).
+    const minForSide = 48.0;
+    if (rect.width >= minForSide) {
+      if (near(rect.centerLeft)) return SelectionHit.resizeL;
+      if (near(rect.centerRight)) return SelectionHit.resizeR;
+    }
+    if (rect.height >= minForSide && !selectionIsTextOnly) {
+      if (near(rect.topCenter)) return SelectionHit.resizeT;
+      if (near(rect.bottomCenter)) return SelectionHit.resizeB;
+    }
     if (near(rect.topCenter - const Offset(0, 36))) return SelectionHit.rotate;
     if (rect.inflate(8).contains(screenPos)) return SelectionHit.move;
     return SelectionHit.none;
@@ -1755,6 +1781,76 @@ class CanvasController extends ChangeNotifier {
             for (final el in selection) {
               el.scaleBy(factor, anchor);
             }
+          }
+        }
+      case SelectionHit.resizeL:
+      case SelectionHit.resizeR:
+      case SelectionHit.resizeT:
+      case SelectionHit.resizeB:
+        final horizontal =
+            _dragMode == SelectionHit.resizeL || _dragMode == SelectionHit.resizeR;
+        // Text: a horizontal side handle changes the wrap width (same as a
+        // corner); a vertical one does nothing (height follows the content).
+        if (selectionIsTextOnly && selection.length == 1) {
+          if (!horizontal) return;
+          final el = selection.first as TextElement;
+          final page = pages[selectionPageId!];
+          if (page == null) break;
+          final localPos = canvasPos - pageLayout.rect.topLeft;
+          final leftSide = _dragMode == SelectionHit.resizeL;
+          const minW = 40.0;
+          double newLeft = el.rect.left;
+          double newWidth;
+          if (leftSide) {
+            final right = el.rect.right;
+            newLeft = localPos.dx.clamp(0.0, right - minW);
+            newWidth = right - newLeft;
+          } else {
+            newWidth = (localPos.dx - el.rect.left)
+                .clamp(minW, page.width - el.rect.left);
+          }
+          el.manualWidth = newWidth;
+          el.rect =
+              Rect.fromLTWH(newLeft, el.rect.top, newWidth, el.rect.height);
+          el.rect = autoTextRect(el, page.width - newLeft - 6);
+          _dragLast = canvasPos;
+          _recomputeSelectionBounds();
+          pictureCache.invalidate(selectionPageId!);
+          notifyListeners();
+          return;
+        }
+        final localPos = canvasPos - pageLayout.rect.topLeft;
+        final localLast = _dragLast - pageLayout.rect.topLeft;
+        var sx = 1.0, sy = 1.0;
+        late Offset anchor;
+        switch (_dragMode) {
+          case SelectionHit.resizeR:
+            final a = bounds.left;
+            final now = localPos.dx - a, last = localLast.dx - a;
+            if (last.abs() > 1e-3) sx = now / last;
+            anchor = Offset(a, bounds.top);
+          case SelectionHit.resizeL:
+            final a = bounds.right;
+            final now = a - localPos.dx, last = a - localLast.dx;
+            if (last.abs() > 1e-3) sx = now / last;
+            anchor = Offset(a, bounds.top);
+          case SelectionHit.resizeB:
+            final a = bounds.top;
+            final now = localPos.dy - a, last = localLast.dy - a;
+            if (last.abs() > 1e-3) sy = now / last;
+            anchor = Offset(bounds.left, a);
+          default: // resizeT
+            final a = bounds.bottom;
+            final now = a - localPos.dy, last = a - localLast.dy;
+            if (last.abs() > 1e-3) sy = now / last;
+            anchor = Offset(bounds.left, a);
+        }
+        // Don't collapse (or flip) the axis being stretched.
+        final axisSize = horizontal ? bounds.width : bounds.height;
+        final axisFactor = horizontal ? sx : sy;
+        if (axisSize * axisFactor > 8 || axisFactor > 1) {
+          for (final el in selection) {
+            el.scaleXY(sx, sy, anchor);
           }
         }
       case SelectionHit.rotate:
