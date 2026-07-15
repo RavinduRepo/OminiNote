@@ -1998,44 +1998,60 @@ class _CanvasScreenState extends State<CanvasScreen> {
         ),
         const SizedBox(width: 12),
         // The whole tool cluster scrolls horizontally — a shrunk window scrolls
-        // instead of overflowing. Rebuilds with the controller (undo/redo
-        // enablement, paste-page visibility, toolbar-toggle icon).
+        // instead of overflowing. The cluster is STATIC: only the undo/redo
+        // pair listens to the drawing controller, and the paste-page button
+        // listens to the clipboard notifier. Wrapping the whole row in one
+        // ListenableBuilder on the controller rebuilt ~25 widgets (buttons +
+        // tooltips + scroll view) on every pen move — the desktop-view
+        // fast-writing jank; mobile's app bar only ever rebuilt its undo/redo
+        // pair, which is why it stayed smooth. Keep new controller-dependent
+        // controls inside their own smallest-possible listener, never around
+        // the row.
         Expanded(
-          child: ListenableBuilder(
-            listenable: c,
-            builder: (context, _) => SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              reverse: true, // right-align the tools; scroll on a narrow window
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
-                  _tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
-                  _tbDivider(palette),
-                  _tbBtn(Icons.note_add_outlined, 'Add page',
-                      () => _runAddAction('blank')),
-                  _tbBtn(Icons.swap_horiz, 'Horizontal page',
-                      () => _runAddAction('horizontal')),
-                  _tbBtn(Icons.image_outlined, 'Insert image',
-                      () => _runAddAction('image')),
-                  _tbBtn(Icons.picture_as_pdf_outlined, 'Insert PDF',
-                      () => _runAddAction('pdf')),
-                  _tbBtn(Icons.content_paste, 'Paste',
-                      () => _runAddAction('paste')),
-                  if (PageClipboard().hasPage.value)
-                    _tbBtn(Icons.content_paste_go_outlined, 'Paste page',
-                        () => _runAddAction('pastePage')),
-                  _tbDivider(palette),
-                  _tbBtn(Icons.fullscreen, 'Full screen', _toggleFullScreen),
-                  _tbBtn(
-                      _showToolbar ? Icons.expand_less : Icons.brush_outlined,
-                      _showToolbar ? 'Hide tools' : 'Show tools',
-                      () => setState(() => _showToolbar = !_showToolbar)),
-                  _tbDivider(palette),
-                  const SyncStatusIcon(),
-                  _buildOverflowMenu(context),
-                ],
-              ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            reverse: true, // right-align the tools; scroll on a narrow window
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListenableBuilder(
+                  listenable: c,
+                  builder: (context, _) => Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
+                      _tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
+                    ],
+                  ),
+                ),
+                _tbDivider(palette),
+                _tbBtn(Icons.note_add_outlined, 'Add page',
+                    () => _runAddAction('blank')),
+                _tbBtn(Icons.swap_horiz, 'Horizontal page',
+                    () => _runAddAction('horizontal')),
+                _tbBtn(Icons.image_outlined, 'Insert image',
+                    () => _runAddAction('image')),
+                _tbBtn(Icons.picture_as_pdf_outlined, 'Insert PDF',
+                    () => _runAddAction('pdf')),
+                _tbBtn(Icons.content_paste, 'Paste',
+                    () => _runAddAction('paste')),
+                ValueListenableBuilder<bool>(
+                  valueListenable: PageClipboard().hasPage,
+                  builder: (context, hasPage, _) => hasPage
+                      ? _tbBtn(Icons.content_paste_go_outlined, 'Paste page',
+                          () => _runAddAction('pastePage'))
+                      : const SizedBox.shrink(),
+                ),
+                _tbDivider(palette),
+                _tbBtn(Icons.fullscreen, 'Full screen', _toggleFullScreen),
+                _tbBtn(
+                    _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+                    _showToolbar ? 'Hide tools' : 'Show tools',
+                    () => setState(() => _showToolbar = !_showToolbar)),
+                _tbDivider(palette),
+                const SyncStatusIcon(),
+                _buildOverflowMenu(context),
+              ],
             ),
           ),
         ),
