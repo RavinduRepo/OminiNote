@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
@@ -15,6 +16,7 @@ import '../services/sync_service.dart';
 import '../utils/ink_contrast.dart';
 import '../utils/url_text.dart';
 import 'canvas_layout.dart';
+import 'shape_recognizer.dart';
 import 'page_picture_cache.dart';
 import 'rich_text_controller.dart';
 import 'text_measure.dart';
@@ -749,6 +751,24 @@ class CanvasController extends ChangeNotifier {
   StrokeElement? activeStroke;
   String? activeStrokePageId;
 
+  // ── Hold-to-snap shapes (device-local `shapeSnap`) ──────────────────────
+  // While drawing with the pen, pausing without lifting recognizes the stroke
+  // as a clean shape (see shape_recognizer.dart / SHAPES_PLAN Phase 1). The
+  // recognized shape replaces the live stroke's points as a preview; lift then
+  // commits it as two undo ops (undo #1 restores the freehand ink, undo #2
+  // removes the stroke — Apple Notes semantics).
+  static const Duration _kHoldDuration = Duration(milliseconds: 450);
+  static const double _kHoldSlopScreen = 9.0; // screen px; /zoom → page-local
+  Timer? _holdTimer;
+  Offset? _holdAnchorLocal; // page-local point the slop is measured from
+  List<StrokePoint>? _preSnapPoints; // freehand backup for undo-to-freehand
+  bool _snapped = false; // shape currently previewed in [activeStroke]
+  int _holdRetries = 0;
+
+  /// True while a recognized shape is being previewed under the held pen — the
+  /// screen suppresses its own tap handling for that pointer-up.
+  bool get isShapeSnapped => _snapped;
+
   // Eraser accumulation for the current gesture: pageId → removed (index, el).
   final Map<String, List<(int, CanvasElement)>> _eraseAccum = {};
 
@@ -841,6 +861,14 @@ class CanvasController extends ChangeNotifier {
           points: [StrokePoint(p.dx, p.dy, pressure)],
         );
         _activeGestureTool = effectiveTool;
+        // Arm hold-to-snap (pen or highlighter).
+        _snapped = false;
+        _preSnapPoints = null;
+        _holdRetries = 0;
+        if (SettingsService().shapeSnap) {
+          _holdAnchorLocal = p;
+          _armHoldTimer();
+        }
         notifyListeners();
         return true;
       case CanvasTool.eraser:
@@ -874,12 +902,24 @@ class CanvasController extends ChangeNotifier {
       case CanvasTool.highlighter:
         final stroke = activeStroke;
         if (stroke == null) return;
+        // A recognized shape is frozen under the held pen — ignore further
+        // movement until lift (hold-drag adjust is a later increment).
+        if (_snapped) return;
         final l = layout.layoutOf(activeStrokePageId!);
         final page = pages[activeStrokePageId!];
         if (l != null && page != null) {
           final p = _clampToPage(canvasPos - l.rect.topLeft, page);
           stroke.points.add(StrokePoint(p.dx, p.dy, pressure));
           stroke.invalidateCache();
+          // Moving beyond the slop means the pen is still travelling — re-arm
+          // the hold timer so it only fires on a genuine pause.
+          final anchor = _holdAnchorLocal;
+          if (_holdTimer != null && anchor != null) {
+            if ((p - anchor).distance > _kHoldSlopScreen / zoom) {
+              _holdAnchorLocal = p;
+              _armHoldTimer();
+            }
+          }
           notifyListeners();
         }
       case CanvasTool.eraser:
@@ -909,16 +949,24 @@ class CanvasController extends ChangeNotifier {
     switch (gestureTool) {
       case CanvasTool.pen:
       case CanvasTool.highlighter:
+        _holdTimer?.cancel();
+        _holdTimer = null;
         final stroke = activeStroke;
         if (stroke == null) return;
         final pageId = activeStrokePageId!;
         activeStroke = null;
         activeStrokePageId = null;
-        if (stroke.points.length > 1) {
+        final pre = _preSnapPoints;
+        if (_snapped && pre != null && pre.length > 1) {
+          _commitSnappedShape(pageId, stroke, pre);
+        } else if (stroke.points.length > 1) {
           _doOp(_addElementsOp('Draw', pageId, [stroke]));
         } else {
           notifyListeners();
         }
+        _snapped = false;
+        _preSnapPoints = null;
+        _holdAnchorLocal = null;
       case CanvasTool.eraser:
         _commitErase();
       case CanvasTool.lasso:
@@ -930,6 +978,11 @@ class CanvasController extends ChangeNotifier {
   }
 
   void cancelToolGesture() {
+    _holdTimer?.cancel();
+    _holdTimer = null;
+    _snapped = false;
+    _preSnapPoints = null;
+    _holdAnchorLocal = null;
     _activeGestureTool = null;
     activeStroke = null;
     activeStrokePageId = null;
@@ -946,6 +999,106 @@ class CanvasController extends ChangeNotifier {
     }
     _dragMode = SelectionHit.none;
     notifyListeners();
+  }
+
+  // ── Hold-to-snap ─────────────────────────────────────────────────────────
+
+  void _armHoldTimer() {
+    _holdTimer?.cancel();
+    _holdTimer = Timer(_kHoldDuration, _onHoldFired);
+  }
+
+  /// The pen paused mid-stroke: try to recognize the in-progress ink as a
+  /// shape. On success the live stroke's points become the perfect shape (a
+  /// preview); on failure re-arm once (a longer pause after more ink may yet
+  /// resolve), then give up for this gesture. Fires between frames, so
+  /// notifying is safe.
+  void _onHoldFired() {
+    _holdTimer = null;
+    final t = _activeGestureTool;
+    if ((t != CanvasTool.pen && t != CanvasTool.highlighter) || _snapped) {
+      return;
+    }
+    final stroke = activeStroke;
+    if (stroke == null) return;
+    final fit = recognizeShape(stroke.points);
+    if (fit == null) {
+      if (_holdRetries < 1) {
+        _holdRetries++;
+        _armHoldTimer();
+      }
+      return;
+    }
+    _preSnapPoints = [for (final p in stroke.points) StrokePoint(p.x, p.y, p.p)];
+    stroke.points = pointsForShape(fit);
+    stroke.invalidateCache();
+    _snapped = true;
+    HapticFeedback.mediumImpact();
+    notifyListeners();
+  }
+
+  /// Commits a held-and-snapped stroke as **two ops**: op1 adds the original
+  /// freehand stroke, op2 swaps its points to the recognized shape. So undo #1
+  /// restores the freehand ink and undo #2 removes the stroke entirely (Apple
+  /// Notes semantics). Both ops run in one synchronous frame, so the
+  /// intermediate freehand state never paints and the debounced save only ever
+  /// flushes the final shape. Sync-safe: op2 `_stamp`s (rev climbs across
+  /// undo↔redo) and op1 tombstones on revert — see SHAPES_PLAN §1.4.
+  void _commitSnappedShape(
+    String pageId,
+    StrokeElement stroke,
+    List<StrokePoint> freehand,
+  ) {
+    final shapePoints = stroke.points;
+    stroke.points = [for (final p in freehand) StrokePoint(p.x, p.y, p.p)];
+    stroke.invalidateCache();
+    _doOp(_addElementsOp('Draw', pageId, [stroke]));
+    _doOp(_swapPointsOp('Shape', pageId, stroke,
+        before: freehand, after: shapePoints));
+  }
+
+  /// Test seam: runs the two-op snapped-shape commit as the hold gesture would
+  /// (the timer/gesture plumbing needs a screen+layout, which unit tests don't
+  /// set up). [strokeWithShapePoints] must carry the generated shape points;
+  /// [freehand] is the pre-snap ink.
+  @visibleForTesting
+  void debugCommitSnap(
+    String pageId,
+    StrokeElement strokeWithShapePoints,
+    List<StrokePoint> freehand,
+  ) =>
+      _commitSnappedShape(pageId, strokeWithShapePoints, freehand);
+
+  /// Undoable op that swaps a stroke's points (freehand ↔ shape), stamping on
+  /// both apply and revert so rev climbs monotonically (LWW-safe). Snapshots
+  /// deep copies of both point lists — never live refs (the op-correctness
+  /// rule).
+  _CanvasOp _swapPointsOp(
+    String label,
+    String pageId,
+    StrokeElement stroke, {
+    required List<StrokePoint> before,
+    required List<StrokePoint> after,
+  }) {
+    final beforeCopy = [for (final p in before) StrokePoint(p.x, p.y, p.p)];
+    final afterCopy = [for (final p in after) StrokePoint(p.x, p.y, p.p)];
+    void write(List<StrokePoint> pts) {
+      final page = pages[pageId];
+      if (page == null) return;
+      final i = page.strokes.indexWhere((e) => e.id == stroke.id);
+      if (i < 0) return;
+      final el = page.strokes[i];
+      el.points = [for (final p in pts) StrokePoint(p.x, p.y, p.p)];
+      el.invalidateCache();
+      _stamp([el]);
+    }
+
+    return _CanvasOp(
+      label: label,
+      dirtyPageIds: {pageId},
+      apply: () => write(afterCopy),
+      revert: () => write(beforeCopy),
+    );
   }
 
   // ── Eraser (whole-stroke or partial, live) ─────────────────────────────
@@ -3169,6 +3322,7 @@ class CanvasController extends ChangeNotifier {
     }
     SyncService().unregisterCanvasListener(canvas.id);
     _scrollTicker?.dispose();
+    _holdTimer?.cancel();
     _saveTimer?.cancel();
     flushSaves();
     renderCache.dispose();

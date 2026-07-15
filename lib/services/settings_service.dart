@@ -52,6 +52,18 @@ class SettingsService {
     await _persist();
   }
 
+  /// Snap drawn shapes: while drawing with the pen or highlighter, pausing
+  /// without lifting recognizes the stroke as a clean shape (line/rect/circle/…).
+  /// Device-local (never synced); default ON; toggled from the canvas overflow
+  /// menu.
+  bool shapeSnap = true;
+
+  Future<void> setShapeSnap(bool value) async {
+    if (shapeSnap == value) return;
+    shapeSnap = value;
+    await _persist();
+  }
+
   /// Eraser preferences (device-local, like [fingerDraw]): partial mode
   /// splits strokes at the erased gap instead of removing them whole.
   bool eraserPartial = false;
@@ -189,6 +201,7 @@ class SettingsService {
     themeMode.value = _parseThemeMode(data['themeMode']);
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
+    shapeSnap = data['shapeSnap'] != false; // default ON
     eraserPartial = data['eraserPartial'] == true;
     eraserSize = (data['eraserSize'] as num?)?.toDouble() ?? 10.0;
     inkAdjustPen = data['inkAdjustPen'] != false; // default true
@@ -308,6 +321,7 @@ class SettingsService {
         'themeMode': themeMode.value.name,
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
+        'shapeSnap': shapeSnap,
         'eraserPartial': eraserPartial,
         'eraserSize': eraserSize,
         'inkAdjustPen': inkAdjustPen,

@@ -1066,6 +1066,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
               label: 'Page settings',
               onTap: _showPageSettings),
           ActionSheetItem(
+              icon: SettingsService().shapeSnap
+                  ? Icons.check_box_outlined
+                  : Icons.check_box_outline_blank,
+              label: 'Snap drawn shapes',
+              onTap: _toggleShapeSnap),
+          ActionSheetItem(
               icon: SettingsService().fingerDraw
                   ? Icons.check_box_outlined
                   : Icons.check_box_outline_blank,
@@ -1091,6 +1097,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
             _showPageSettings();
           case 'finger_draw':
             _toggleFingerDraw();
+          case 'shape_snap':
+            _toggleShapeSnap();
         }
       },
       itemBuilder: (context) => [
@@ -1101,7 +1109,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
         iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         iconMenuItem('page_settings', Icons.description_outlined,
             'Page settings'),
-        // Checkbox glyph reflecting the toggle state, matching the mobile sheet.
+        // Checkbox glyphs reflect toggle state, matching the mobile sheet.
+        iconMenuItem(
+            'shape_snap',
+            SettingsService().shapeSnap
+                ? Icons.check_box_outlined
+                : Icons.check_box_outline_blank,
+            'Snap drawn shapes'),
         iconMenuItem(
             'finger_draw',
             SettingsService().fingerDraw
@@ -1419,6 +1433,20 @@ class _CanvasScreenState extends State<CanvasScreen> {
       s.fingerDraw
           ? 'Finger drawing on — two fingers to pan/zoom'
           : 'Finger drawing off',
+    );
+  }
+
+  /// Toggles hold-to-snap shape recognition (pen). Rebuild refreshes the menu
+  /// checkbox glyph.
+  Future<void> _toggleShapeSnap() async {
+    final s = SettingsService();
+    await s.setShapeSnap(!s.shapeSnap);
+    if (!mounted) return;
+    setState(() {});
+    _toast(
+      s.shapeSnap
+          ? 'Shape snapping on — pause mid-stroke to snap'
+          : 'Shape snapping off',
     );
   }
 
