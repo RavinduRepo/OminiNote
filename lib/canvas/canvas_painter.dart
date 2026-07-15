@@ -145,10 +145,15 @@ class CanvasPainter extends CustomPainter {
       );
     }
 
-    // In-progress stroke on this page.
-    if (controller.activeStrokePageId == page.id &&
-        controller.activeStroke != null) {
-      _paintStroke(canvas, controller.activeStroke!);
+    // In-progress stroke on this page (predefined shape / freehand), or a
+    // template's multi-stroke preview.
+    if (controller.activeStrokePageId == page.id) {
+      if (controller.activeStroke != null) {
+        _paintStroke(canvas, controller.activeStroke!);
+      }
+      for (final s in controller.previewStrokes) {
+        _paintStroke(canvas, s);
+      }
     }
 
     // In-progress lasso on this page.
@@ -559,6 +564,22 @@ class CanvasPainter extends CustomPainter {
       rect.bottomRight,
     ]) {
       final r = Rect.fromCircle(center: corner, radius: 6);
+      canvas.drawRect(r, handleFill);
+      canvas.drawRect(r, handleStroke);
+    }
+    // Side handles (non-uniform stretch) — mirror hitTestSelection's gating:
+    // only on axes long enough not to crowd the corners; no vertical handles
+    // for text (its height follows the wrapped content).
+    const minForSide = 48.0;
+    final sides = <Offset>[
+      if (rect.width >= minForSide) ...[rect.centerLeft, rect.centerRight],
+      if (rect.height >= minForSide && !controller.selectionIsTextOnly) ...[
+        rect.topCenter,
+        rect.bottomCenter,
+      ],
+    ];
+    for (final s in sides) {
+      final r = Rect.fromCircle(center: s, radius: 5);
       canvas.drawRect(r, handleFill);
       canvas.drawRect(r, handleStroke);
     }

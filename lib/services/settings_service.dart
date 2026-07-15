@@ -3,7 +3,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../models/canvas_page.dart';
+import '../models/shape_template.dart';
 
 /// Which navigation shell to show. [auto] picks based on window width (see
 /// `main.dart`'s root router); [mobile]/[desktop] force one regardless of
@@ -49,6 +51,44 @@ class SettingsService {
   Future<void> setFingerDraw(bool value) async {
     if (fingerDraw == value) return;
     fingerDraw = value;
+    await _persist();
+  }
+
+  /// Snap drawn shapes: while drawing with the pen or highlighter, pausing
+  /// without lifting recognizes the stroke as a clean shape (line/rect/circle/…).
+  /// Device-local (never synced); default ON; toggled from the canvas overflow
+  /// menu.
+  bool shapeSnap = true;
+
+  Future<void> setShapeSnap(bool value) async {
+    if (shapeSnap == value) return;
+    shapeSnap = value;
+    await _persist();
+  }
+
+  /// Last-used kind for the Shapes tool (device-local).
+  ShapeToolKind shapeToolKind = ShapeToolKind.rectangle;
+
+  Future<void> setShapeToolKind(ShapeToolKind kind) async {
+    if (shapeToolKind == kind) return;
+    shapeToolKind = kind;
+    await _persist();
+  }
+
+  /// Saved custom shape templates (device-local, capped). Newest first.
+  List<ShapeTemplate> shapeTemplates = [];
+  static const int _kMaxShapeTemplates = 50;
+
+  Future<void> addShapeTemplate(ShapeTemplate t) async {
+    shapeTemplates.insert(0, t);
+    if (shapeTemplates.length > _kMaxShapeTemplates) {
+      shapeTemplates = shapeTemplates.sublist(0, _kMaxShapeTemplates);
+    }
+    await _persist();
+  }
+
+  Future<void> removeShapeTemplate(String id) async {
+    shapeTemplates.removeWhere((t) => t.id == id);
     await _persist();
   }
 
@@ -189,6 +229,15 @@ class SettingsService {
     themeMode.value = _parseThemeMode(data['themeMode']);
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
+    shapeSnap = data['shapeSnap'] != false; // default ON
+    shapeToolKind = ShapeToolKind.values.firstWhere(
+      (k) => k.name == data['shapeToolKind'],
+      orElse: () => ShapeToolKind.rectangle,
+    );
+    shapeTemplates = [
+      for (final t in (data['shapeTemplates'] as List? ?? const []))
+        ShapeTemplate.fromJson(t as Map<String, dynamic>),
+    ];
     eraserPartial = data['eraserPartial'] == true;
     eraserSize = (data['eraserSize'] as num?)?.toDouble() ?? 10.0;
     inkAdjustPen = data['inkAdjustPen'] != false; // default true
@@ -308,6 +357,9 @@ class SettingsService {
         'themeMode': themeMode.value.name,
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
+        'shapeSnap': shapeSnap,
+        'shapeToolKind': shapeToolKind.name,
+        'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,
         'eraserSize': eraserSize,
         'inkAdjustPen': inkAdjustPen,

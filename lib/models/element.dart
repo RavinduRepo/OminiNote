@@ -75,6 +75,12 @@ sealed class CanvasElement {
   /// Uniform scale about [anchor].
   void scaleBy(double factor, Offset anchor);
 
+  /// Non-uniform scale about [anchor] by [sx] horizontally and [sy] vertically
+  /// (stretch/squash — the selection box's side handles). Strokes/images stretch
+  /// per axis; text and attachments no-op (text width is handled by the wrap
+  /// path in the controller, attachments keep their aspect).
+  void scaleXY(double sx, double sy, Offset anchor);
+
   /// Rotate by [angle] radians about [pivot].
   void rotateBy(double angle, Offset pivot);
 
@@ -193,6 +199,18 @@ class StrokeElement extends CanvasElement {
       p.y = anchor.dy + (p.y - anchor.dy) * factor;
     }
     size *= factor;
+    invalidateCache();
+  }
+
+  @override
+  void scaleXY(double sx, double sy, Offset anchor) {
+    for (final p in points) {
+      p.x = anchor.dx + (p.x - anchor.dx) * sx;
+      p.y = anchor.dy + (p.y - anchor.dy) * sy;
+    }
+    // Strokes carry a single scalar width; use the geometric mean so a uniform
+    // stretch matches scaleBy and a one-axis stretch nudges it modestly.
+    size *= math.sqrt(sx.abs() * sy.abs());
     invalidateCache();
   }
 
@@ -427,6 +445,19 @@ class TextElement extends CanvasElement {
   }
 
   @override
+  void scaleXY(double sx, double sy, Offset anchor) {
+    // Text never scales its font by drag; horizontal wrap-width resize is
+    // handled in the controller. Move the anchor-relative position only so a
+    // text box caught in a mixed selection stretch travels with it.
+    rect = Rect.fromLTWH(
+      anchor.dx + (rect.left - anchor.dx) * sx,
+      anchor.dy + (rect.top - anchor.dy) * sy,
+      rect.width,
+      rect.height,
+    );
+  }
+
+  @override
   void rotateBy(double angle, Offset pivot) {
     rotation += angle;
     final c = rect.center;
@@ -563,6 +594,16 @@ class ImageElement extends CanvasElement {
   }
 
   @override
+  void scaleXY(double sx, double sy, Offset anchor) {
+    rect = Rect.fromLTWH(
+      anchor.dx + (rect.left - anchor.dx) * sx,
+      anchor.dy + (rect.top - anchor.dy) * sy,
+      rect.width * sx,
+      rect.height * sy,
+    );
+  }
+
+  @override
   void rotateBy(double angle, Offset pivot) {
     rotation += angle;
     final c = rect.center;
@@ -680,6 +721,17 @@ class AttachmentElement extends CanvasElement {
       anchor.dy + (rect.top - anchor.dy) * factor,
       rect.width * factor,
       rect.height * factor,
+    );
+  }
+
+  @override
+  void scaleXY(double sx, double sy, Offset anchor) {
+    // Attachment chips keep their aspect (move only, like a uniform anchor).
+    rect = Rect.fromLTWH(
+      anchor.dx + (rect.left - anchor.dx) * sx,
+      anchor.dy + (rect.top - anchor.dy) * sy,
+      rect.width,
+      rect.height,
     );
   }
 

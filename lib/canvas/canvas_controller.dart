@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
+import '../models/shape_template.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/render_cache.dart';
@@ -15,15 +17,30 @@ import '../services/sync_service.dart';
 import '../utils/ink_contrast.dart';
 import '../utils/url_text.dart';
 import 'canvas_layout.dart';
+import 'shape_recognizer.dart';
 import 'page_picture_cache.dart';
 import 'rich_text_controller.dart';
 import 'text_measure.dart';
 
 /// The active tool on the canvas.
-enum CanvasTool { pen, highlighter, eraser, lasso, text }
+enum CanvasTool { pen, highlighter, eraser, lasso, text, shape }
 
-/// What a pointer drag over the current selection does.
-enum SelectionHit { none, move, resizeTL, resizeTR, resizeBL, resizeBR, rotate }
+/// What a pointer drag over the current selection does. The corner handles
+/// scale uniformly; the side handles (`resizeL/R/T/B`) stretch/squash along one
+/// axis (non-uniform).
+enum SelectionHit {
+  none,
+  move,
+  resizeTL,
+  resizeTR,
+  resizeBL,
+  resizeBR,
+  resizeL,
+  resizeR,
+  resizeT,
+  resizeB,
+  rotate,
+}
 
 /// Where to place an inserted blank page / PDF.
 enum InsertPosition { top, aboveCurrent, belowCurrent, end }
@@ -749,6 +766,129 @@ class CanvasController extends ChangeNotifier {
   StrokeElement? activeStroke;
   String? activeStrokePageId;
 
+  // ── Hold-to-snap shapes (device-local `shapeSnap`) ──────────────────────
+  // While drawing with the pen, pausing without lifting recognizes the stroke
+  // as a clean shape (see shape_recognizer.dart / SHAPES_PLAN Phase 1). The
+  // recognized shape replaces the live stroke's points as a preview; lift then
+  // commits it as two undo ops (undo #1 restores the freehand ink, undo #2
+  // removes the stroke — Apple Notes semantics).
+  static const Duration _kHoldDuration = Duration(milliseconds: 450);
+  static const double _kHoldSlopScreen = 9.0; // screen px; /zoom → page-local
+  static const double _kAdjustStartSlop = 6.0; // page pts before a grab begins
+  Timer? _holdTimer;
+  Offset? _holdAnchorLocal; // page-local point the slop is measured from
+  List<StrokePoint>? _preSnapPoints; // freehand backup for undo-to-freehand
+  bool _snapped = false; // shape currently previewed in [activeStroke]
+  int _holdRetries = 0;
+  ShapeFit? _snappedFit; // the recognized fit while snapped (for adjust)
+  Offset? _adjustStart; // pen pos at snap; adjust begins once it moves past slop
+  int? _adjustAnchor; // grabbed anchor once adjusting
+
+  // ── Shapes tool (drag-to-draw a chosen kind or a saved template) ─────────
+  /// Last-used shape kind for the Shapes tool (persisted device-local).
+  ShapeToolKind shapeToolKind = SettingsService().shapeToolKind;
+
+  /// When non-null the Shapes tool stamps this saved template instead of a
+  /// predefined kind (Phase 3). Selecting a predefined kind clears it.
+  ShapeTemplate? shapeToolTemplate;
+
+  Offset? _shapeStartLocal; // drag anchor (page-local) for the shapes tool
+
+  /// Multi-stroke live preview for a template drag (the painter draws these on
+  /// [activeStrokePageId]; committed as one op on lift).
+  List<StrokeElement> previewStrokes = [];
+
+  void setShapeToolKind(ShapeToolKind kind) {
+    final changed = shapeToolKind != kind || shapeToolTemplate != null;
+    shapeToolTemplate = null;
+    shapeToolKind = kind;
+    SettingsService().setShapeToolKind(kind);
+    if (changed) notifyListeners();
+  }
+
+  void setShapeToolTemplate(ShapeTemplate? t) {
+    shapeToolTemplate = t;
+    notifyListeners();
+  }
+
+  Future<void> deleteShapeTemplate(String id) async {
+    if (shapeToolTemplate?.id == id) shapeToolTemplate = null;
+    await SettingsService().removeShapeTemplate(id);
+    notifyListeners();
+  }
+
+  bool get selectionIsStrokesOnly =>
+      selection.isNotEmpty && selection.every((e) => e is StrokeElement);
+
+  /// Saves the current strokes-only selection as a device-local template,
+  /// normalized into the unit box (geometry only — the stamped copies take the
+  /// pen's colour/size). No-op if the selection isn't strokes-only.
+  Future<void> saveSelectionAsShape(String name) async {
+    final strokes = selection.whereType<StrokeElement>().toList();
+    if (strokes.isEmpty) return;
+    var minX = double.infinity, minY = double.infinity;
+    var maxX = -double.infinity, maxY = -double.infinity;
+    for (final s in strokes) {
+      for (final p in s.points) {
+        minX = math.min(minX, p.x);
+        minY = math.min(minY, p.y);
+        maxX = math.max(maxX, p.x);
+        maxY = math.max(maxY, p.y);
+      }
+    }
+    final w = (maxX - minX).abs() < 1e-6 ? 1.0 : maxX - minX;
+    final h = (maxY - minY).abs() < 1e-6 ? 1.0 : maxY - minY;
+    final polylines = [
+      for (final s in strokes)
+        [for (final p in s.points) Offset((p.x - minX) / w, (p.y - minY) / h)]
+    ];
+    await SettingsService().addShapeTemplate(ShapeTemplate(
+      id: newModelId('tmpl'),
+      name: name.trim().isEmpty ? 'Shape' : name.trim(),
+      polylines: polylines,
+      createdAt: DateTime.now(),
+    ));
+    notifyListeners();
+  }
+
+  bool _shiftDown() => HardwareKeyboard.instance.logicalKeysPressed.any((k) =>
+      k == LogicalKeyboardKey.shiftLeft || k == LogicalKeyboardKey.shiftRight);
+
+  /// Builds the stamped strokes for [t] scaled into [rect] (Rect.fromPoints
+  /// normalizes it). [uniform] (Shift) preserves the template's aspect,
+  /// centered in the box. Each polyline becomes one stroke in the pen's ink.
+  List<StrokeElement> _templateStrokes(ShapeTemplate t, Rect rect,
+      {bool uniform = false}) {
+    var w = rect.width, h = rect.height, ox = rect.left, oy = rect.top;
+    if (uniform) {
+      final s = math.min(w, h);
+      ox = rect.left + (w - s) / 2;
+      oy = rect.top + (h - s) / 2;
+      w = s;
+      h = s;
+    }
+    final out = <StrokeElement>[];
+    for (final poly in t.polylines) {
+      if (poly.length < 2) continue;
+      out.add(StrokeElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        z: '0|a0:',
+        tool: StrokeTool.pen,
+        color: penColor,
+        size: penSize,
+        points: [
+          for (final u in poly) StrokePoint(ox + u.dx * w, oy + u.dy * h, 0.5)
+        ],
+      ));
+    }
+    return out;
+  }
+
+  /// True while a recognized shape is being previewed under the held pen — the
+  /// screen suppresses its own tap handling for that pointer-up.
+  bool get isShapeSnapped => _snapped;
+
   // Eraser accumulation for the current gesture: pageId → removed (index, el).
   final Map<String, List<(int, CanvasElement)>> _eraseAccum = {};
 
@@ -841,6 +981,17 @@ class CanvasController extends ChangeNotifier {
           points: [StrokePoint(p.dx, p.dy, pressure)],
         );
         _activeGestureTool = effectiveTool;
+        // Arm hold-to-snap (pen or highlighter).
+        _snapped = false;
+        _preSnapPoints = null;
+        _snappedFit = null;
+        _adjustAnchor = null;
+        _adjustStart = null;
+        _holdRetries = 0;
+        if (SettingsService().shapeSnap) {
+          _holdAnchorLocal = p;
+          _armHoldTimer();
+        }
         notifyListeners();
         return true;
       case CanvasTool.eraser:
@@ -853,6 +1004,27 @@ class CanvasController extends ChangeNotifier {
         _gesturePageId = page.id;
         lassoPoints = [local];
         _activeGestureTool = CanvasTool.lasso;
+        notifyListeners();
+        return true;
+      case CanvasTool.shape:
+        final p = _clampToPage(local, page);
+        activeStrokePageId = page.id;
+        _shapeStartLocal = p;
+        previewStrokes = [];
+        // Predefined kind uses a single activeStroke preview; a template uses
+        // the multi-stroke previewStrokes list instead.
+        activeStroke = shapeToolTemplate != null
+            ? null
+            : StrokeElement(
+                id: newModelId('el'),
+                deviceId: SettingsService().deviceId,
+                z: '0|a0:',
+                tool: StrokeTool.pen,
+                color: penColor,
+                size: penSize,
+                points: [StrokePoint(p.dx, p.dy, 0.5)],
+              );
+        _activeGestureTool = CanvasTool.shape;
         notifyListeners();
         return true;
       case CanvasTool.text:
@@ -874,12 +1046,25 @@ class CanvasController extends ChangeNotifier {
       case CanvasTool.highlighter:
         final stroke = activeStroke;
         if (stroke == null) return;
+        if (_snapped) {
+          _adjustSnappedShape(canvasPos);
+          return;
+        }
         final l = layout.layoutOf(activeStrokePageId!);
         final page = pages[activeStrokePageId!];
         if (l != null && page != null) {
           final p = _clampToPage(canvasPos - l.rect.topLeft, page);
           stroke.points.add(StrokePoint(p.dx, p.dy, pressure));
           stroke.invalidateCache();
+          // Moving beyond the slop means the pen is still travelling — re-arm
+          // the hold timer so it only fires on a genuine pause.
+          final anchor = _holdAnchorLocal;
+          if (_holdTimer != null && anchor != null) {
+            if ((p - anchor).distance > _kHoldSlopScreen / zoom) {
+              _holdAnchorLocal = p;
+              _armHoldTimer();
+            }
+          }
           notifyListeners();
         }
       case CanvasTool.eraser:
@@ -892,6 +1077,26 @@ class CanvasController extends ChangeNotifier {
           lasso.add(canvasPos - l.rect.topLeft);
           notifyListeners();
         }
+      case CanvasTool.shape:
+        final start = _shapeStartLocal;
+        if (start == null) return;
+        final l = layout.layoutOf(activeStrokePageId!);
+        final page = pages[activeStrokePageId!];
+        if (l == null || page == null) return;
+        final p = _clampToPage(canvasPos - l.rect.topLeft, page);
+        final shift = _shiftDown();
+        final tmpl = shapeToolTemplate;
+        if (tmpl != null) {
+          previewStrokes =
+              _templateStrokes(tmpl, Rect.fromPoints(start, p), uniform: shift);
+        } else {
+          final stroke = activeStroke;
+          if (stroke == null) return;
+          stroke.points = pointsForShape(
+              shapeToolFit(shapeToolKind, start, p, constrain: shift));
+          stroke.invalidateCache();
+        }
+        notifyListeners();
       case CanvasTool.text:
       case null:
         return;
@@ -909,20 +1114,57 @@ class CanvasController extends ChangeNotifier {
     switch (gestureTool) {
       case CanvasTool.pen:
       case CanvasTool.highlighter:
+        _holdTimer?.cancel();
+        _holdTimer = null;
         final stroke = activeStroke;
         if (stroke == null) return;
         final pageId = activeStrokePageId!;
         activeStroke = null;
         activeStrokePageId = null;
-        if (stroke.points.length > 1) {
+        final pre = _preSnapPoints;
+        if (_snapped && pre != null && pre.length > 1) {
+          _commitSnappedShape(pageId, stroke, pre);
+        } else if (stroke.points.length > 1) {
           _doOp(_addElementsOp('Draw', pageId, [stroke]));
         } else {
           notifyListeners();
         }
+        _snapped = false;
+        _preSnapPoints = null;
+        _snappedFit = null;
+        _adjustAnchor = null;
+        _adjustStart = null;
+        _holdAnchorLocal = null;
       case CanvasTool.eraser:
         _commitErase();
       case CanvasTool.lasso:
         _finishLasso();
+      case CanvasTool.shape:
+        final stroke = activeStroke;
+        final pageId = activeStrokePageId;
+        final start = _shapeStartLocal;
+        final preview = previewStrokes;
+        final template = shapeToolTemplate;
+        activeStroke = null;
+        activeStrokePageId = null;
+        _shapeStartLocal = null;
+        previewStrokes = [];
+        if (pageId == null || start == null) {
+          notifyListeners();
+          return;
+        }
+        if (template != null) {
+          // A click with no drag stamps nothing.
+          if (preview.isNotEmpty) {
+            _doOp(_addElementsOp('Shape', pageId, preview));
+          } else {
+            notifyListeners();
+          }
+        } else if (stroke != null && stroke.points.length > 1) {
+          _doOp(_addElementsOp('Shape', pageId, [stroke]));
+        } else {
+          notifyListeners();
+        }
       case CanvasTool.text:
       case null:
         return;
@@ -930,6 +1172,16 @@ class CanvasController extends ChangeNotifier {
   }
 
   void cancelToolGesture() {
+    _holdTimer?.cancel();
+    _holdTimer = null;
+    _snapped = false;
+    _preSnapPoints = null;
+    _snappedFit = null;
+    _adjustAnchor = null;
+    _adjustStart = null;
+    _holdAnchorLocal = null;
+    _shapeStartLocal = null;
+    previewStrokes = [];
     _activeGestureTool = null;
     activeStroke = null;
     activeStrokePageId = null;
@@ -946,6 +1198,137 @@ class CanvasController extends ChangeNotifier {
     }
     _dragMode = SelectionHit.none;
     notifyListeners();
+  }
+
+  // ── Hold-to-snap ─────────────────────────────────────────────────────────
+
+  void _armHoldTimer() {
+    _holdTimer?.cancel();
+    _holdTimer = Timer(_kHoldDuration, _onHoldFired);
+  }
+
+  /// The pen paused mid-stroke: try to recognize the in-progress ink as a
+  /// shape. On success the live stroke's points become the perfect shape (a
+  /// preview); on failure re-arm once (a longer pause after more ink may yet
+  /// resolve), then give up for this gesture. Fires between frames, so
+  /// notifying is safe.
+  void _onHoldFired() {
+    _holdTimer = null;
+    final t = _activeGestureTool;
+    if ((t != CanvasTool.pen && t != CanvasTool.highlighter) || _snapped) {
+      return;
+    }
+    final stroke = activeStroke;
+    if (stroke == null) return;
+    final fit = recognizeShape(stroke.points);
+    if (fit == null) {
+      if (_holdRetries < 1) {
+        _holdRetries++;
+        _armHoldTimer();
+      }
+      return;
+    }
+    _preSnapPoints = [for (final p in stroke.points) StrokePoint(p.x, p.y, p.p)];
+    _snappedFit = fit;
+    _adjustAnchor = null;
+    final lastPt = stroke.points.last;
+    _adjustStart = Offset(lastPt.x, lastPt.y); // pen pos at snap (page-local)
+    stroke.points = pointsForShape(fit);
+    stroke.invalidateCache();
+    _snapped = true;
+    HapticFeedback.mediumImpact();
+    notifyListeners();
+  }
+
+  /// While a shape is snapped and the pen is still down, dragging adjusts it:
+  /// the nearest anchor follows the pen (line endpoint, rect/ellipse via the
+  /// grabbed corner/axis, circle radius). The grab only begins once the pen has
+  /// moved past a small slop from the snap position, so a shape doesn't jump on
+  /// the tiniest jitter.
+  void _adjustSnappedShape(Offset canvasPos) {
+    final fit = _snappedFit;
+    final stroke = activeStroke;
+    if (fit == null || stroke == null) return;
+    final l = layout.layoutOf(activeStrokePageId!);
+    final page = pages[activeStrokePageId!];
+    if (l == null || page == null) return;
+    final p = _clampToPage(canvasPos - l.rect.topLeft, page);
+    if (_adjustAnchor == null) {
+      if (_adjustStart != null &&
+          (p - _adjustStart!).distance < _kAdjustStartSlop) {
+        return; // still within slop — leave the snapped shape untouched
+      }
+      _adjustAnchor = nearestAnchorIndex(fit, _adjustStart ?? p);
+    }
+    final newFit = moveAnchor(fit, _adjustAnchor!, p);
+    _snappedFit = newFit;
+    stroke.points = pointsForShape(newFit);
+    stroke.invalidateCache();
+    notifyListeners();
+  }
+
+  /// Commits a held-and-snapped stroke as **two ops**: op1 adds the original
+  /// freehand stroke, op2 swaps its points to the recognized shape. So undo #1
+  /// restores the freehand ink and undo #2 removes the stroke entirely (Apple
+  /// Notes semantics). Both ops run in one synchronous frame, so the
+  /// intermediate freehand state never paints and the debounced save only ever
+  /// flushes the final shape. Sync-safe: op2 `_stamp`s (rev climbs across
+  /// undo↔redo) and op1 tombstones on revert — see SHAPES_PLAN §1.4.
+  void _commitSnappedShape(
+    String pageId,
+    StrokeElement stroke,
+    List<StrokePoint> freehand,
+  ) {
+    final shapePoints = stroke.points;
+    stroke.points = [for (final p in freehand) StrokePoint(p.x, p.y, p.p)];
+    stroke.invalidateCache();
+    _doOp(_addElementsOp('Draw', pageId, [stroke]));
+    _doOp(_swapPointsOp('Shape', pageId, stroke,
+        before: freehand, after: shapePoints));
+  }
+
+  /// Test seam: runs the two-op snapped-shape commit as the hold gesture would
+  /// (the timer/gesture plumbing needs a screen+layout, which unit tests don't
+  /// set up). [strokeWithShapePoints] must carry the generated shape points;
+  /// [freehand] is the pre-snap ink.
+  @visibleForTesting
+  void debugCommitSnap(
+    String pageId,
+    StrokeElement strokeWithShapePoints,
+    List<StrokePoint> freehand,
+  ) =>
+      _commitSnappedShape(pageId, strokeWithShapePoints, freehand);
+
+  /// Undoable op that swaps a stroke's points (freehand ↔ shape), stamping on
+  /// both apply and revert so rev climbs monotonically (LWW-safe). Snapshots
+  /// deep copies of both point lists — never live refs (the op-correctness
+  /// rule).
+  _CanvasOp _swapPointsOp(
+    String label,
+    String pageId,
+    StrokeElement stroke, {
+    required List<StrokePoint> before,
+    required List<StrokePoint> after,
+  }) {
+    final beforeCopy = [for (final p in before) StrokePoint(p.x, p.y, p.p)];
+    final afterCopy = [for (final p in after) StrokePoint(p.x, p.y, p.p)];
+    void write(List<StrokePoint> pts) {
+      final page = pages[pageId];
+      if (page == null) return;
+      final i = page.strokes.indexWhere((e) => e.id == stroke.id);
+      if (i < 0) return;
+      final el = page.strokes[i];
+      el.points = [for (final p in pts) StrokePoint(p.x, p.y, p.p)];
+      el.invalidateCache();
+      _stamp([el]);
+    }
+
+    return _CanvasOp(
+      label: label,
+      dirtyPageIds: {pageId},
+      apply: () => write(afterCopy),
+      revert: () => write(beforeCopy),
+    );
   }
 
   // ── Eraser (whole-stroke or partial, live) ─────────────────────────────
@@ -1271,6 +1654,18 @@ class CanvasController extends ChangeNotifier {
     if (near(rect.topRight)) return SelectionHit.resizeTR;
     if (near(rect.bottomLeft)) return SelectionHit.resizeBL;
     if (near(rect.bottomRight)) return SelectionHit.resizeBR;
+    // Side handles (non-uniform stretch), only when the box is big enough on
+    // that axis so they don't overlap the corners. Text has no vertical
+    // handles (its height follows the wrapped content — a T/B drag is a no-op).
+    const minForSide = 48.0;
+    if (rect.width >= minForSide) {
+      if (near(rect.centerLeft)) return SelectionHit.resizeL;
+      if (near(rect.centerRight)) return SelectionHit.resizeR;
+    }
+    if (rect.height >= minForSide && !selectionIsTextOnly) {
+      if (near(rect.topCenter)) return SelectionHit.resizeT;
+      if (near(rect.bottomCenter)) return SelectionHit.resizeB;
+    }
     if (near(rect.topCenter - const Offset(0, 36))) return SelectionHit.rotate;
     if (rect.inflate(8).contains(screenPos)) return SelectionHit.move;
     return SelectionHit.none;
@@ -1386,6 +1781,76 @@ class CanvasController extends ChangeNotifier {
             for (final el in selection) {
               el.scaleBy(factor, anchor);
             }
+          }
+        }
+      case SelectionHit.resizeL:
+      case SelectionHit.resizeR:
+      case SelectionHit.resizeT:
+      case SelectionHit.resizeB:
+        final horizontal =
+            _dragMode == SelectionHit.resizeL || _dragMode == SelectionHit.resizeR;
+        // Text: a horizontal side handle changes the wrap width (same as a
+        // corner); a vertical one does nothing (height follows the content).
+        if (selectionIsTextOnly && selection.length == 1) {
+          if (!horizontal) return;
+          final el = selection.first as TextElement;
+          final page = pages[selectionPageId!];
+          if (page == null) break;
+          final localPos = canvasPos - pageLayout.rect.topLeft;
+          final leftSide = _dragMode == SelectionHit.resizeL;
+          const minW = 40.0;
+          double newLeft = el.rect.left;
+          double newWidth;
+          if (leftSide) {
+            final right = el.rect.right;
+            newLeft = localPos.dx.clamp(0.0, right - minW);
+            newWidth = right - newLeft;
+          } else {
+            newWidth = (localPos.dx - el.rect.left)
+                .clamp(minW, page.width - el.rect.left);
+          }
+          el.manualWidth = newWidth;
+          el.rect =
+              Rect.fromLTWH(newLeft, el.rect.top, newWidth, el.rect.height);
+          el.rect = autoTextRect(el, page.width - newLeft - 6);
+          _dragLast = canvasPos;
+          _recomputeSelectionBounds();
+          pictureCache.invalidate(selectionPageId!);
+          notifyListeners();
+          return;
+        }
+        final localPos = canvasPos - pageLayout.rect.topLeft;
+        final localLast = _dragLast - pageLayout.rect.topLeft;
+        var sx = 1.0, sy = 1.0;
+        late Offset anchor;
+        switch (_dragMode) {
+          case SelectionHit.resizeR:
+            final a = bounds.left;
+            final now = localPos.dx - a, last = localLast.dx - a;
+            if (last.abs() > 1e-3) sx = now / last;
+            anchor = Offset(a, bounds.top);
+          case SelectionHit.resizeL:
+            final a = bounds.right;
+            final now = a - localPos.dx, last = a - localLast.dx;
+            if (last.abs() > 1e-3) sx = now / last;
+            anchor = Offset(a, bounds.top);
+          case SelectionHit.resizeB:
+            final a = bounds.top;
+            final now = localPos.dy - a, last = localLast.dy - a;
+            if (last.abs() > 1e-3) sy = now / last;
+            anchor = Offset(bounds.left, a);
+          default: // resizeT
+            final a = bounds.bottom;
+            final now = a - localPos.dy, last = a - localLast.dy;
+            if (last.abs() > 1e-3) sy = now / last;
+            anchor = Offset(bounds.left, a);
+        }
+        // Don't collapse (or flip) the axis being stretched.
+        final axisSize = horizontal ? bounds.width : bounds.height;
+        final axisFactor = horizontal ? sx : sy;
+        if (axisSize * axisFactor > 8 || axisFactor > 1) {
+          for (final el in selection) {
+            el.scaleXY(sx, sy, anchor);
           }
         }
       case SelectionHit.rotate:
@@ -3169,6 +3634,7 @@ class CanvasController extends ChangeNotifier {
     }
     SyncService().unregisterCanvasListener(canvas.id);
     _scrollTicker?.dispose();
+    _holdTimer?.cancel();
     _saveTimer?.cancel();
     flushSaves();
     renderCache.dispose();

@@ -614,4 +614,73 @@ void main() {
       expect(canvas.rows.single.pageIds, ['a']);
     });
   });
+
+  group('CanvasController hold-to-snap commit', () {
+    CanvasController build() {
+      final page = CanvasPage(id: 'p', deviceId: 'test_device');
+      final canvas = Canvas(
+        id: 'c',
+        notebookId: 'n',
+        sectionId: 's',
+        name: 'C',
+        createdAt: DateTime(2026, 7, 15),
+        rows: [PageRow(id: 'r', pageIds: ['p'])],
+      );
+      return CanvasController(canvas: canvas, pages: {'p': page});
+    }
+
+    // A "snapped" stroke: its live points are the shape, with the original
+    // freehand points kept aside for the undo-to-freehand op.
+    List<StrokePoint> shapePts() =>
+        [for (var i = 0; i < 6; i++) StrokePoint(i * 20.0, 40, 0.5)];
+    List<StrokePoint> freehandPts() =>
+        [StrokePoint(0, 40, 0.5), StrokePoint(101, 42, 0.5)];
+
+    test('commits as two ops: undo #1 → freehand, undo #2 → gone', () {
+      final c = build();
+      final stroke = _stroke('sh', device: 'test_device')
+        ..points = shapePts();
+      c.debugCommitSnap('p', stroke, freehandPts());
+
+      final page = c.pages['p']!;
+      expect(page.strokes.length, 1);
+      expect(page.strokes.single.points.length, 6); // shape
+
+      c.undo(); // undo the swap → freehand ink
+      expect(page.strokes.length, 1);
+      expect(page.strokes.single.points.length, 2); // freehand
+
+      c.undo(); // undo the add → gone (tombstoned)
+      expect(page.strokes.where((e) => e.id == 'sh'), isEmpty);
+    });
+
+    test('redo re-applies freehand then shape', () {
+      final c = build();
+      final stroke = _stroke('sh', device: 'test_device')
+        ..points = shapePts();
+      c.debugCommitSnap('p', stroke, freehandPts());
+      c.undo();
+      c.undo();
+
+      c.redo(); // re-add → freehand
+      expect(c.pages['p']!.strokes.single.points.length, 2);
+      c.redo(); // re-swap → shape
+      expect(c.pages['p']!.strokes.single.points.length, 6);
+    });
+
+    test('rev climbs monotonically across the undo↔redo cycle (LWW-safe)', () {
+      final c = build();
+      final stroke = _stroke('sh', device: 'test_device')
+        ..points = shapePts();
+      c.debugCommitSnap('p', stroke, freehandPts());
+      int rev() => c.pages['p']!.strokes.single.rev;
+
+      final committed = rev();
+      c.undo(); // swap→freehand stamps
+      expect(rev(), greaterThan(committed));
+      final afterUndo = rev();
+      c.redo(); // freehand→shape stamps
+      expect(rev(), greaterThan(afterUndo));
+    });
+  });
 }
