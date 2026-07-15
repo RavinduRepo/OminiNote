@@ -2137,41 +2137,123 @@ class NotebookService {
   /// re-recorded so the sync filters' local cache self-heals each launch.
   Future<void> runGarbageCollection({Duration maxAge = _kGcMaxAge}) async {
     final cutoff = DateTime.now().subtract(maxAge);
-    final data = await _readIndex();
+    // The scan half decodes every page file in the store — pure CPU + file
+    // I/O that janked launch when it ran on the main isolate. It runs in a
+    // worker (dart:io works there; inputs/outputs are plain strings) and
+    // returns only the actions to take; the mutations (purges, dir deletes,
+    // purged-path cache, Drive queue) stay on-main below. Tombstone-list
+    // compaction rewrites happen inside the scan — a local-only trim that
+    // deliberately bypasses SyncService.onLocalFileSaved either way. Inline
+    // fallback on any isolate failure — a hiccup must never skip a GC.
+    final dirPath = appDir.path;
+    final cutoffMs = cutoff.millisecondsSinceEpoch;
+    _GcActions acts;
+    try {
+      acts = await Isolate.run(() => _gcScan(dirPath, cutoffMs));
+    } catch (_) {
+      acts = await _gcScan(dirPath, cutoffMs);
+    }
 
-    for (final entry in data.entries.toList()) {
+    // Purged markers: marker stays; make sure local content is gone + the
+    // purged-path cache knows (self-heals each launch).
+    for (final nb in acts.markerNotebooks) {
+      final dir = Directory('$dirPath/notebooks/$nb');
+      if (await dir.exists()) await dir.delete(recursive: true);
+      await _addPurgedPath(nb);
+    }
+    for (final s in acts.markerSections) {
+      final p = s.split('/');
+      final dir =
+          Directory('$dirPath/notebooks/${p[0]}/sections/${p[1]}/canvases');
+      if (await dir.exists()) await dir.delete(recursive: true);
+      await _addPurgedPath(s);
+    }
+    for (final c in acts.markerCanvases) {
+      final p = c.split('/');
+      final base = canvasDir(p[0], p[1], p[2]).path;
+      for (final sub in ['pages', 'assets']) {
+        final d = Directory('$base/$sub');
+        if (await d.exists()) await d.delete(recursive: true);
+      }
+      await _addPurgedPath(c);
+    }
+
+    // Expired tombstones → the same terminal purge as the bin's
+    // "delete permanently". The scan never descends under an expired or
+    // purged parent, so these lists don't overlap.
+    for (final nb in acts.expiredNotebooks) {
+      await purgeNotebook(nb);
+    }
+    for (final f in acts.notebookFolders) {
+      final p = f.split('/');
+      await purgeFolder(p[0], null, p[1]);
+    }
+    for (final s in acts.expiredSections) {
+      final p = s.split('/');
+      await purgeSection(p[0], p[1]);
+    }
+    for (final f in acts.sectionFolders) {
+      final p = f.split('/');
+      await purgeFolder(p[0], p[1], p[2]);
+    }
+    for (final c in acts.expiredCanvases) {
+      final p = c.split('/');
+      await purgeCanvas(p[0], p[1], p[2]);
+    }
+    for (final pg in acts.expiredPages) {
+      final p = pg.split('/');
+      // Terminal purge (strip + `purgedAt` marker, Drive-reclaiming) instead
+      // of a bare local delete — a local-only delete left the tombstoned page
+      // live on Drive forever and let it re-download on the next full resync.
+      await purgePage(p[0], p[1], p[2], p[3]);
+    }
+  }
+
+  static bool _tombstoneExpired(dynamic deletedAtField, DateTime cutoff) {
+    if (deletedAtField is! num) return false;
+    return DateTime.fromMillisecondsSinceEpoch(deletedAtField.toInt())
+        .isBefore(cutoff);
+  }
+
+  /// The read/decode walk of the GC, isolate-safe (static, plain-data in/out,
+  /// no `this`). Mirrors the old in-place walk exactly: purged/expired parents
+  /// are recorded and NOT descended into.
+  static Future<_GcActions> _gcScan(String appDirPath, int cutoffMs) async {
+    final cutoff = DateTime.fromMillisecondsSinceEpoch(cutoffMs);
+    final acts = _GcActions();
+    Map<String, dynamic> index;
+    try {
+      index = jsonDecode(await File('$appDirPath/notebooks.json').readAsString())
+          as Map<String, dynamic>;
+    } catch (_) {
+      index = {};
+    }
+    for (final entry in index.entries) {
       final json = entry.value as Map<String, dynamic>;
       if (json['purgedAt'] != null) {
-        // Marker stays; make sure local content is gone + cache knows.
-        final dir = Directory('${appDir.path}/notebooks/${entry.key}');
-        if (await dir.exists()) await dir.delete(recursive: true);
-        await _addPurgedPath(entry.key);
+        acts.markerNotebooks.add(entry.key);
         continue;
       }
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        await purgeNotebook(entry.key);
+        acts.expiredNotebooks.add(entry.key);
         continue;
       }
       // Expired deleted section super-sections in this (alive) notebook.
       for (final f
           in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? [])) {
         if (f['purgedAt'] == null && _tombstoneExpired(f['deletedAt'], cutoff)) {
-          await purgeFolder(entry.key, null,
-              (f['node'] as Map<String, dynamic>)['id'] as String);
+          acts.notebookFolders.add(
+              '${entry.key}/${(f['node'] as Map<String, dynamic>)['id']}');
         }
       }
-      await _gcSectionsUnder(entry.key, cutoff);
+      await _gcScanSections(appDirPath, entry.key, cutoff, acts);
     }
+    return acts;
   }
 
-  bool _tombstoneExpired(dynamic deletedAtField, DateTime cutoff) {
-    if (deletedAtField is! num) return false;
-    return DateTime.fromMillisecondsSinceEpoch(deletedAtField.toInt())
-        .isBefore(cutoff);
-  }
-
-  Future<void> _gcSectionsUnder(String notebookId, DateTime cutoff) async {
-    final dir = Directory('${appDir.path}/notebooks/$notebookId/sections');
+  static Future<void> _gcScanSections(String appDirPath, String notebookId,
+      DateTime cutoff, _GcActions acts) async {
+    final dir = Directory('$appDirPath/notebooks/$notebookId/sections');
     if (!await dir.exists()) return;
     await for (final entity in dir.list(followLinks: false)) {
       if (entity is! Directory) continue;
@@ -2185,35 +2267,28 @@ class NotebookService {
         continue;
       }
       if (json['purgedAt'] != null) {
-        final cvDir = Directory('${entity.path}/canvases');
-        if (await cvDir.exists()) await cvDir.delete(recursive: true);
-        await _addPurgedPath('$notebookId/$sectionId');
+        acts.markerSections.add('$notebookId/$sectionId');
         continue; // marker stays
       }
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        await purgeSection(notebookId, sectionId);
+        acts.expiredSections.add('$notebookId/$sectionId');
         continue;
       }
       // Expired deleted canvas super-sections in this (alive) section.
       for (final f
           in List<Map<String, dynamic>>.from(json['deletedFolders'] ?? [])) {
         if (f['purgedAt'] == null && _tombstoneExpired(f['deletedAt'], cutoff)) {
-          await purgeFolder(notebookId, sectionId,
-              (f['node'] as Map<String, dynamic>)['id'] as String);
+          acts.sectionFolders.add(
+              '$notebookId/$sectionId/${(f['node'] as Map<String, dynamic>)['id']}');
         }
       }
-      await _gcCanvasesUnder(notebookId, sectionId, cutoff);
+      await _gcScanCanvases(entity.path, notebookId, sectionId, cutoff, acts);
     }
   }
 
-  Future<void> _gcCanvasesUnder(
-    String notebookId,
-    String sectionId,
-    DateTime cutoff,
-  ) async {
-    final dir = Directory(
-      '${sectionDir(notebookId, sectionId).path}/canvases',
-    );
+  static Future<void> _gcScanCanvases(String sectionPath, String notebookId,
+      String sectionId, DateTime cutoff, _GcActions acts) async {
+    final dir = Directory('$sectionPath/canvases');
     if (!await dir.exists()) return;
     await for (final entity in dir.list(followLinks: false)) {
       if (entity is! Directory) continue;
@@ -2227,25 +2302,22 @@ class NotebookService {
         continue;
       }
       if (json['purgedAt'] != null) {
-        for (final sub in ['pages', 'assets']) {
-          final d = Directory('${entity.path}/$sub');
-          if (await d.exists()) await d.delete(recursive: true);
-        }
-        await _addPurgedPath('$notebookId/$sectionId/$canvasId');
+        acts.markerCanvases.add('$notebookId/$sectionId/$canvasId');
         continue; // marker stays
       }
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        await purgeCanvas(notebookId, sectionId, canvasId);
+        acts.expiredCanvases.add('$notebookId/$sectionId/$canvasId');
         continue;
       }
-      await _gcPagesUnder(notebookId, sectionId, canvasId, cutoff);
+      await _gcScanPages(entity.path, notebookId, sectionId, canvasId, cutoff,
+          acts);
     }
   }
 
-  Future<void> _gcPagesUnder(String notebookId, String sectionId,
-      String canvasId, DateTime cutoff) async {
-    final dir = Directory(
-        '${canvasDir(notebookId, sectionId, canvasId).path}/pages');
+  static Future<void> _gcScanPages(String canvasPath, String notebookId,
+      String sectionId, String canvasId, DateTime cutoff,
+      _GcActions acts) async {
+    final dir = Directory('$canvasPath/pages');
     if (!await dir.exists()) return;
     await for (final entity in dir.list(followLinks: false)) {
       if (entity is! File || !entity.path.endsWith('.json')) continue;
@@ -2257,12 +2329,8 @@ class NotebookService {
       }
       if (json['purgedAt'] != null) continue; // terminal marker — leave it
       if (_tombstoneExpired(json['deletedAt'], cutoff)) {
-        // Route through the terminal purge (strip + `purgedAt` marker,
-        // Drive-reclaiming) instead of a bare local delete — a local-only
-        // delete left the tombstoned page live on Drive forever and let it
-        // re-download on the next full resync.
         final pageId = _basename(entity.path).replaceAll('.json', '');
-        await purgePage(notebookId, sectionId, canvasId, pageId);
+        acts.expiredPages.add('$notebookId/$sectionId/$canvasId/$pageId');
         continue;
       }
       _compactTombstoneList(json, 'erased', cutoff);
@@ -2271,7 +2339,8 @@ class NotebookService {
         json.remove('_gcCompacted');
         // Atomic like every other write here, but deliberately bypasses
         // SyncService.onLocalFileSaved — this is a local-only trim, not an
-        // edit that needs pushing (see class doc above).
+        // edit that needs pushing (see class doc above) — which is why it can
+        // run inside the scan isolate.
         final tmp = File('${entity.path}.tmp');
         await tmp.writeAsString(jsonEncode(json), flush: true);
         await entity.delete();
@@ -2280,7 +2349,7 @@ class NotebookService {
     }
   }
 
-  void _compactTombstoneList(
+  static void _compactTombstoneList(
     Map<String, dynamic> pageJson,
     String key,
     DateTime cutoff,
@@ -2292,6 +2361,20 @@ class NotebookService {
       pageJson['_gcCompacted'] = true;
     }
   }
+}
+
+/// What the GC scan found to act on — plain slash-joined id paths, so the
+/// whole object is sendable back from the scan isolate.
+class _GcActions {
+  final List<String> markerNotebooks = []; // nbId
+  final List<String> expiredNotebooks = []; // nbId
+  final List<String> notebookFolders = []; // nbId/folderId
+  final List<String> markerSections = []; // nb/sec
+  final List<String> expiredSections = []; // nb/sec
+  final List<String> sectionFolders = []; // nb/sec/folderId
+  final List<String> markerCanvases = []; // nb/sec/cv
+  final List<String> expiredCanvases = []; // nb/sec/cv
+  final List<String> expiredPages = []; // nb/sec/cv/page
 }
 
 // ── Recycle bin items ─────────────────────────────────────────────────────
