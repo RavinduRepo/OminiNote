@@ -145,10 +145,15 @@ class CanvasPainter extends CustomPainter {
       );
     }
 
-    // In-progress stroke on this page.
-    if (controller.activeStrokePageId == page.id &&
-        controller.activeStroke != null) {
-      _paintStroke(canvas, controller.activeStroke!);
+    // In-progress stroke on this page (predefined shape / freehand), or a
+    // template's multi-stroke preview.
+    if (controller.activeStrokePageId == page.id) {
+      if (controller.activeStroke != null) {
+        _paintStroke(canvas, controller.activeStroke!);
+      }
+      for (final s in controller.previewStrokes) {
+        _paintStroke(canvas, s);
+      }
     }
 
     // In-progress lasso on this page.

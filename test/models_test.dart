@@ -6,6 +6,7 @@ import 'package:omininote/models/canvas_page.dart';
 import 'package:omininote/models/element.dart';
 import 'package:omininote/models/notebook.dart';
 import 'package:omininote/models/section.dart';
+import 'package:omininote/models/shape_template.dart';
 import 'package:omininote/models/tree.dart';
 import 'package:omininote/services/notebook_service.dart';
 
@@ -679,6 +680,29 @@ void main() {
       text.scaleBy(0.5, Offset.zero);
       expect(text.rect, const Rect.fromLTWH(5, 5, 100, 40)); // moved, not sized
       expect(text.fontSize, 16); // unchanged
+    });
+  });
+
+  group('ShapeTemplate', () {
+    test('round-trips through JSON (multi-polyline unit-box geometry)', () {
+      final t = ShapeTemplate(
+        id: 'tmpl_1',
+        name: 'Arrow',
+        polylines: const [
+          [Offset(0, 0.5), Offset(1, 0.5)],
+          [Offset(0.7, 0.2), Offset(1, 0.5), Offset(0.7, 0.8)],
+        ],
+        createdAt: DateTime(2026, 7, 16, 9, 30),
+      );
+      final back = ShapeTemplate.fromJson(
+          jsonDecode(jsonEncode(t.toJson())) as Map<String, dynamic>);
+      expect(back.id, 'tmpl_1');
+      expect(back.name, 'Arrow');
+      expect(back.createdAt, DateTime(2026, 7, 16, 9, 30));
+      expect(back.polylines.length, 2);
+      expect(back.polylines[0].length, 2);
+      expect(back.polylines[1].length, 3);
+      expect(back.polylines[1][1], const Offset(1, 0.5));
     });
   });
 }

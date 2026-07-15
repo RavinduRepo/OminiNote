@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../models/canvas_page.dart';
+import '../models/shape_template.dart';
 
 /// Which navigation shell to show. [auto] picks based on window width (see
 /// `main.dart`'s root router); [mobile]/[desktop] force one regardless of
@@ -71,6 +72,23 @@ class SettingsService {
   Future<void> setShapeToolKind(ShapeToolKind kind) async {
     if (shapeToolKind == kind) return;
     shapeToolKind = kind;
+    await _persist();
+  }
+
+  /// Saved custom shape templates (device-local, capped). Newest first.
+  List<ShapeTemplate> shapeTemplates = [];
+  static const int _kMaxShapeTemplates = 50;
+
+  Future<void> addShapeTemplate(ShapeTemplate t) async {
+    shapeTemplates.insert(0, t);
+    if (shapeTemplates.length > _kMaxShapeTemplates) {
+      shapeTemplates = shapeTemplates.sublist(0, _kMaxShapeTemplates);
+    }
+    await _persist();
+  }
+
+  Future<void> removeShapeTemplate(String id) async {
+    shapeTemplates.removeWhere((t) => t.id == id);
     await _persist();
   }
 
@@ -216,6 +234,10 @@ class SettingsService {
       (k) => k.name == data['shapeToolKind'],
       orElse: () => ShapeToolKind.rectangle,
     );
+    shapeTemplates = [
+      for (final t in (data['shapeTemplates'] as List? ?? const []))
+        ShapeTemplate.fromJson(t as Map<String, dynamic>),
+    ];
     eraserPartial = data['eraserPartial'] == true;
     eraserSize = (data['eraserSize'] as num?)?.toDouble() ?? 10.0;
     inkAdjustPen = data['inkAdjustPen'] != false; // default true
@@ -337,6 +359,7 @@ class SettingsService {
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
         'shapeToolKind': shapeToolKind.name,
+        'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,
         'eraserSize': eraserSize,
         'inkAdjustPen': inkAdjustPen,

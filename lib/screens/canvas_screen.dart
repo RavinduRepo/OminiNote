@@ -20,6 +20,7 @@ import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
 import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../canvas/text_measure.dart';
+import '../models/shape_template.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
@@ -2573,6 +2574,7 @@ Widget _buildShapeOptionsRow(
   CanvasController c,
   AppPalette palette,
 ) {
+  final templates = SettingsService().shapeTemplates;
   return Column(
     mainAxisSize: MainAxisSize.min,
     crossAxisAlignment: CrossAxisAlignment.start,
@@ -2586,8 +2588,27 @@ Widget _buildShapeOptionsRow(
                 padding: const EdgeInsets.symmetric(horizontal: 2),
                 child: _ShapeKindButton(
                   icon: entry.value,
-                  selected: c.shapeToolKind == entry.key,
+                  selected:
+                      c.shapeToolTemplate == null && c.shapeToolKind == entry.key,
                   onTap: () => c.setShapeToolKind(entry.key),
+                  palette: palette,
+                ),
+              ),
+            if (templates.isNotEmpty)
+              Container(
+                width: 1,
+                height: 28,
+                margin: const EdgeInsets.symmetric(horizontal: 6),
+                color: palette.border,
+              ),
+            for (final t in templates)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: _TemplateThumb(
+                  template: t,
+                  selected: c.shapeToolTemplate?.id == t.id,
+                  onTap: () => c.setShapeToolTemplate(t),
+                  onDelete: () => _confirmDeleteTemplate(context, c, t),
                   palette: palette,
                 ),
               ),
@@ -2598,6 +2619,133 @@ Widget _buildShapeOptionsRow(
       _buildPenOptionsRow(context, c, palette),
     ],
   );
+}
+
+/// Prompts for a name and saves the current strokes-only selection as a custom
+/// shape template (Phase 3).
+Future<void> _promptSaveShape(BuildContext context, CanvasController c) async {
+  final field = TextEditingController(text: 'My shape');
+  final name = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Save as shape'),
+      content: TextField(
+        controller: field,
+        autofocus: true,
+        decoration: const InputDecoration(hintText: 'Shape name'),
+        onSubmitted: (v) => Navigator.pop(ctx, v),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, field.text),
+            child: const Text('Save')),
+      ],
+    ),
+  );
+  if (name == null) return;
+  await c.saveSelectionAsShape(name);
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Text('Saved to your shapes — pick it in the Shapes tool'),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+}
+
+Future<void> _confirmDeleteTemplate(
+    BuildContext context, CanvasController c, ShapeTemplate t) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('Delete “${t.name}”?'),
+      content: const Text('This removes the saved shape from this device.'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel')),
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete')),
+      ],
+    ),
+  );
+  if (ok == true) await c.deleteShapeTemplate(t.id);
+}
+
+/// A saved-template chip: a tiny thumbnail of the template's polylines; tap to
+/// select it for stamping, long-press to delete.
+class _TemplateThumb extends StatelessWidget {
+  final ShapeTemplate template;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+  final AppPalette palette;
+  const _TemplateThumb({
+    required this.template,
+    required this.selected,
+    required this.onTap,
+    required this.onDelete,
+    required this.palette,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: template.name,
+      child: GestureDetector(
+        onTap: onTap,
+        onLongPress: onDelete,
+        child: Container(
+          width: 38,
+          height: 38,
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: selected ? palette.accent.withValues(alpha: 0.16) : null,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected ? palette.accent : palette.border,
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: CustomPaint(
+            painter: _TemplateThumbPainter(
+                template, selected ? palette.accent : palette.textDim),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TemplateThumbPainter extends CustomPainter {
+  final ShapeTemplate template;
+  final Color color;
+  _TemplateThumbPainter(this.template, this.color);
+
+  @override
+  void paint(ui.Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    for (final poly in template.polylines) {
+      if (poly.length < 2) continue;
+      final path = Path()
+        ..moveTo(poly.first.dx * size.width, poly.first.dy * size.height);
+      for (var i = 1; i < poly.length; i++) {
+        path.lineTo(poly[i].dx * size.width, poly[i].dy * size.height);
+      }
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_TemplateThumbPainter old) =>
+      old.template != template || old.color != color;
 }
 
 class _ShapeKindButton extends StatelessWidget {
@@ -2865,6 +3013,13 @@ Widget _buildLassoActionRow(
           label: 'Back',
           onTap: c.sendSelectionToBack,
         ),
+        // Save a strokes-only selection as a reusable custom shape (Phase 3).
+        if (c.selectionIsStrokesOnly)
+          _SelAction(
+            icon: Icons.add_box_outlined,
+            label: 'Save as shape',
+            onTap: () => _promptSaveShape(context, c),
+          ),
         // Split pasted text (linked boxes across pages): act on ALL parts.
         // "Cut all" + paste elsewhere re-flows it there = the move story.
         if (c.selectionHasLinkedText) ...[

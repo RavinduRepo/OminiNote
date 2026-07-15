@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
+import '../models/shape_template.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/render_cache.dart';
@@ -769,16 +770,105 @@ class CanvasController extends ChangeNotifier {
   Offset? _adjustStart; // pen pos at snap; adjust begins once it moves past slop
   int? _adjustAnchor; // grabbed anchor once adjusting
 
-  // ── Shapes tool (drag-to-draw a chosen kind) ────────────────────────────
+  // ── Shapes tool (drag-to-draw a chosen kind or a saved template) ─────────
   /// Last-used shape kind for the Shapes tool (persisted device-local).
   ShapeToolKind shapeToolKind = SettingsService().shapeToolKind;
+
+  /// When non-null the Shapes tool stamps this saved template instead of a
+  /// predefined kind (Phase 3). Selecting a predefined kind clears it.
+  ShapeTemplate? shapeToolTemplate;
+
   Offset? _shapeStartLocal; // drag anchor (page-local) for the shapes tool
 
+  /// Multi-stroke live preview for a template drag (the painter draws these on
+  /// [activeStrokePageId]; committed as one op on lift).
+  List<StrokeElement> previewStrokes = [];
+
   void setShapeToolKind(ShapeToolKind kind) {
-    if (shapeToolKind == kind) return;
+    final changed = shapeToolKind != kind || shapeToolTemplate != null;
+    shapeToolTemplate = null;
     shapeToolKind = kind;
     SettingsService().setShapeToolKind(kind);
+    if (changed) notifyListeners();
+  }
+
+  void setShapeToolTemplate(ShapeTemplate? t) {
+    shapeToolTemplate = t;
     notifyListeners();
+  }
+
+  Future<void> deleteShapeTemplate(String id) async {
+    if (shapeToolTemplate?.id == id) shapeToolTemplate = null;
+    await SettingsService().removeShapeTemplate(id);
+    notifyListeners();
+  }
+
+  bool get selectionIsStrokesOnly =>
+      selection.isNotEmpty && selection.every((e) => e is StrokeElement);
+
+  /// Saves the current strokes-only selection as a device-local template,
+  /// normalized into the unit box (geometry only — the stamped copies take the
+  /// pen's colour/size). No-op if the selection isn't strokes-only.
+  Future<void> saveSelectionAsShape(String name) async {
+    final strokes = selection.whereType<StrokeElement>().toList();
+    if (strokes.isEmpty) return;
+    var minX = double.infinity, minY = double.infinity;
+    var maxX = -double.infinity, maxY = -double.infinity;
+    for (final s in strokes) {
+      for (final p in s.points) {
+        minX = math.min(minX, p.x);
+        minY = math.min(minY, p.y);
+        maxX = math.max(maxX, p.x);
+        maxY = math.max(maxY, p.y);
+      }
+    }
+    final w = (maxX - minX).abs() < 1e-6 ? 1.0 : maxX - minX;
+    final h = (maxY - minY).abs() < 1e-6 ? 1.0 : maxY - minY;
+    final polylines = [
+      for (final s in strokes)
+        [for (final p in s.points) Offset((p.x - minX) / w, (p.y - minY) / h)]
+    ];
+    await SettingsService().addShapeTemplate(ShapeTemplate(
+      id: newModelId('tmpl'),
+      name: name.trim().isEmpty ? 'Shape' : name.trim(),
+      polylines: polylines,
+      createdAt: DateTime.now(),
+    ));
+    notifyListeners();
+  }
+
+  bool _shiftDown() => HardwareKeyboard.instance.logicalKeysPressed.any((k) =>
+      k == LogicalKeyboardKey.shiftLeft || k == LogicalKeyboardKey.shiftRight);
+
+  /// Builds the stamped strokes for [t] scaled into [rect] (Rect.fromPoints
+  /// normalizes it). [uniform] (Shift) preserves the template's aspect,
+  /// centered in the box. Each polyline becomes one stroke in the pen's ink.
+  List<StrokeElement> _templateStrokes(ShapeTemplate t, Rect rect,
+      {bool uniform = false}) {
+    var w = rect.width, h = rect.height, ox = rect.left, oy = rect.top;
+    if (uniform) {
+      final s = math.min(w, h);
+      ox = rect.left + (w - s) / 2;
+      oy = rect.top + (h - s) / 2;
+      w = s;
+      h = s;
+    }
+    final out = <StrokeElement>[];
+    for (final poly in t.polylines) {
+      if (poly.length < 2) continue;
+      out.add(StrokeElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        z: '0|a0:',
+        tool: StrokeTool.pen,
+        color: penColor,
+        size: penSize,
+        points: [
+          for (final u in poly) StrokePoint(ox + u.dx * w, oy + u.dy * h, 0.5)
+        ],
+      ));
+    }
+    return out;
   }
 
   /// True while a recognized shape is being previewed under the held pen — the
@@ -906,15 +996,20 @@ class CanvasController extends ChangeNotifier {
         final p = _clampToPage(local, page);
         activeStrokePageId = page.id;
         _shapeStartLocal = p;
-        activeStroke = StrokeElement(
-          id: newModelId('el'),
-          deviceId: SettingsService().deviceId,
-          z: '0|a0:',
-          tool: StrokeTool.pen,
-          color: penColor,
-          size: penSize,
-          points: [StrokePoint(p.dx, p.dy, 0.5)],
-        );
+        previewStrokes = [];
+        // Predefined kind uses a single activeStroke preview; a template uses
+        // the multi-stroke previewStrokes list instead.
+        activeStroke = shapeToolTemplate != null
+            ? null
+            : StrokeElement(
+                id: newModelId('el'),
+                deviceId: SettingsService().deviceId,
+                z: '0|a0:',
+                tool: StrokeTool.pen,
+                color: penColor,
+                size: penSize,
+                points: [StrokePoint(p.dx, p.dy, 0.5)],
+              );
         _activeGestureTool = CanvasTool.shape;
         notifyListeners();
         return true;
@@ -969,19 +1064,24 @@ class CanvasController extends ChangeNotifier {
           notifyListeners();
         }
       case CanvasTool.shape:
-        final stroke = activeStroke;
         final start = _shapeStartLocal;
-        if (stroke == null || start == null) return;
+        if (start == null) return;
         final l = layout.layoutOf(activeStrokePageId!);
         final page = pages[activeStrokePageId!];
         if (l == null || page == null) return;
         final p = _clampToPage(canvasPos - l.rect.topLeft, page);
-        final shift = HardwareKeyboard.instance.logicalKeysPressed.any((k) =>
-            k == LogicalKeyboardKey.shiftLeft ||
-            k == LogicalKeyboardKey.shiftRight);
-        stroke.points =
-            pointsForShape(shapeToolFit(shapeToolKind, start, p, constrain: shift));
-        stroke.invalidateCache();
+        final shift = _shiftDown();
+        final tmpl = shapeToolTemplate;
+        if (tmpl != null) {
+          previewStrokes =
+              _templateStrokes(tmpl, Rect.fromPoints(start, p), uniform: shift);
+        } else {
+          final stroke = activeStroke;
+          if (stroke == null) return;
+          stroke.points = pointsForShape(
+              shapeToolFit(shapeToolKind, start, p, constrain: shift));
+          stroke.invalidateCache();
+        }
         notifyListeners();
       case CanvasTool.text:
       case null:
@@ -1029,15 +1129,24 @@ class CanvasController extends ChangeNotifier {
         final stroke = activeStroke;
         final pageId = activeStrokePageId;
         final start = _shapeStartLocal;
+        final preview = previewStrokes;
+        final template = shapeToolTemplate;
         activeStroke = null;
         activeStrokePageId = null;
         _shapeStartLocal = null;
-        // A click with no drag (start ≈ end) makes no shape — discard it.
-        if (stroke == null || pageId == null || start == null) {
+        previewStrokes = [];
+        if (pageId == null || start == null) {
           notifyListeners();
           return;
         }
-        if (stroke.points.length > 1) {
+        if (template != null) {
+          // A click with no drag stamps nothing.
+          if (preview.isNotEmpty) {
+            _doOp(_addElementsOp('Shape', pageId, preview));
+          } else {
+            notifyListeners();
+          }
+        } else if (stroke != null && stroke.points.length > 1) {
           _doOp(_addElementsOp('Shape', pageId, [stroke]));
         } else {
           notifyListeners();
@@ -1058,6 +1167,7 @@ class CanvasController extends ChangeNotifier {
     _adjustStart = null;
     _holdAnchorLocal = null;
     _shapeStartLocal = null;
+    previewStrokes = [];
     _activeGestureTool = null;
     activeStroke = null;
     activeStrokePageId = null;
