@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../models/canvas_page.dart';
@@ -652,9 +653,19 @@ class SyncService {
     if (rel == 'notebooks.json') {
       // Per-account scoped merge: the account's Drive holds only its own
       // notebooks, so reconcile just those and preserve every other entry.
-      result = _mergeIndexForAccount(as.accountId, localText, remoteText);
+      // The main-isolate state it needs (default account, local-only set) is
+      // captured as plain data so the merge itself is pure.
+      final accountId = as.accountId;
+      final defaultId = _defaultId;
+      final localOnly = NotebookService().localOnlyNotebookIds();
+      result = await _runMerge(
+          localText,
+          remoteText,
+          () => _mergeIndexScoped(
+              accountId, defaultId, localOnly, localText, remoteText));
     } else {
-      result = MergeEngine.reconcile(rel, localText, remoteText);
+      result = await _runMerge(localText, remoteText,
+          () => MergeEngine.reconcile(rel, localText, remoteText));
     }
     drive.recordRemote(rel, rf.id, rf.headRevisionId);
 
@@ -669,17 +680,44 @@ class SyncService {
     return result.changedLocal;
   }
 
+  /// Combined local+remote JSON size above which a merge is worth one
+  /// background-isolate hop (mirrors NotebookService's page-decode gate);
+  /// smaller files merge inline — the isolate spawn + copy would cost more
+  /// than the merge itself.
+  static const int _kMergeOffloadChars = 256 * 1024;
+
+  /// Runs a pure [merge] inline for small inputs, else via [Isolate.run];
+  /// falls back to inline on any isolate failure — an isolate hiccup must
+  /// never drop a merge. Static (like NotebookService's decode helper) and
+  /// call sites build [merge] from locals + statics only, so nothing drags
+  /// `this` across the isolate boundary.
+  static Future<MergeResult> _runMerge(
+    String? localText,
+    String remoteText,
+    MergeResult Function() merge,
+  ) async {
+    if ((localText?.length ?? 0) + remoteText.length < _kMergeOffloadChars) {
+      return merge();
+    }
+    try {
+      return await Isolate.run(merge);
+    } catch (_) {
+      return merge();
+    }
+  }
+
   /// Scoped `notebooks.json` merge for [accountId]: the ids this account owns
   /// (its local notebooks whose effective target is [accountId]) are reconciled
   /// with the account's subset-remote; local-only ids are excluded; all other
-  /// entries (other accounts') are preserved untouched.
-  MergeResult _mergeIndexForAccount(
+  /// entries (other accounts') are preserved untouched. Pure + isolate-safe:
+  /// [defaultId]/[localOnly] are passed in rather than read from services.
+  static MergeResult _mergeIndexScoped(
     String accountId,
+    String? defaultId,
+    Set<String> localOnly,
     String? localText,
     String remoteText,
   ) {
-    final defaultId = _defaultId;
-    final localOnly = NotebookService().localOnlyNotebookIds();
     final localMap = localText == null
         ? <String, dynamic>{}
         : jsonDecode(localText) as Map<String, dynamic>;
