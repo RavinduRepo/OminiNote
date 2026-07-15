@@ -21,6 +21,7 @@ class SyncStatusIcon extends StatefulWidget {
 class _SyncStatusIconState extends State<SyncStatusIcon>
     with SingleTickerProviderStateMixin {
   late final AnimationController _spin;
+  late final _BoolNotifier _signedIn;
 
   @override
   void initState() {
@@ -28,11 +29,31 @@ class _SyncStatusIconState extends State<SyncStatusIcon>
     _spin = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 1),
-    )..repeat();
+    );
+    // Spin only while actually syncing. A forever-`repeat()`ing ticker forced
+    // Flutter to produce frames the whole time any sync icon was on screen,
+    // and while status == syncing (near-continuous during fast writing with
+    // internet on) the un-bounded RotationTransition re-rastered the whole
+    // app bar / sidebar header every frame — visible ink jank on mid-range
+    // devices (smooth in full screen, where no sync icon is visible).
+    SyncService().status.addListener(_syncSpin);
+    _signedIn = _BoolNotifier(AuthService().account);
+    _syncSpin();
+  }
+
+  void _syncSpin() {
+    final syncing = SyncService().status.value == SyncStatus.syncing;
+    if (syncing && !_spin.isAnimating) {
+      _spin.repeat();
+    } else if (!syncing && _spin.isAnimating) {
+      _spin.stop();
+    }
   }
 
   @override
   void dispose() {
+    SyncService().status.removeListener(_syncSpin);
+    _signedIn.dispose();
     _spin.dispose();
     super.dispose();
   }
@@ -41,7 +62,7 @@ class _SyncStatusIconState extends State<SyncStatusIcon>
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       // Auth notifier drives visibility.
-      valueListenable: _BoolNotifier(AuthService().account),
+      valueListenable: _signedIn,
       builder: (context, _, child) {
         if (!AuthService().isSignedIn) return const SizedBox.shrink();
         return ValueListenableBuilder<SyncStatus>(
@@ -59,12 +80,17 @@ class _SyncStatusIconState extends State<SyncStatusIcon>
       case SyncStatus.syncing:
         return Tooltip(
           message: 'Syncing…',
-          child: RotationTransition(
-            turns: _spin,
-            child: Icon(
-              Icons.sync,
-              size: 20,
-              color: palette.accent,
+          // RepaintBoundary: keep the spin repaint 20px big — without it each
+          // animation tick re-rasters up to the nearest ancestor boundary
+          // (the whole app bar / sidebar header).
+          child: RepaintBoundary(
+            child: RotationTransition(
+              turns: _spin,
+              child: Icon(
+                Icons.sync,
+                size: 20,
+                color: palette.accent,
+              ),
             ),
           ),
         );
@@ -117,10 +143,19 @@ class _SyncStatusIconState extends State<SyncStatusIcon>
 }
 
 /// Thin wrapper to make [ValueNotifier<T?>] usable in a bool-typed listener
-/// without a state-management library.
+/// without a state-management library. Detaches from [source] on dispose.
 class _BoolNotifier extends ValueNotifier<bool> {
-  _BoolNotifier(ValueNotifier<dynamic> source)
-      : super(source.value != null) {
-    source.addListener(() => value = source.value != null);
+  final ValueNotifier<dynamic> _source;
+
+  _BoolNotifier(this._source) : super(_source.value != null) {
+    _source.addListener(_onSource);
+  }
+
+  void _onSource() => value = _source.value != null;
+
+  @override
+  void dispose() {
+    _source.removeListener(_onSource);
+    super.dispose();
   }
 }
