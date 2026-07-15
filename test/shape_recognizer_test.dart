@@ -162,6 +162,62 @@ void main() {
     });
   });
 
+  group('anchors (hold-drag adjust)', () {
+    test('line: nearest anchor is the closer endpoint; moving it follows', () {
+      final line = ShapeFit.polyline(
+          ShapeKind.line, const [Offset(0, 0), Offset(100, 0)], 1);
+      expect(nearestAnchorIndex(line, const Offset(95, 3)), 1);
+      expect(nearestAnchorIndex(line, const Offset(4, -2)), 0);
+      final moved = moveAnchor(line, 1, const Offset(100, 60));
+      expect(moved.vertices[0], const Offset(0, 0)); // other end unchanged
+      expect(moved.vertices[1], const Offset(100, 60));
+    });
+
+    test('rectangle: dragging a corner pins the opposite, stays axis-aligned',
+        () {
+      final rect = ShapeFit.polyline(
+        ShapeKind.rectangle,
+        const [Offset(0, 0), Offset(100, 0), Offset(100, 80), Offset(0, 80)],
+        1,
+      );
+      // Drag the top-left (index 0) corner; opposite is index 2 = (100,80).
+      final moved = moveAnchor(rect, 0, const Offset(-20, -10));
+      expect(moved.kind, ShapeKind.rectangle);
+      final xs = moved.vertices.map((v) => v.dx).toList();
+      final ys = moved.vertices.map((v) => v.dy).toList();
+      expect(xs.reduce(math.min), -20);
+      expect(xs.reduce(math.max), 100); // opposite corner pinned
+      expect(ys.reduce(math.min), -10);
+      expect(ys.reduce(math.max), 80);
+    });
+
+    test('circle: dragging the radius handle resizes it', () {
+      final circle = ShapeFit.ellipse(
+          center: const Offset(50, 50),
+          rx: 30,
+          ry: 30,
+          rotation: 0,
+          confidence: 1,
+          circle: true);
+      final moved = moveAnchor(circle, 0, const Offset(50, 110)); // 60 below
+      expect(moved.kind, ShapeKind.circle);
+      expect(moved.rx, closeTo(60, 0.01));
+      expect(moved.ry, closeTo(60, 0.01));
+    });
+
+    test('ellipse: dragging a major-axis handle changes only rx', () {
+      final ell = ShapeFit.ellipse(
+          center: const Offset(0, 0),
+          rx: 100,
+          ry: 40,
+          rotation: 0,
+          confidence: 1);
+      final moved = moveAnchor(ell, 0, const Offset(150, 0));
+      expect(moved.rx, closeTo(150, 0.01));
+      expect(moved.ry, closeTo(40, 0.01)); // minor unchanged
+    });
+  });
+
   group('pointsForShape', () {
     test('rectangle emits a closed-ish, on-box point set', () {
       final fit = recognizeShape(pts(

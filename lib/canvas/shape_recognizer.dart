@@ -285,6 +285,119 @@ ShapeFit? _fitCurve(List<Offset> rs, List<int> corners) {
   return ShapeFit.curve(ctrl, 0.6);
 }
 
+// ── Hold-drag adjust (pure) ──────────────────────────────────────────────────
+
+/// The draggable anchors of [fit] in page space — used to pick which one the
+/// pen grabs when adjusting a freshly-snapped shape. Meaning by kind:
+///   * polyline (line/arrow/triangle/rectangle/polygon) → the vertices.
+///   * circle → a single radius handle.
+///   * ellipse → the 4 axis extrema (major±, minor±).
+///   * curve → the two endpoints.
+List<Offset> anchorsFor(ShapeFit fit) {
+  switch (fit.kind) {
+    case ShapeKind.line:
+    case ShapeKind.arrow:
+    case ShapeKind.triangle:
+    case ShapeKind.rectangle:
+    case ShapeKind.polygon:
+      return fit.vertices;
+    case ShapeKind.circle:
+      return [Offset(fit.center.dx + fit.rx, fit.center.dy)];
+    case ShapeKind.ellipse:
+      return _ellipseExtrema(fit);
+    case ShapeKind.curve:
+      return fit.controlPoints.isEmpty
+          ? const []
+          : [fit.controlPoints.first, fit.controlPoints.last];
+  }
+}
+
+/// Index (into [anchorsFor]) of the anchor nearest [p].
+int nearestAnchorIndex(ShapeFit fit, Offset p) {
+  final anchors = anchorsFor(fit);
+  var best = 0;
+  var bestD = double.infinity;
+  for (var i = 0; i < anchors.length; i++) {
+    final d = (anchors[i] - p).distance;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/// Returns a new [ShapeFit] with anchor [anchor] moved to [to]. A rectangle
+/// pins the opposite corner (natural stretch/squash); a circle/ellipse resizes
+/// the grabbed radius/semi-axis; other polylines move just that vertex; a curve
+/// moves the grabbed endpoint.
+ShapeFit moveAnchor(ShapeFit fit, int anchor, Offset to) {
+  switch (fit.kind) {
+    case ShapeKind.rectangle:
+      final v = fit.vertices;
+      if (v.length != 4) return fit;
+      final pinned = v[(anchor + 2) % 4];
+      final minX = math.min(pinned.dx, to.dx), maxX = math.max(pinned.dx, to.dx);
+      final minY = math.min(pinned.dy, to.dy), maxY = math.max(pinned.dy, to.dy);
+      return ShapeFit.polyline(
+        ShapeKind.rectangle,
+        [
+          Offset(minX, minY),
+          Offset(maxX, minY),
+          Offset(maxX, maxY),
+          Offset(minX, maxY),
+        ],
+        fit.confidence,
+      );
+    case ShapeKind.line:
+    case ShapeKind.arrow:
+    case ShapeKind.triangle:
+    case ShapeKind.polygon:
+      final v = [...fit.vertices];
+      if (anchor >= 0 && anchor < v.length) v[anchor] = to;
+      return ShapeFit.polyline(fit.kind, v, fit.confidence);
+    case ShapeKind.circle:
+      final r = (to - fit.center).distance;
+      return ShapeFit.ellipse(
+          center: fit.center,
+          rx: r,
+          ry: r,
+          rotation: 0,
+          confidence: fit.confidence,
+          circle: true);
+    case ShapeKind.ellipse:
+      final d = to - fit.center;
+      final majx = math.cos(fit.rotation), majy = math.sin(fit.rotation);
+      if (anchor < 2) {
+        final r = (d.dx * majx + d.dy * majy).abs();
+        return ShapeFit.ellipse(
+            center: fit.center,
+            rx: r,
+            ry: fit.ry,
+            rotation: fit.rotation,
+            confidence: fit.confidence);
+      }
+      final r = (d.dx * -majy + d.dy * majx).abs();
+      return ShapeFit.ellipse(
+          center: fit.center,
+          rx: fit.rx,
+          ry: r,
+          rotation: fit.rotation,
+          confidence: fit.confidence);
+    case ShapeKind.curve:
+      final c = [...fit.controlPoints];
+      if (c.isNotEmpty) c[anchor == 0 ? 0 : c.length - 1] = to;
+      return ShapeFit.curve(c, fit.confidence);
+  }
+}
+
+List<Offset> _ellipseExtrema(ShapeFit f) {
+  final cosR = math.cos(f.rotation), sinR = math.sin(f.rotation);
+  Offset ext(double ax, double ay) => Offset(
+      f.center.dx + ax * cosR - ay * sinR, f.center.dy + ax * sinR + ay * cosR);
+  return [ext(f.rx, 0), ext(-f.rx, 0), ext(0, f.ry), ext(0, -f.ry)];
+}
+
 // ── Point generation ─────────────────────────────────────────────────────────
 
 /// Emits render-ready [StrokePoint]s for [fit]: ~[ShapeTuning.emitSpacing]-pt

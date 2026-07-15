@@ -759,11 +759,15 @@ class CanvasController extends ChangeNotifier {
   // removes the stroke — Apple Notes semantics).
   static const Duration _kHoldDuration = Duration(milliseconds: 450);
   static const double _kHoldSlopScreen = 9.0; // screen px; /zoom → page-local
+  static const double _kAdjustStartSlop = 6.0; // page pts before a grab begins
   Timer? _holdTimer;
   Offset? _holdAnchorLocal; // page-local point the slop is measured from
   List<StrokePoint>? _preSnapPoints; // freehand backup for undo-to-freehand
   bool _snapped = false; // shape currently previewed in [activeStroke]
   int _holdRetries = 0;
+  ShapeFit? _snappedFit; // the recognized fit while snapped (for adjust)
+  Offset? _adjustStart; // pen pos at snap; adjust begins once it moves past slop
+  int? _adjustAnchor; // grabbed anchor once adjusting
 
   /// True while a recognized shape is being previewed under the held pen — the
   /// screen suppresses its own tap handling for that pointer-up.
@@ -864,6 +868,9 @@ class CanvasController extends ChangeNotifier {
         // Arm hold-to-snap (pen or highlighter).
         _snapped = false;
         _preSnapPoints = null;
+        _snappedFit = null;
+        _adjustAnchor = null;
+        _adjustStart = null;
         _holdRetries = 0;
         if (SettingsService().shapeSnap) {
           _holdAnchorLocal = p;
@@ -902,9 +909,10 @@ class CanvasController extends ChangeNotifier {
       case CanvasTool.highlighter:
         final stroke = activeStroke;
         if (stroke == null) return;
-        // A recognized shape is frozen under the held pen — ignore further
-        // movement until lift (hold-drag adjust is a later increment).
-        if (_snapped) return;
+        if (_snapped) {
+          _adjustSnappedShape(canvasPos);
+          return;
+        }
         final l = layout.layoutOf(activeStrokePageId!);
         final page = pages[activeStrokePageId!];
         if (l != null && page != null) {
@@ -966,6 +974,9 @@ class CanvasController extends ChangeNotifier {
         }
         _snapped = false;
         _preSnapPoints = null;
+        _snappedFit = null;
+        _adjustAnchor = null;
+        _adjustStart = null;
         _holdAnchorLocal = null;
       case CanvasTool.eraser:
         _commitErase();
@@ -982,6 +993,9 @@ class CanvasController extends ChangeNotifier {
     _holdTimer = null;
     _snapped = false;
     _preSnapPoints = null;
+    _snappedFit = null;
+    _adjustAnchor = null;
+    _adjustStart = null;
     _holdAnchorLocal = null;
     _activeGestureTool = null;
     activeStroke = null;
@@ -1030,10 +1044,41 @@ class CanvasController extends ChangeNotifier {
       return;
     }
     _preSnapPoints = [for (final p in stroke.points) StrokePoint(p.x, p.y, p.p)];
+    _snappedFit = fit;
+    _adjustAnchor = null;
+    final lastPt = stroke.points.last;
+    _adjustStart = Offset(lastPt.x, lastPt.y); // pen pos at snap (page-local)
     stroke.points = pointsForShape(fit);
     stroke.invalidateCache();
     _snapped = true;
     HapticFeedback.mediumImpact();
+    notifyListeners();
+  }
+
+  /// While a shape is snapped and the pen is still down, dragging adjusts it:
+  /// the nearest anchor follows the pen (line endpoint, rect/ellipse via the
+  /// grabbed corner/axis, circle radius). The grab only begins once the pen has
+  /// moved past a small slop from the snap position, so a shape doesn't jump on
+  /// the tiniest jitter.
+  void _adjustSnappedShape(Offset canvasPos) {
+    final fit = _snappedFit;
+    final stroke = activeStroke;
+    if (fit == null || stroke == null) return;
+    final l = layout.layoutOf(activeStrokePageId!);
+    final page = pages[activeStrokePageId!];
+    if (l == null || page == null) return;
+    final p = _clampToPage(canvasPos - l.rect.topLeft, page);
+    if (_adjustAnchor == null) {
+      if (_adjustStart != null &&
+          (p - _adjustStart!).distance < _kAdjustStartSlop) {
+        return; // still within slop — leave the snapped shape untouched
+      }
+      _adjustAnchor = nearestAnchorIndex(fit, _adjustStart ?? p);
+    }
+    final newFit = moveAnchor(fit, _adjustAnchor!, p);
+    _snappedFit = newFit;
+    stroke.points = pointsForShape(newFit);
+    stroke.invalidateCache();
     notifyListeners();
   }
 
