@@ -563,7 +563,19 @@ class SyncService {
 
       var changed = false;
       for (final entry in remote.entries) {
-        if (await _pullFile(as, entry.key, entry.value)) changed = true;
+        // Only pull files that belong to the synced store. `listAllFiles` walks
+        // the whole `omininote/` Drive folder, which also contains the public
+        // `shared/*.omninote` bundles ("send a link") — binary ZIPs that would
+        // blow up `downloadJsonById`'s utf8.decode ("Unexpected extension
+        // byte") if pulled as JSON. The incremental path already gates on this;
+        // the resync loop must too. (Belt-and-suspenders: a per-file try/catch
+        // keeps one unreadable file from aborting the entire resync.)
+        if (!NotebookService.isSyncedRelPath(entry.key)) continue;
+        try {
+          if (await _pullFile(as, entry.key, entry.value)) changed = true;
+        } catch (e) {
+          debugPrint('Sync resync: skipping ${entry.key}: $e');
+        }
       }
       // Push local files this account OWNS that its Drive lacks.
       for (final rel in localPaths) {

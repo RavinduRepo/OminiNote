@@ -46,6 +46,11 @@ class DriveService {
 
   static const _kRootFolderName = 'omininote';
   static const _kAppMimeFolder = 'application/vnd.google-apps.folder';
+  // Public "send a link" bundles live in `omininote/shared/` but are NOT part
+  // of the synced store — they're binary `.omninote` ZIPs, not JSON/assets, so
+  // they must be kept out of the file index and the pull loop (a resync pulling
+  // one as JSON blows up utf8.decode). See [uploadSharedBundle].
+  static const _kSharedFolderName = 'shared';
 
   gd.DriveApi? _api;
   String? _rootFolderId;
@@ -483,6 +488,11 @@ class DriveService {
       if (f.id == null || f.name == null) continue;
       final rel = relPathFor(f);
       if (rel == null) continue;
+      // Skip public share bundles under `omininote/shared/` — not synced data.
+      if (rel == _kSharedFolderName ||
+          rel.startsWith('$_kSharedFolderName/')) {
+        continue;
+      }
       // If two roots hold the same path, keep the one whose head we already
       // track (canonical), else first seen; merge engine handles the rest.
       out.putIfAbsent(

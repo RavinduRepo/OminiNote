@@ -1,3 +1,13 @@
+
+# One command to RULE THEM ALL
+
+```
+powershell -ExecutionPolicy Bypass -File tools\onenote_importer\import_all.ps1
+```
+
+```
+
+
 # OneNote → omininote importer
 
 Recovers notes from OneNote `.onepkg` / `.one` files — ink strokes (with real
@@ -7,10 +17,12 @@ text — and converts them into omininote's on-disk store.
 ## Pipeline
 
 ```
+
 .onepkg ──expand──▶ .one files ──extractor (Rust)──▶ extract.json + assets/
                                        │
                                        ├──▶ preview.html   (visual check)
                                        └──convert.dart──▶ omininote store ──--install──▶ app data dir
+
 ```
 
 ## Requirements

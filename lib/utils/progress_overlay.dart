@@ -2,6 +2,16 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 
+/// App-wide fallback that returns the root navigator's [OverlayState], set once
+/// at startup (see `main.dart`). Used when [ProgressOverlay.show] is handed a
+/// context that has no [Overlay] ancestor — which happens for the global
+/// open-with / share-link callbacks, whose only context is the root
+/// `Navigator`'s own (the Navigator sits *above* the Overlay it hosts, so
+/// `Overlay.of` there throws "No Overlay widget found"). Without this the
+/// notebook import from an opened `.omninote` file / `omninote://` link crashed
+/// before it ever started.
+OverlayState? Function()? progressOverlayFallback;
+
 /// A small, non-modal **floating** progress indicator — a filling ring pinned
 /// to the bottom-right of the screen via the **root [Overlay]**. Unlike the old
 /// top `MaterialBanner`, it never shifts page layout and it stays put as you
@@ -11,20 +21,28 @@ class ProgressOverlay {
   final OverlayEntry _entry;
   final ValueNotifier<double?> _fraction; // null = indeterminate (spinning)
   final ValueNotifier<String> _label;
+  final bool _inserted;
   bool _closed = false;
 
-  ProgressOverlay._(this._entry, this._fraction, this._label);
+  ProgressOverlay._(this._entry, this._fraction, this._label,
+      {bool inserted = true})
+      : _inserted = inserted;
 
   /// Inserts the indicator into the root overlay. Grab the handle to [report]
-  /// progress and [close] it when the task finishes (or fails).
+  /// progress and [close] it when the task finishes (or fails). If no overlay
+  /// can be resolved (context has none *and* no [progressOverlayFallback] is
+  /// registered), the handle is a harmless no-op — a missing progress ring must
+  /// never break the task it was tracking.
   static ProgressOverlay show(BuildContext context, String label) {
     final fraction = ValueNotifier<double?>(null);
     final lbl = ValueNotifier<String>(label);
     final entry = OverlayEntry(
       builder: (context) => _ProgressWidget(fraction: fraction, label: lbl),
     );
-    Overlay.of(context, rootOverlay: true).insert(entry);
-    return ProgressOverlay._(entry, fraction, lbl);
+    final overlay = Overlay.maybeOf(context, rootOverlay: true) ??
+        progressOverlayFallback?.call();
+    overlay?.insert(entry);
+    return ProgressOverlay._(entry, fraction, lbl, inserted: overlay != null);
   }
 
   /// [fraction] in 0..1 (null = indeterminate); optional new [label].
@@ -37,7 +55,7 @@ class ProgressOverlay {
   void close() {
     if (_closed) return;
     _closed = true;
-    _entry.remove();
+    if (_inserted) _entry.remove();
     _fraction.dispose();
     _label.dispose();
   }
