@@ -11,7 +11,7 @@
 library;
 
 import 'dart:math' as math;
-import 'dart:ui' show Offset;
+import 'dart:ui' show Offset, Rect;
 
 import '../models/element.dart' show StrokePoint;
 
@@ -283,6 +283,124 @@ ShapeFit? _fitCurve(List<Offset> rs, List<int> corners) {
   if (ctrl.length < 3) return null; // a near-straight curve is just a line
   // Modest, fixed confidence: a smooth open stroke that isn't a line.
   return ShapeFit.curve(ctrl, 0.6);
+}
+
+// ── Shape tool (drag-to-draw a chosen kind) ──────────────────────────────────
+
+/// The predefined kinds the Shapes tool can draw. Persisted device-local as the
+/// last-used kind (`SettingsService.shapeToolKind`).
+enum ShapeToolKind {
+  line,
+  arrow,
+  rectangle,
+  ellipse,
+  triangle,
+  diamond,
+  pentagon,
+  hexagon,
+  star,
+}
+
+/// Builds a [ShapeFit] for the Shapes tool from a drag between [a] (anchor) and
+/// [b] (current pointer). [constrain] (Shift) squares the bounding box — circle,
+/// square, 45°-snapped line, regular polygon. Reuses [pointsForShape] for the
+/// actual points, so the tool and hold-to-snap render identically.
+ShapeFit shapeToolFit(ShapeToolKind kind, Offset a, Offset b,
+    {bool constrain = false}) {
+  // Square the box when constrained (keeps the drag direction).
+  Offset b2 = b;
+  if (constrain && kind != ShapeToolKind.line && kind != ShapeToolKind.arrow) {
+    final dx = b.dx - a.dx, dy = b.dy - a.dy;
+    final s = math.max(dx.abs(), dy.abs());
+    b2 = Offset(a.dx + (dx.isNegative ? -s : s), a.dy + (dy.isNegative ? -s : s));
+  }
+  final rect = Rect.fromPoints(a, b2);
+  final c = rect.center;
+  final hw = rect.width / 2, hh = rect.height / 2;
+
+  Offset onBox(double ux, double uy) => Offset(c.dx + ux * hw, c.dy + uy * hh);
+  // Regular n-gon (or n-point star when [inner] > 0) inscribed in the box,
+  // pointing up. Vertices are evenly spaced on the unit circle then mapped onto
+  // the box so a non-square drag stretches the shape to fit.
+  List<Offset> ngon(int n, {double inner = 0}) {
+    final count = inner > 0 ? n * 2 : n;
+    const start = -math.pi / 2; // top
+    return [
+      for (var i = 0; i < count; i++)
+        () {
+          final r = (inner > 0 && i.isOdd) ? inner : 1.0;
+          final ang = start + i * 2 * math.pi / count;
+          return onBox(r * math.cos(ang), r * math.sin(ang));
+        }()
+    ];
+  }
+
+  switch (kind) {
+    case ShapeToolKind.line:
+      final verts = constrain ? _snapLineAngle(a, b) : [a, b];
+      return ShapeFit.polyline(ShapeKind.line, verts, 1);
+    case ShapeToolKind.arrow:
+      final end = constrain ? _snapLineAngle(a, b)[1] : b;
+      return ShapeFit.polyline(ShapeKind.arrow, _arrowVerts(a, end), 1);
+    case ShapeToolKind.rectangle:
+      return ShapeFit.polyline(
+        ShapeKind.rectangle,
+        [rect.topLeft, rect.topRight, rect.bottomRight, rect.bottomLeft],
+        1,
+      );
+    case ShapeToolKind.ellipse:
+      return ShapeFit.ellipse(
+        center: c,
+        rx: hw.abs(),
+        ry: hh.abs(),
+        rotation: 0,
+        confidence: 1,
+        circle: (hw - hh).abs() < 0.5,
+      );
+    case ShapeToolKind.triangle:
+      return ShapeFit.polyline(
+        ShapeKind.triangle,
+        [
+          Offset(c.dx, rect.top),
+          Offset(rect.right, rect.bottom),
+          Offset(rect.left, rect.bottom),
+        ],
+        1,
+      );
+    case ShapeToolKind.diamond:
+      return ShapeFit.polyline(
+        ShapeKind.polygon,
+        [
+          Offset(c.dx, rect.top),
+          Offset(rect.right, c.dy),
+          Offset(c.dx, rect.bottom),
+          Offset(rect.left, c.dy),
+        ],
+        1,
+      );
+    case ShapeToolKind.pentagon:
+      return ShapeFit.polyline(ShapeKind.polygon, ngon(5), 1);
+    case ShapeToolKind.hexagon:
+      return ShapeFit.polyline(ShapeKind.polygon, ngon(6), 1);
+    case ShapeToolKind.star:
+      return ShapeFit.polyline(ShapeKind.polygon, ngon(5, inner: 0.45), 1);
+  }
+}
+
+List<Offset> _arrowVerts(Offset a, Offset b) {
+  final v = b - a;
+  final len = v.distance;
+  if (len == 0) return [a, b];
+  final ux = v.dx / len, uy = v.dy / len;
+  final head = math.min(len * 0.28, 26.0); // barb length
+  const spread = 0.42; // radians off the shaft
+  final cosS = math.cos(spread), sinS = math.sin(spread);
+  // Barb directions point back from the tip.
+  final l = Offset(-ux * cosS + uy * sinS, -uy * cosS - ux * sinS);
+  final r = Offset(-ux * cosS - uy * sinS, -uy * cosS + ux * sinS);
+  final barbL = Offset(b.dx + l.dx * head, b.dy + l.dy * head);
+  final barbR = Offset(b.dx + r.dx * head, b.dy + r.dy * head);
+  return [a, b, barbL, b, barbR];
 }
 
 // ── Hold-drag adjust (pure) ──────────────────────────────────────────────────

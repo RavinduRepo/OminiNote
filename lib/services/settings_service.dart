@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../models/canvas_page.dart';
 
 /// Which navigation shell to show. [auto] picks based on window width (see
@@ -61,6 +62,15 @@ class SettingsService {
   Future<void> setShapeSnap(bool value) async {
     if (shapeSnap == value) return;
     shapeSnap = value;
+    await _persist();
+  }
+
+  /// Last-used kind for the Shapes tool (device-local).
+  ShapeToolKind shapeToolKind = ShapeToolKind.rectangle;
+
+  Future<void> setShapeToolKind(ShapeToolKind kind) async {
+    if (shapeToolKind == kind) return;
+    shapeToolKind = kind;
     await _persist();
   }
 
@@ -202,6 +212,10 @@ class SettingsService {
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
+    shapeToolKind = ShapeToolKind.values.firstWhere(
+      (k) => k.name == data['shapeToolKind'],
+      orElse: () => ShapeToolKind.rectangle,
+    );
     eraserPartial = data['eraserPartial'] == true;
     eraserSize = (data['eraserSize'] as num?)?.toDouble() ?? 10.0;
     inkAdjustPen = data['inkAdjustPen'] != false; // default true
@@ -322,6 +336,7 @@ class SettingsService {
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
+        'shapeToolKind': shapeToolKind.name,
         'eraserPartial': eraserPartial,
         'eraserSize': eraserSize,
         'inkAdjustPen': inkAdjustPen,

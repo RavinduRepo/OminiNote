@@ -18,6 +18,7 @@ import '../utils/url_text.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
+import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../canvas/text_measure.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
@@ -2477,6 +2478,7 @@ class _TextEditSession {
 const List<CanvasTool> kCanvasToolOrder = [
   CanvasTool.pen,
   CanvasTool.highlighter,
+  CanvasTool.shape,
   CanvasTool.eraser,
   CanvasTool.lasso,
   CanvasTool.text,
@@ -2496,6 +2498,7 @@ const List<Color> _presetColors = [
 IconData _iconForTool(CanvasTool tool) => switch (tool) {
   CanvasTool.pen => Icons.draw_outlined,
   CanvasTool.highlighter => Icons.highlight_outlined,
+  CanvasTool.shape => Icons.category_outlined,
   CanvasTool.eraser => Icons.auto_fix_normal_outlined,
   CanvasTool.lasso => Icons.gesture,
   CanvasTool.text => Icons.text_fields,
@@ -2504,6 +2507,7 @@ IconData _iconForTool(CanvasTool tool) => switch (tool) {
 String _labelForTool(CanvasTool tool) => switch (tool) {
   CanvasTool.pen => 'Pen',
   CanvasTool.highlighter => 'Highlighter',
+  CanvasTool.shape => 'Shapes',
   CanvasTool.eraser => 'Eraser',
   CanvasTool.lasso => 'Lasso select',
   CanvasTool.text => 'Text',
@@ -2537,6 +2541,8 @@ Widget? _buildToolContextRow(
     case CanvasTool.pen:
     case CanvasTool.highlighter:
       return _buildPenOptionsRow(context, c, palette);
+    case CanvasTool.shape:
+      return _buildShapeOptionsRow(context, c, palette);
     case CanvasTool.eraser:
       return _buildEraserOptionsRow(context, c, palette);
     case CanvasTool.lasso:
@@ -2544,6 +2550,88 @@ Widget? _buildToolContextRow(
       return _buildLassoActionRow(context, c, palette);
     case CanvasTool.text:
       return _buildTextStyleRow(context, c, palette);
+  }
+}
+
+const Map<ShapeToolKind, IconData> _shapeKindIcons = {
+  ShapeToolKind.line: Icons.horizontal_rule,
+  ShapeToolKind.arrow: Icons.north_east,
+  ShapeToolKind.rectangle: Icons.crop_square,
+  ShapeToolKind.ellipse: Icons.circle_outlined,
+  ShapeToolKind.triangle: Icons.change_history,
+  ShapeToolKind.diamond: Icons.diamond_outlined,
+  ShapeToolKind.pentagon: Icons.pentagon_outlined,
+  ShapeToolKind.hexagon: Icons.hexagon_outlined,
+  ShapeToolKind.star: Icons.star_outline,
+};
+
+/// The Shapes tool options: a kind picker (line/rect/ellipse/…) plus the pen
+/// color/size (drawn shapes use the pen's ink), so one place controls the whole
+/// tool. Shown on a re-tap of the active Shapes tool.
+Widget _buildShapeOptionsRow(
+  BuildContext context,
+  CanvasController c,
+  AppPalette palette,
+) {
+  return Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final entry in _shapeKindIcons.entries)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: _ShapeKindButton(
+                  icon: entry.value,
+                  selected: c.shapeToolKind == entry.key,
+                  onTap: () => c.setShapeToolKind(entry.key),
+                  palette: palette,
+                ),
+              ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 6),
+      _buildPenOptionsRow(context, c, palette),
+    ],
+  );
+}
+
+class _ShapeKindButton extends StatelessWidget {
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  final AppPalette palette;
+  const _ShapeKindButton({
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+    required this.palette,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          color: selected ? palette.accent.withValues(alpha: 0.16) : null,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected ? palette.accent : palette.border,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Icon(icon,
+            size: 20, color: selected ? palette.accent : palette.textDim),
+      ),
+    );
   }
 }
 

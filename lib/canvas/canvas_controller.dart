@@ -22,7 +22,7 @@ import 'rich_text_controller.dart';
 import 'text_measure.dart';
 
 /// The active tool on the canvas.
-enum CanvasTool { pen, highlighter, eraser, lasso, text }
+enum CanvasTool { pen, highlighter, eraser, lasso, text, shape }
 
 /// What a pointer drag over the current selection does.
 enum SelectionHit { none, move, resizeTL, resizeTR, resizeBL, resizeBR, rotate }
@@ -769,6 +769,18 @@ class CanvasController extends ChangeNotifier {
   Offset? _adjustStart; // pen pos at snap; adjust begins once it moves past slop
   int? _adjustAnchor; // grabbed anchor once adjusting
 
+  // ── Shapes tool (drag-to-draw a chosen kind) ────────────────────────────
+  /// Last-used shape kind for the Shapes tool (persisted device-local).
+  ShapeToolKind shapeToolKind = SettingsService().shapeToolKind;
+  Offset? _shapeStartLocal; // drag anchor (page-local) for the shapes tool
+
+  void setShapeToolKind(ShapeToolKind kind) {
+    if (shapeToolKind == kind) return;
+    shapeToolKind = kind;
+    SettingsService().setShapeToolKind(kind);
+    notifyListeners();
+  }
+
   /// True while a recognized shape is being previewed under the held pen — the
   /// screen suppresses its own tap handling for that pointer-up.
   bool get isShapeSnapped => _snapped;
@@ -890,6 +902,22 @@ class CanvasController extends ChangeNotifier {
         _activeGestureTool = CanvasTool.lasso;
         notifyListeners();
         return true;
+      case CanvasTool.shape:
+        final p = _clampToPage(local, page);
+        activeStrokePageId = page.id;
+        _shapeStartLocal = p;
+        activeStroke = StrokeElement(
+          id: newModelId('el'),
+          deviceId: SettingsService().deviceId,
+          z: '0|a0:',
+          tool: StrokeTool.pen,
+          color: penColor,
+          size: penSize,
+          points: [StrokePoint(p.dx, p.dy, 0.5)],
+        );
+        _activeGestureTool = CanvasTool.shape;
+        notifyListeners();
+        return true;
       case CanvasTool.text:
         // Text placement happens on pointer-up (tap) in the screen widget.
         return false;
@@ -940,6 +968,21 @@ class CanvasController extends ChangeNotifier {
           lasso.add(canvasPos - l.rect.topLeft);
           notifyListeners();
         }
+      case CanvasTool.shape:
+        final stroke = activeStroke;
+        final start = _shapeStartLocal;
+        if (stroke == null || start == null) return;
+        final l = layout.layoutOf(activeStrokePageId!);
+        final page = pages[activeStrokePageId!];
+        if (l == null || page == null) return;
+        final p = _clampToPage(canvasPos - l.rect.topLeft, page);
+        final shift = HardwareKeyboard.instance.logicalKeysPressed.any((k) =>
+            k == LogicalKeyboardKey.shiftLeft ||
+            k == LogicalKeyboardKey.shiftRight);
+        stroke.points =
+            pointsForShape(shapeToolFit(shapeToolKind, start, p, constrain: shift));
+        stroke.invalidateCache();
+        notifyListeners();
       case CanvasTool.text:
       case null:
         return;
@@ -982,6 +1025,23 @@ class CanvasController extends ChangeNotifier {
         _commitErase();
       case CanvasTool.lasso:
         _finishLasso();
+      case CanvasTool.shape:
+        final stroke = activeStroke;
+        final pageId = activeStrokePageId;
+        final start = _shapeStartLocal;
+        activeStroke = null;
+        activeStrokePageId = null;
+        _shapeStartLocal = null;
+        // A click with no drag (start ≈ end) makes no shape — discard it.
+        if (stroke == null || pageId == null || start == null) {
+          notifyListeners();
+          return;
+        }
+        if (stroke.points.length > 1) {
+          _doOp(_addElementsOp('Shape', pageId, [stroke]));
+        } else {
+          notifyListeners();
+        }
       case CanvasTool.text:
       case null:
         return;
@@ -997,6 +1057,7 @@ class CanvasController extends ChangeNotifier {
     _adjustAnchor = null;
     _adjustStart = null;
     _holdAnchorLocal = null;
+    _shapeStartLocal = null;
     _activeGestureTool = null;
     activeStroke = null;
     activeStrokePageId = null;

@@ -162,6 +162,45 @@ void main() {
     });
   });
 
+  group('shapeToolFit (drag-to-draw)', () {
+    test('rectangle spans the drag box', () {
+      final fit = shapeToolFit(
+          ShapeToolKind.rectangle, const Offset(10, 20), const Offset(110, 90));
+      expect(fit.kind, ShapeKind.rectangle);
+      final xs = fit.vertices.map((v) => v.dx);
+      final ys = fit.vertices.map((v) => v.dy);
+      expect(xs.reduce(math.min), 10);
+      expect(xs.reduce(math.max), 110);
+      expect(ys.reduce(math.min), 20);
+      expect(ys.reduce(math.max), 90);
+    });
+
+    test('constrained ellipse becomes a circle (square box)', () {
+      final fit = shapeToolFit(
+          ShapeToolKind.ellipse, const Offset(0, 0), const Offset(100, 40),
+          constrain: true);
+      expect(fit.kind, ShapeKind.circle);
+      expect(fit.rx, closeTo(fit.ry, 0.5));
+    });
+
+    test('pentagon has five vertices, star has ten', () {
+      final pent = shapeToolFit(
+          ShapeToolKind.pentagon, const Offset(0, 0), const Offset(100, 100));
+      expect(pent.vertices.length, 5);
+      final star = shapeToolFit(
+          ShapeToolKind.star, const Offset(0, 0), const Offset(100, 100));
+      expect(star.vertices.length, 10);
+    });
+
+    test('every kind yields drawable points', () {
+      for (final k in ShapeToolKind.values) {
+        final pts = pointsForShape(
+            shapeToolFit(k, const Offset(0, 0), const Offset(120, 80)));
+        expect(pts.length, greaterThan(2), reason: '$k');
+      }
+    });
+  });
+
   group('anchors (hold-drag adjust)', () {
     test('line: nearest anchor is the closer endpoint; moving it follows', () {
       final line = ShapeFit.polyline(
