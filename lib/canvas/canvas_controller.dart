@@ -841,18 +841,21 @@ class CanvasController extends ChangeNotifier {
     shapeToolTemplate = null;
     shapeToolKind = kind;
     SettingsService().setShapeToolKind(kind);
-    if (changed) notifyListeners();
+    // notifyRepaint bumps chromeContentTick so the (narrow-listening) shape
+    // options popover refreshes its selected-kind highlight immediately —
+    // a plain notifyListeners() wouldn't reach it.
+    if (changed) notifyRepaint();
   }
 
   void setShapeToolTemplate(ShapeTemplate? t) {
     shapeToolTemplate = t;
-    notifyListeners();
+    notifyRepaint();
   }
 
   Future<void> deleteShapeTemplate(String id) async {
     if (shapeToolTemplate?.id == id) shapeToolTemplate = null;
     await SettingsService().removeShapeTemplate(id);
-    notifyListeners();
+    notifyRepaint();
   }
 
   bool get selectionIsStrokesOnly =>

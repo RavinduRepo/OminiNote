@@ -2189,6 +2189,62 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
   }
 
+  /// Mobile top bar: like the desktop toolbar, the name is a fixed box on the
+  /// left (always visible) and the controls live in a right-aligned,
+  /// horizontally-scrollable row — so a long name never hides and promoted
+  /// tools scroll instead of overflowing.
+  Widget _buildMobileToolbar(
+      BuildContext context, CanvasController c, AppPalette palette) {
+    final s = SettingsService();
+    return Row(
+      children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 130),
+          child: Text(
+            widget.canvas.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: AdaptiveToolbarRow(
+            children: [
+              const SyncStatusIcon(),
+              ListenableBuilder(
+                listenable: c,
+                builder: (context, _) => Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.undo),
+                      tooltip: 'Undo',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: c.canUndo ? c.undo : null,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.redo),
+                      tooltip: 'Redo',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: c.canRedo ? c.redo : null,
+                    ),
+                  ],
+                ),
+              ),
+              for (final id in s.promotedAddActionsMobile)
+                _buildPromotedButton(id),
+              for (final id in s.promotedOverflowActionsMobile)
+                _buildPromotedButton(id),
+              _buildAddButton(context),
+              _buildOverflowMenu(context),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildDesktopToolbar(
       BuildContext context, CanvasController c, AppPalette palette) {
     final s = SettingsService();
@@ -2305,59 +2361,28 @@ class _CanvasScreenState extends State<CanvasScreen> {
     return Scaffold(
       backgroundColor: palette.canvas,
       appBar: AppBar(
-        titleSpacing: mobile ? null : 0,
+        titleSpacing: 0,
+        // Mobile keeps the automatic back button (pushed as its own route);
+        // desktop is embedded, no leading.
         automaticallyImplyLeading: mobile,
-        title: mobile ? Text(widget.canvas.name) : null,
-        // Desktop: the whole toolbar goes in flexibleSpace (full pane width)
-        // rather than the narrower `title` slot, so its right-aligned tools
-        // reach the right edge instead of leaving dead space.
-        flexibleSpace: mobile
-            ? null
-            : SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: _buildDesktopToolbar(context, c, palette),
-                    ),
-                  ),
-                ),
+        title: null,
+        // Both layouts render the whole toolbar in flexibleSpace (full width)
+        // so the name stays fixed on the left and the controls scroll /
+        // right-align on the right. Mobile pads left to clear the back button.
+        flexibleSpace: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(left: mobile ? 52 : 10, right: 10),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: double.infinity,
+                child: mobile
+                    ? _buildMobileToolbar(context, c, palette)
+                    : _buildDesktopToolbar(context, c, palette),
               ),
-        actions: mobile
-            ? [
-                const SyncStatusIcon(),
-                ListenableBuilder(
-                  listenable: c,
-                  builder: (context, _) => Row(
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.undo),
-                        tooltip: 'Undo',
-                        onPressed: c.canUndo ? c.undo : null,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.redo),
-                        tooltip: 'Redo',
-                        onPressed: c.canRedo ? c.redo : null,
-                      ),
-                    ],
-                  ),
-                ),
-                // Promoted actions the user opted into via "Customize
-                // toolbar…" — empty by default, so existing users see no
-                // change here until they promote something.
-                for (final id in SettingsService().promotedAddActionsMobile)
-                  _buildPromotedButton(id),
-                for (final id
-                    in SettingsService().promotedOverflowActionsMobile)
-                  _buildPromotedButton(id),
-                _buildAddButton(context),
-                _buildOverflowMenu(context),
-                const SizedBox(width: 4),
-              ]
-            : null,
+            ),
+          ),
+        ),
       ),
       body: Column(
         children: [
