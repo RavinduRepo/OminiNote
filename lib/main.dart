@@ -128,6 +128,13 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   }
 
   void _handleDesktopOpen(String item) {
+    // Linux (%U) and macOS (open urls) may deliver local files as file:// URIs
+    // rather than plain paths — File() can't open those, so convert first.
+    if (item.startsWith('file://')) {
+      try {
+        item = Uri.parse(item).toFilePath();
+      } catch (_) {}
+    }
     if (item.startsWith('omninote://')) {
       _handleLink(item);
     } else if (item.toLowerCase().endsWith('.pdf')) {

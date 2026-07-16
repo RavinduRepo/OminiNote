@@ -48,6 +48,13 @@ Root: HKCU; Subkey: "Software\Classes\.omninote"; ValueType: string; ValueData: 
 Root: HKCU; Subkey: "Software\Classes\OminiNote.Notebook"; ValueType: string; ValueData: "OminiNote Notebook"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\OminiNote.Notebook\DefaultIcon"; ValueType: string; ValueData: "{app}\{#AppExe},0"
 Root: HKCU; Subkey: "Software\Classes\OminiNote.Notebook\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""
+; PDF "Open with" candidate (OpenWithProgids only — never claims the .pdf
+; default, so the user's PDF viewer stays in charge; OminiNote just appears
+; in the Open-with list and imports the PDF as a canvas when picked)
+Root: HKCU; Subkey: "Software\Classes\OminiNote.PDF"; ValueType: string; ValueData: "PDF document (OminiNote)"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\OminiNote.PDF\DefaultIcon"; ValueType: string; ValueData: "{app}\{#AppExe},0"
+Root: HKCU; Subkey: "Software\Classes\OminiNote.PDF\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExe}"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: string; ValueName: "OminiNote.PDF"; ValueData: ""; Flags: uninsdeletevalue
 ; omninote:// URL scheme
 Root: HKCU; Subkey: "Software\Classes\omninote"; ValueType: string; ValueData: "URL:OminiNote Protocol"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\omninote"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""

@@ -79,7 +79,7 @@ Terminal=false
 Categories=Office;Graphics;
 StartupWMClass=$APP_NAME
 Keywords=notes;stylus;drawing;pdf;
-MimeType=application/x-omninote;x-scheme-handler/omninote;
+MimeType=application/x-omninote;x-scheme-handler/omninote;application/pdf;
 EOF
 
 refresh_databases

@@ -36,9 +36,12 @@ class AppDelegate: FlutterAppDelegate {
     super.applicationDidFinishLaunching(notification)
   }
 
-  // omninote:// share links.
+  // omninote:// share links — and, on modern macOS, file opens too (AppKit
+  // prefers this over openFiles when both are implemented). A file URL must be
+  // forwarded as a plain path: the Dart side does File(path).readAsBytes(),
+  // which can't open a file:// URI string.
   override func application(_ application: NSApplication, open urls: [URL]) {
-    for url in urls { enqueueOpen(url.absoluteString) }
+    for url in urls { enqueueOpen(url.isFileURL ? url.path : url.absoluteString) }
   }
 
   // Double-clicked / "Open with" .omninote files.
