@@ -1,0 +1,51 @@
+import 'package:flutter/material.dart';
+
+/// Describes one customizable app-bar action for the "Customize toolbar"
+/// sheet's pickable-item list — icon/label only (display metadata). The
+/// actual live button (which may show a different icon/label depending on
+/// state, e.g. the shape-snap checkbox glyph) is built by the host screen's
+/// own per-id dispatch, not from this spec.
+class ToolbarActionSpec {
+  final String id;
+  final IconData icon;
+  final String label;
+  const ToolbarActionSpec(this.id, this.icon, this.label);
+}
+
+/// Customizable actions that originate from the "+" (Add) menu. Conditional-
+/// existence items ('camera' — mobile-only; 'pastePage' — only when a page
+/// is on the clipboard) are deliberately excluded: promoting something that
+/// might not exist on this platform/moment to a fixed bar slot isn't a good
+/// fit, so they always stay inside the "+" menu.
+const List<ToolbarActionSpec> kAddActionSpecs = [
+  ToolbarActionSpec('blank', Icons.note_add_outlined, 'Add page'),
+  ToolbarActionSpec('horizontal', Icons.swap_horiz, 'Horizontal page'),
+  ToolbarActionSpec('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
+  ToolbarActionSpec('image', Icons.image_outlined, 'Insert image'),
+  ToolbarActionSpec('paste', Icons.content_paste, 'Paste'),
+];
+
+/// Customizable actions that originate from the "⋯" (overflow) menu.
+const List<ToolbarActionSpec> kOverflowActionSpecs = [
+  ToolbarActionSpec('fullscreen', Icons.fullscreen, 'Full screen'),
+  ToolbarActionSpec('toggle_toolbar', Icons.brush_outlined, 'Show/hide tools'),
+  ToolbarActionSpec('rename', Icons.edit_outlined, 'Rename'),
+  ToolbarActionSpec('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
+  ToolbarActionSpec('navigator', Icons.grid_view_outlined, 'Pages'),
+  ToolbarActionSpec('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+  ToolbarActionSpec('attachments', Icons.attach_file, 'Attachments'),
+  ToolbarActionSpec(
+      'page_settings', Icons.description_outlined, 'Page settings'),
+  ToolbarActionSpec('shape_snap', Icons.check_box_outlined, 'Snap drawn shapes'),
+  ToolbarActionSpec('finger_draw', Icons.check_box_outlined, 'Draw with finger'),
+];
+
+ToolbarActionSpec? findActionSpec(String id) {
+  for (final s in kAddActionSpecs) {
+    if (s.id == id) return s;
+  }
+  for (final s in kOverflowActionSpecs) {
+    if (s.id == id) return s;
+  }
+  return null;
+}

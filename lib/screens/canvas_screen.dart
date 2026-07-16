@@ -18,9 +18,7 @@ import '../utils/url_text.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
-import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../canvas/text_measure.dart';
-import '../models/shape_template.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
@@ -32,8 +30,14 @@ import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/action_sheet.dart';
-import '../widgets/color_wheel_picker.dart';
 import '../widgets/sync_status_icon.dart';
+import 'canvas_toolbar/adaptive_toolbar_row.dart';
+import 'canvas_toolbar/canvas_chrome_shared.dart';
+import 'canvas_toolbar/customize_toolbar_sheet.dart';
+import 'canvas_toolbar/lasso_floating_menu.dart';
+import 'canvas_toolbar/text_bottom_bar.dart';
+import 'canvas_toolbar/tool_option_rows.dart';
+import 'canvas_toolbar/tool_options_popover.dart';
 import 'page_organizer.dart';
 
 /// The Canvas: a freely pannable/zoomable surface of pages (blank or
@@ -463,7 +467,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     // An open text editor: taps inside it belong to the TextField (caret
     // placement); taps outside commit it — then fall through as a normal
-    // canvas interaction.
+    // canvas interaction. In the Text tool specifically, the commit is
+    // deferred to pointer-up instead: a tap that lands on a *different*
+    // existing text box commits the old one and starts the new one together
+    // in one synchronous call (_handleTextTap), so a bottom bar reflecting
+    // the edit session never disappears for a frame in between. Any other
+    // tool switching away still commits immediately here (matches the
+    // TextField's own onTapOutside behavior for toolbar taps).
     final session = _textEdit;
     if (session != null) {
       final editorRect = c
@@ -473,7 +483,15 @@ class _CanvasScreenState extends State<CanvasScreen> {
         _pointerInTextEditor = true; // swallow the matching pointer-up too
         return;
       }
-      _commitTextEdit();
+      // A stylus touching down is about to auto-switch the tool away from
+      // Text (below) — commit immediately rather than defer, or the session
+      // would be orphaned open once the tool is no longer Text by the time
+      // pointer-up's fallback check runs.
+      final stylusAutoSwitch = e.kind == PointerDeviceKind.stylus ||
+          e.kind == PointerDeviceKind.invertedStylus;
+      if (c.tool != CanvasTool.text || stylusAutoSwitch) {
+        _commitTextEdit();
+      }
     }
     _downPosition = e.localPosition;
 
@@ -560,6 +578,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     final moved = down != null && (e.localPosition - down).distance >= 10;
 
+    // A deferred text-edit commit (see _onPointerDown): this turned into a
+    // drag/pan rather than a tap, so resolve it now — only a genuine tap
+    // that lands on a different existing text box gets the flicker-free
+    // commit-then-start treatment inside _handleTextTap.
+    if (moved && c.tool == CanvasTool.text && _textEdit != null) {
+      _commitTextEdit();
+    }
+
     if (_toolGestureActive) {
       _toolGestureActive = false;
 
@@ -592,6 +618,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
       // the drawn ☐/☑ is the affordance, like a link's blue underline.
       final cb = _checkboxAt(e.localPosition);
       if (cb != null) {
+        // A deferred text-edit commit (see _onPointerDown) isn't resolved by
+        // this branch — do it now rather than leave the old session open.
+        if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
         c.toggleCheckboxAt(cb.$1, cb.$2.id, cb.$3);
         return;
       }
@@ -599,6 +628,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       // underlined text is the affordance). Tapping elsewhere falls through.
       final url = _urlAt(e.localPosition);
       if (url != null) {
+        if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
         _openUrl(url);
         return;
       }
@@ -607,6 +637,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
         // otherwise edit an existing box / create a new one.
         final att = _attachmentAt(e.localPosition);
         if (att != null) {
+          if (_textEdit != null) _commitTextEdit();
           _openAttachment(att);
           return;
         }
@@ -809,7 +840,33 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   // ── Text tool ────────────────────────────────────────────────────────
 
+  /// Hit-tests for an existing [TextElement] under [screenPos] — shared by
+  /// [_handleTextTap] (edit vs. create) and nothing else; kept as its own
+  /// function so the hit-test logic has one home.
+  TextElement? _textElementAt(Offset screenPos) {
+    final c = _controller!;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return null;
+    final page = c.pages[pageLayout.pageId]!;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    for (final el in [...page.strokes, ...page.objects].reversed) {
+      if (el is TextElement && el.rect.inflate(4).contains(local)) return el;
+    }
+    return null;
+  }
+
   void _handleTextTap(Offset screenPos) {
+    // Retargeting from one existing text box straight to another: commit the
+    // old one and start the new one together in this single synchronous
+    // call, so a bottom bar reflecting the edit session never disappears for
+    // a frame in between (a tap that instead lands on empty canvas/a
+    // checkbox/a link/an attachment already committed the old session
+    // earlier — in _onPointerDown/_onPointerUp — where a single immediate
+    // hide is correct).
+    if (_textEdit != null) {
+      _commitTextEdit();
+    }
     final c = _controller!;
     final canvasPos = c.screenToCanvas(screenPos);
     final pageLayout = c.layout.pageAt(canvasPos);
@@ -818,11 +875,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final local = canvasPos - pageLayout.rect.topLeft;
 
     // Tap an existing text element → edit it.
-    for (final el in [...page.strokes, ...page.objects].reversed) {
-      if (el is TextElement && el.rect.inflate(4).contains(local)) {
-        _startTextEdit(page.id, el, isNew: false);
-        return;
-      }
+    final existing = _textElementAt(screenPos);
+    if (existing != null) {
+      _startTextEdit(page.id, existing, isNew: false);
+      return;
     }
 
     // Otherwise drop a new (auto-sizing) text box at the tap point.
@@ -1028,63 +1084,96 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// when embedded in the desktop split-view. `embedded` is the exact signal.
   bool _useMobileMenus(BuildContext context) => !widget.embedded;
 
+  /// Every overflow action **not** already promoted to the app bar (see
+  /// `_buildDesktopToolbar`/mobile actions) shows up here instead — an item
+  /// lives in exactly one place at a time.
   Widget _buildOverflowMenu(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
-    if (_useMobileMenus(context)) {
+    final mobile = _useMobileMenus(context);
+    final promoted = mobile
+        ? SettingsService().promotedOverflowActionsMobile
+        : SettingsService().promotedOverflowActionsDesktop;
+    bool shown(String id) => !promoted.contains(id);
+
+    if (mobile) {
       return IconButton(
         icon: Icon(Icons.more_vert, color: palette.textDim),
         tooltip: 'More',
         onPressed: () => showActionSheet(context, items: [
+          if (shown('fullscreen'))
+            ActionSheetItem(
+                icon: Icons.fullscreen,
+                label: 'Full screen',
+                onTap: _toggleFullScreen),
+          if (shown('toggle_toolbar'))
+            ActionSheetItem(
+                icon: _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+                label: _showToolbar ? 'Hide tools' : 'Show tools',
+                onTap: () => setState(() => _showToolbar = !_showToolbar)),
+          if (shown('rename'))
+            ActionSheetItem(
+                icon: Icons.edit_outlined,
+                label: 'Rename',
+                onTap: _renameCanvas),
+          if (shown('export'))
+            ActionSheetItem(
+                icon: Icons.picture_as_pdf_outlined,
+                label: 'Export PDF',
+                onTap: _exportPdf),
+          if (shown('navigator'))
+            ActionSheetItem(
+                icon: Icons.grid_view_outlined,
+                label: 'Pages',
+                onTap: _showNavigator),
+          if (shown('bookmarks'))
+            ActionSheetItem(
+                icon: Icons.bookmark_border,
+                label: 'Bookmarks',
+                onTap: _showBookmarks),
+          if (shown('attachments'))
+            ActionSheetItem(
+                icon: Icons.attach_file,
+                label: 'Attachments',
+                onTap: _showAttachments),
+          if (shown('page_settings'))
+            ActionSheetItem(
+                icon: Icons.description_outlined,
+                label: 'Page settings',
+                onTap: _showPageSettings),
+          if (shown('shape_snap'))
+            ActionSheetItem(
+                icon: SettingsService().shapeSnap
+                    ? Icons.check_box_outlined
+                    : Icons.check_box_outline_blank,
+                label: 'Snap drawn shapes',
+                onTap: _toggleShapeSnap),
+          if (shown('finger_draw'))
+            ActionSheetItem(
+                icon: SettingsService().fingerDraw
+                    ? Icons.check_box_outlined
+                    : Icons.check_box_outline_blank,
+                label: 'Draw with finger',
+                onTap: _toggleFingerDraw),
           ActionSheetItem(
-              icon: Icons.fullscreen,
-              label: 'Full screen',
-              onTap: _toggleFullScreen),
-          ActionSheetItem(
-              icon: _showToolbar ? Icons.expand_less : Icons.brush_outlined,
-              label: _showToolbar ? 'Hide tools' : 'Show tools',
-              onTap: () => setState(() => _showToolbar = !_showToolbar)),
-          ActionSheetItem(
-              icon: Icons.edit_outlined,
-              label: 'Rename',
-              onTap: _renameCanvas),
-          ActionSheetItem(
-              icon: Icons.picture_as_pdf_outlined,
-              label: 'Export PDF',
-              onTap: _exportPdf),
-          ActionSheetItem(
-              icon: Icons.grid_view_outlined,
-              label: 'Pages',
-              onTap: _showNavigator),
-          ActionSheetItem(
-              icon: Icons.bookmark_border,
-              label: 'Bookmarks',
-              onTap: _showBookmarks),
-          ActionSheetItem(
-              icon: Icons.attach_file,
-              label: 'Attachments',
-              onTap: _showAttachments),
-          ActionSheetItem(
-              icon: Icons.description_outlined,
-              label: 'Page settings',
-              onTap: _showPageSettings),
-          ActionSheetItem(
-              icon: SettingsService().shapeSnap
-                  ? Icons.check_box_outlined
-                  : Icons.check_box_outline_blank,
-              label: 'Snap drawn shapes',
-              onTap: _toggleShapeSnap),
-          ActionSheetItem(
-              icon: SettingsService().fingerDraw
-                  ? Icons.check_box_outlined
-                  : Icons.check_box_outline_blank,
-              label: 'Draw with finger',
-              onTap: _toggleFingerDraw),
+              icon: Icons.tune,
+              label: 'Customize toolbar…',
+              onTap: () async {
+                await showCustomizeToolbarSheet(context, mobile: true);
+                // The sheet writes straight to SettingsService; nothing
+                // notifies this screen, so force a rebuild to pick up the
+                // new promoted-action lists.
+                if (mounted) setState(() {});
+              }),
         ]),
       );
     }
     return PopupMenuButton<String>(
       onSelected: (action) {
         switch (action) {
+          case 'fullscreen':
+            _toggleFullScreen();
+          case 'toggle_toolbar':
+            setState(() => _showToolbar = !_showToolbar);
           case 'rename':
             _renameCanvas();
           case 'export':
@@ -1101,29 +1190,52 @@ class _CanvasScreenState extends State<CanvasScreen> {
             _toggleFingerDraw();
           case 'shape_snap':
             _toggleShapeSnap();
+          case 'customize':
+            showCustomizeToolbarSheet(context, mobile: false).then((_) {
+              // Same reason as the mobile sheet: force a rebuild so the
+              // desktop toolbar/app-bar reflect the new promoted-action
+              // lists immediately.
+              if (mounted) setState(() {});
+            });
         }
       },
       itemBuilder: (context) => [
-        iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
-        iconMenuItem('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
-        iconMenuItem('navigator', Icons.grid_view_outlined, 'Pages'),
-        iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
-        iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
-        iconMenuItem('page_settings', Icons.description_outlined,
-            'Page settings'),
+        if (shown('fullscreen'))
+          iconMenuItem('fullscreen', Icons.fullscreen, 'Full screen'),
+        if (shown('toggle_toolbar'))
+          iconMenuItem(
+              'toggle_toolbar',
+              _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+              _showToolbar ? 'Hide tools' : 'Show tools'),
+        if (shown('rename'))
+          iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
+        if (shown('export'))
+          iconMenuItem('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
+        if (shown('navigator'))
+          iconMenuItem('navigator', Icons.grid_view_outlined, 'Pages'),
+        if (shown('bookmarks'))
+          iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+        if (shown('attachments'))
+          iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
+        if (shown('page_settings'))
+          iconMenuItem('page_settings', Icons.description_outlined,
+              'Page settings'),
         // Checkbox glyphs reflect toggle state, matching the mobile sheet.
-        iconMenuItem(
-            'shape_snap',
-            SettingsService().shapeSnap
-                ? Icons.check_box_outlined
-                : Icons.check_box_outline_blank,
-            'Snap drawn shapes'),
-        iconMenuItem(
-            'finger_draw',
-            SettingsService().fingerDraw
-                ? Icons.check_box_outlined
-                : Icons.check_box_outline_blank,
-            'Draw with finger'),
+        if (shown('shape_snap'))
+          iconMenuItem(
+              'shape_snap',
+              SettingsService().shapeSnap
+                  ? Icons.check_box_outlined
+                  : Icons.check_box_outline_blank,
+              'Snap drawn shapes'),
+        if (shown('finger_draw'))
+          iconMenuItem(
+              'finger_draw',
+              SettingsService().fingerDraw
+                  ? Icons.check_box_outlined
+                  : Icons.check_box_outline_blank,
+              'Draw with finger'),
+        iconMenuItem('customize', Icons.tune, 'Customize toolbar…'),
       ],
     );
   }
@@ -1131,6 +1243,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
   // ── Add / insert flows ───────────────────────────────────────────────
 
   Future<void> _showAddSheet() async {
+    final promoted = SettingsService().promotedAddActionsMobile;
+    bool shown(String id) => !promoted.contains(id);
     final action = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
@@ -1141,26 +1255,29 @@ class _CanvasScreenState extends State<CanvasScreen> {
           children: [
               const SizedBox(height: 8),
               const _SheetLabel('Pages'),
-              ListTile(
-                leading: const Icon(Icons.note_add_outlined),
-                title: const Text('Blank page'),
-                subtitle: const Text('Above · below · or at the end'),
-                onTap: () => Navigator.pop(context, 'blank'),
-              ),
-              ListTile(
-                leading: const Icon(Icons.swap_horiz),
-                title: const Text('Horizontal page'),
-                subtitle: const Text('Extend this row to the right'),
-                onTap: () => Navigator.pop(context, 'horizontal'),
-              ),
-              ListTile(
-                leading: const Icon(Icons.picture_as_pdf_outlined),
-                title: const Text('Insert PDF'),
-                subtitle: const Text(
-                  'As annotatable pages, or as an attachment',
+              if (shown('blank'))
+                ListTile(
+                  leading: const Icon(Icons.note_add_outlined),
+                  title: const Text('Blank page'),
+                  subtitle: const Text('Above · below · or at the end'),
+                  onTap: () => Navigator.pop(context, 'blank'),
                 ),
-                onTap: () => Navigator.pop(context, 'pdf'),
-              ),
+              if (shown('horizontal'))
+                ListTile(
+                  leading: const Icon(Icons.swap_horiz),
+                  title: const Text('Horizontal page'),
+                  subtitle: const Text('Extend this row to the right'),
+                  onTap: () => Navigator.pop(context, 'horizontal'),
+                ),
+              if (shown('pdf'))
+                ListTile(
+                  leading: const Icon(Icons.picture_as_pdf_outlined),
+                  title: const Text('Insert PDF'),
+                  subtitle: const Text(
+                    'As annotatable pages, or as an attachment',
+                  ),
+                  onTap: () => Navigator.pop(context, 'pdf'),
+                ),
               if (PageClipboard().hasPage.value)
                 ListTile(
                   leading: const Icon(Icons.content_paste_go_outlined),
@@ -1170,12 +1287,13 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 ),
               const Divider(),
               const _SheetLabel('Content'),
-              ListTile(
-                leading: const Icon(Icons.image_outlined),
-                title: const Text('Image'),
-                subtitle: const Text('From files'),
-                onTap: () => Navigator.pop(context, 'image'),
-              ),
+              if (shown('image'))
+                ListTile(
+                  leading: const Icon(Icons.image_outlined),
+                  title: const Text('Image'),
+                  subtitle: const Text('From files'),
+                  onTap: () => Navigator.pop(context, 'image'),
+                ),
               if (Platform.isAndroid || Platform.isIOS)
                 ListTile(
                   leading: const Icon(Icons.photo_camera_outlined),
@@ -1183,11 +1301,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
                   subtitle: const Text('Capture with the camera'),
                   onTap: () => Navigator.pop(context, 'camera'),
                 ),
-              ListTile(
-                leading: const Icon(Icons.content_paste),
-                title: const Text('Paste'),
-                onTap: () => Navigator.pop(context, 'paste'),
-              ),
+              if (shown('paste'))
+                ListTile(
+                  leading: const Icon(Icons.content_paste),
+                  title: const Text('Paste'),
+                  onTap: () => Navigator.pop(context, 'paste'),
+                ),
               const SizedBox(height: 8),
             ],
           ),
@@ -1223,7 +1342,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
   }
 
-  /// The Add control: a bottom sheet on mobile, a top-bar dropdown on desktop.
+  /// The Add control: a bottom sheet on mobile, a top-bar dropdown on
+  /// desktop. Whichever Add actions are promoted to the desktop toolbar
+  /// (see `_buildDesktopToolbar`) are left out here — an item lives in
+  /// exactly one place at a time.
   Widget _buildAddButton(BuildContext context) {
     if (_useMobileMenus(context)) {
       return IconButton(
@@ -1232,19 +1354,26 @@ class _CanvasScreenState extends State<CanvasScreen> {
         onPressed: _showAddSheet,
       );
     }
-    // Desktop: the frequently-used adds (Add page, Image) are direct top-bar
-    // buttons (see the app bar); this "+" holds the rest.
+    final promoted = SettingsService().promotedAddActionsDesktop;
+    bool shown(String id) => !promoted.contains(id);
     return PopupMenuButton<String>(
       icon: const Icon(Icons.add),
       tooltip: 'More to add',
       onSelected: _runAddAction,
       itemBuilder: (context) => [
-        iconMenuItem('horizontal', Icons.swap_horiz, 'Horizontal page'),
-        iconMenuItem('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
+        if (shown('blank'))
+          iconMenuItem('blank', Icons.note_add_outlined, 'Add page'),
+        if (shown('horizontal'))
+          iconMenuItem('horizontal', Icons.swap_horiz, 'Horizontal page'),
+        if (shown('pdf'))
+          iconMenuItem('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
+        if (shown('image'))
+          iconMenuItem('image', Icons.image_outlined, 'Insert image'),
         if (PageClipboard().hasPage.value)
           iconMenuItem('pastePage', Icons.content_paste_go_outlined,
               'Paste page'),
-        iconMenuItem('paste', Icons.content_paste, 'Paste'),
+        if (shown('paste'))
+          iconMenuItem('paste', Icons.content_paste, 'Paste'),
       ],
     );
   }
@@ -1994,31 +2123,86 @@ class _CanvasScreenState extends State<CanvasScreen> {
     widget.onFullScreenChanged?.call(_isFullScreen);
   }
 
-  // ── Desktop top toolbar (all tools inline, grouped, horizontally scrollable
-  //    so a narrow window never overflows) ────────────────────────────────
+  // ── Desktop top toolbar (all tools inline, grouped; right-aligns when it
+  //    fits, scrolls when it doesn't — see AdaptiveToolbarRow) ────────────
+  // tbBtn/tbDivider now live in canvas_toolbar/canvas_chrome_shared.dart.
 
-  Widget _tbBtn(IconData icon, String tooltip, VoidCallback? onPressed) =>
-      IconButton(
-        icon: Icon(icon, size: 20),
-        tooltip: tooltip,
-        visualDensity: VisualDensity.compact,
-        constraints: const BoxConstraints(minWidth: 38, minHeight: 44),
-        padding: EdgeInsets.zero,
-        onPressed: onPressed,
-      );
-
-  Widget _tbDivider(AppPalette palette) => Container(
-        width: 1,
-        height: 20,
-        margin: const EdgeInsets.symmetric(horizontal: 6),
-        color: palette.border,
-      );
+  /// Renders one promoted action id as a `tbBtn`. Dispatch, not data: a few
+  /// ids (toggle_toolbar/shape_snap/finger_draw) show state-dependent icons,
+  /// which is why this can't just read [findActionSpec]'s static icon.
+  /// Rebuilt whenever `_CanvasScreenState.build()` reruns — `_showToolbar`'s
+  /// own setState and `_toggleShapeSnap`/`_toggleFingerDraw`'s setState
+  /// already cover that, so no extra listening is needed here.
+  Widget _buildPromotedButton(String id) {
+    switch (id) {
+      case 'blank':
+        return tbBtn(Icons.note_add_outlined, 'Add page',
+            () => _runAddAction('blank'));
+      case 'horizontal':
+        return tbBtn(Icons.swap_horiz, 'Horizontal page',
+            () => _runAddAction('horizontal'));
+      case 'pdf':
+        return tbBtn(Icons.picture_as_pdf_outlined, 'Insert PDF',
+            () => _runAddAction('pdf'));
+      case 'image':
+        return tbBtn(Icons.image_outlined, 'Insert image',
+            () => _runAddAction('image'));
+      case 'paste':
+        return tbBtn(Icons.content_paste, 'Paste',
+            () => _runAddAction('paste'));
+      case 'fullscreen':
+        return tbBtn(Icons.fullscreen, 'Full screen', _toggleFullScreen);
+      case 'toggle_toolbar':
+        return tbBtn(
+            _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+            _showToolbar ? 'Hide tools' : 'Show tools',
+            () => setState(() => _showToolbar = !_showToolbar));
+      case 'rename':
+        return tbBtn(Icons.edit_outlined, 'Rename', _renameCanvas);
+      case 'export':
+        return tbBtn(Icons.picture_as_pdf_outlined, 'Export PDF', _exportPdf);
+      case 'navigator':
+        return tbBtn(Icons.grid_view_outlined, 'Pages', _showNavigator);
+      case 'bookmarks':
+        return tbBtn(Icons.bookmark_border, 'Bookmarks', _showBookmarks);
+      case 'attachments':
+        return tbBtn(Icons.attach_file, 'Attachments', _showAttachments);
+      case 'page_settings':
+        return tbBtn(Icons.description_outlined, 'Page settings',
+            _showPageSettings);
+      case 'shape_snap':
+        return tbBtn(
+            SettingsService().shapeSnap
+                ? Icons.check_box_outlined
+                : Icons.check_box_outline_blank,
+            'Snap drawn shapes',
+            _toggleShapeSnap);
+      case 'finger_draw':
+        return tbBtn(
+            SettingsService().fingerDraw
+                ? Icons.check_box_outlined
+                : Icons.check_box_outline_blank,
+            'Draw with finger',
+            _toggleFingerDraw);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
 
   Widget _buildDesktopToolbar(
       BuildContext context, CanvasController c, AppPalette palette) {
+    final s = SettingsService();
+    final promotedAdd = s.promotedAddActionsDesktop;
+    final promotedOverflow = s.promotedOverflowActionsDesktop;
+    // Rendered in the AppBar's flexibleSpace (not `title`) so it spans the
+    // full pane width — the `title` slot is narrower, which left-clustered
+    // the tools with dead space on the right. The name is a fixed-max-width
+    // box (NOT Flexible): a Flexible here defaults to flex:1 and would split
+    // the row 50/50 with the Expanded tools, halving the tools' width.
     return Row(
       children: [
-        Flexible(
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 220),
           child: Text(
             widget.canvas.name,
             maxLines: 1,
@@ -2027,62 +2211,36 @@ class _CanvasScreenState extends State<CanvasScreen> {
           ),
         ),
         const SizedBox(width: 12),
-        // The whole tool cluster scrolls horizontally — a shrunk window scrolls
-        // instead of overflowing. The cluster is STATIC: only the undo/redo
-        // pair listens to the drawing controller, and the paste-page button
-        // listens to the clipboard notifier. Wrapping the whole row in one
+        // The whole tool cluster is STATIC except for two independently-
+        // scoped listeners (undo/redo on the controller, paste-page on the
+        // clipboard notifier) — wrapping the whole row in one
         // ListenableBuilder on the controller rebuilt ~25 widgets (buttons +
-        // tooltips + scroll view) on every pen move — the desktop-view
-        // fast-writing jank; mobile's app bar only ever rebuilt its undo/redo
-        // pair, which is why it stayed smooth. Keep new controller-dependent
+        // tooltips + scroll view) on every pen move, the desktop-view
+        // fast-writing jank this was fixed for. Keep new controller-dependent
         // controls inside their own smallest-possible listener, never around
         // the row.
         Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            reverse: true, // right-align the tools; scroll on a narrow window
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListenableBuilder(
-                  listenable: c,
-                  builder: (context, _) => Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
-                      _tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
-                    ],
-                  ),
+          child: AdaptiveToolbarRow(
+            children: [
+              ListenableBuilder(
+                listenable: c,
+                builder: (context, _) => Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
+                    tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
+                  ],
                 ),
-                _tbDivider(palette),
-                _tbBtn(Icons.note_add_outlined, 'Add page',
-                    () => _runAddAction('blank')),
-                _tbBtn(Icons.swap_horiz, 'Horizontal page',
-                    () => _runAddAction('horizontal')),
-                _tbBtn(Icons.image_outlined, 'Insert image',
-                    () => _runAddAction('image')),
-                _tbBtn(Icons.picture_as_pdf_outlined, 'Insert PDF',
-                    () => _runAddAction('pdf')),
-                _tbBtn(Icons.content_paste, 'Paste',
-                    () => _runAddAction('paste')),
-                ValueListenableBuilder<bool>(
-                  valueListenable: PageClipboard().hasPage,
-                  builder: (context, hasPage, _) => hasPage
-                      ? _tbBtn(Icons.content_paste_go_outlined, 'Paste page',
-                          () => _runAddAction('pastePage'))
-                      : const SizedBox.shrink(),
-                ),
-                _tbDivider(palette),
-                _tbBtn(Icons.fullscreen, 'Full screen', _toggleFullScreen),
-                _tbBtn(
-                    _showToolbar ? Icons.expand_less : Icons.brush_outlined,
-                    _showToolbar ? 'Hide tools' : 'Show tools',
-                    () => setState(() => _showToolbar = !_showToolbar)),
-                _tbDivider(palette),
-                const SyncStatusIcon(),
-                _buildOverflowMenu(context),
-              ],
-            ),
+              ),
+              tbDivider(palette),
+              for (final id in promotedAdd) _buildPromotedButton(id),
+              if (promotedAdd.isNotEmpty) tbDivider(palette),
+              _buildAddButton(context),
+              for (final id in promotedOverflow) _buildPromotedButton(id),
+              if (promotedOverflow.isNotEmpty) tbDivider(palette),
+              const SyncStatusIcon(),
+              _buildOverflowMenu(context),
+            ],
           ),
         ),
       ],
@@ -2111,7 +2269,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
             Positioned(
               top: 12,
               right: 12,
-              child: _FloatingIconButton(
+              child: FloatingIconButton(
                 icon: Icons.fullscreen_exit,
                 tooltip: 'Exit full screen',
                 onTap: _toggleFullScreen,
@@ -2120,8 +2278,20 @@ class _CanvasScreenState extends State<CanvasScreen> {
             Positioned(
               left: 16,
               bottom: 16,
+              // Same narrow-notifier set as _ToolOptionsPanel — was
+              // ListenableBuilder(listenable: c), which is "accidentally
+              // cheap" only while collapsed to one icon; drawing with the
+              // context row open (or the full-screen tool picker open) would
+              // otherwise rebuild on every stroke point too.
               child: ListenableBuilder(
-                listenable: c,
+                listenable: Listenable.merge([
+                  c.toolNotifier,
+                  c.toolOptionsOpenNotifier,
+                  c.hasSelectionNotifier,
+                  c.isEditingTextNotifier,
+                  c.clipboardNotifier,
+                  c.chromeContentTick,
+                ]),
                 builder: (context, _) =>
                     _buildFloatingToolControl(context, c, palette),
               ),
@@ -2135,10 +2305,26 @@ class _CanvasScreenState extends State<CanvasScreen> {
     return Scaffold(
       backgroundColor: palette.canvas,
       appBar: AppBar(
-        titleSpacing: mobile ? null : 10,
-        title: mobile
-            ? Text(widget.canvas.name)
-            : _buildDesktopToolbar(context, c, palette),
+        titleSpacing: mobile ? null : 0,
+        automaticallyImplyLeading: mobile,
+        title: mobile ? Text(widget.canvas.name) : null,
+        // Desktop: the whole toolbar goes in flexibleSpace (full pane width)
+        // rather than the narrower `title` slot, so its right-aligned tools
+        // reach the right edge instead of leaving dead space.
+        flexibleSpace: mobile
+            ? null
+            : SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: _buildDesktopToolbar(context, c, palette),
+                    ),
+                  ),
+                ),
+              ),
         actions: mobile
             ? [
                 const SyncStatusIcon(),
@@ -2159,6 +2345,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
                     ],
                   ),
                 ),
+                // Promoted actions the user opted into via "Customize
+                // toolbar…" — empty by default, so existing users see no
+                // change here until they promote something.
+                for (final id in SettingsService().promotedAddActionsMobile)
+                  _buildPromotedButton(id),
+                for (final id
+                    in SettingsService().promotedOverflowActionsMobile)
+                  _buildPromotedButton(id),
                 _buildAddButton(context),
                 _buildOverflowMenu(context),
                 const SizedBox(width: 4),
@@ -2185,7 +2379,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 Positioned.fill(child: _buildCanvasArea(c, palette)),
                 // Tool-options panel: overlaid at the top of the canvas so
                 // showing/hiding it never moves the canvas viewport. Hidden
-                // entirely while the toolbar is toggled off.
+                // entirely while the toolbar is toggled off. Pen/highlighter/
+                // shape/eraser/lasso/text all opt out here (all include* flags
+                // false) — they show as a drop-down popover / floating-near-
+                // selection menu / bottom bar instead (ToolOptionsPopover /
+                // LassoFloatingMenu / TextBottomBar), so this panel currently
+                // renders nothing and is kept only as the shared overlay slot.
                 if (_showToolbar)
                   Positioned(
                     top: 0,
@@ -2193,6 +2392,11 @@ class _CanvasScreenState extends State<CanvasScreen> {
                     right: 0,
                     child: _ToolOptionsPanel(controller: c),
                   ),
+                if (_showToolbar) LassoFloatingMenu(controller: c),
+                if (_showToolbar) TextBottomBar(controller: c),
+                // Pen/highlighter/shape/eraser options, dropping down under
+                // the active tool's icon (re-tap to open, or pinned).
+                if (_showToolbar) ToolOptionsPopover(controller: c),
               ],
             ),
           ),
@@ -2340,14 +2544,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // Same visibility rule as the normal toolbar (an exception like an active
     // selection stays visible even if toolOptionsOpen is false), computed
     // once here so both modes can never disagree.
-    final contextRow = _buildToolContextRow(context, c, palette);
+    final contextRow = buildToolContextRow(context, c, palette);
     if (contextRow != null) {
-      return _FloatingPanel(
+      return FloatingPanel(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _ToolIconButton(
+            ToolIconButton(
               tool: c.tool,
               active: true,
               onTap: () => c.setTool(c.tool), // re-tap: close options
@@ -2363,14 +2567,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
 
     if (_fullScreenPickerOpen) {
-      return _FloatingPanel(
+      return FloatingPanel(
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             for (final tool in kCanvasToolOrder)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: _ToolIconButton(
+                child: ToolIconButton(
                   tool: tool,
                   active: c.tool == tool,
                   onTap: () {
@@ -2384,8 +2588,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
       );
     }
 
-    return _FloatingPanel(
-      child: _ToolIconButton(
+    return FloatingPanel(
+      child: ToolIconButton(
         tool: c.tool,
         active: true,
         onTap: () => setState(() => _fullScreenPickerOpen = true),
@@ -2474,857 +2678,13 @@ class _TextEditSession {
 }
 
 // ── Toolbar ────────────────────────────────────────────────────────────
+// kCanvasToolOrder, iconForTool/labelForTool, ToolIconButton, FloatingPanel,
+// FloatingIconButton now live in canvas_toolbar/canvas_chrome_shared.dart.
+// buildToolContextRow and every per-tool options row (pen/shape/eraser/
+// lasso/text) now live in canvas_toolbar/tool_option_rows.dart.
 
-/// The 5 tools, in the order they're always presented.
-const List<CanvasTool> kCanvasToolOrder = [
-  CanvasTool.pen,
-  CanvasTool.highlighter,
-  CanvasTool.shape,
-  CanvasTool.eraser,
-  CanvasTool.lasso,
-  CanvasTool.text,
-];
-
-const List<Color> _presetColors = [
-  Color(0xFFD9553B),
-  Color(0xFF17171A),
-  Color(0xFFD98A2B),
-  Color(0xFF2E9E5B),
-  Color(0xFF3B7DD8),
-  Color(0xFF7C5CBF),
-  Color(0xFF2AA5B5),
-  Color(0xFFFFFFFF),
-];
-
-IconData _iconForTool(CanvasTool tool) => switch (tool) {
-  CanvasTool.pen => Icons.draw_outlined,
-  CanvasTool.highlighter => Icons.highlight_outlined,
-  CanvasTool.shape => Icons.category_outlined,
-  CanvasTool.eraser => Icons.auto_fix_normal_outlined,
-  CanvasTool.lasso => Icons.gesture,
-  CanvasTool.text => Icons.text_fields,
-};
-
-String _labelForTool(CanvasTool tool) => switch (tool) {
-  CanvasTool.pen => 'Pen',
-  CanvasTool.highlighter => 'Highlighter',
-  CanvasTool.shape => 'Shapes',
-  CanvasTool.eraser => 'Eraser',
-  CanvasTool.lasso => 'Lasso select',
-  CanvasTool.text => 'Text',
-};
-
-/// Builds the active tool's contextual panel (colors/size, selection
-/// actions, text style), or `null` when nothing should show. Shared by the
-/// normal toolbar and the full-screen floating tool control so both reveal
-/// options identically: only on a deliberate re-tap of the already-active
-/// tool (`CanvasController.setTool` toggles `toolOptionsOpen`), except for
-/// panels that reflect something already in progress — actively editing
-/// text, a text box selected via lasso, or an active lasso
-/// selection/clipboard — which stay visible regardless, the same way the
-/// normal toolbar always showed them before this panel became collapsible.
-Widget? _buildToolContextRow(
-  BuildContext context,
-  CanvasController c,
-  AppPalette palette,
-) {
-  if (c.isEditingText || c.selectionIsTextOnly) {
-    return _buildTextStyleRow(context, c, palette);
-  }
-  if (c.tool == CanvasTool.lasso &&
-      (c.selection.isNotEmpty || CanvasController.clipboardHasContent)) {
-    return _buildLassoActionRow(context, c, palette);
-  }
-
-  if (!c.toolOptionsOpen) return null;
-
-  switch (c.tool) {
-    case CanvasTool.pen:
-    case CanvasTool.highlighter:
-      return _buildPenOptionsRow(context, c, palette);
-    case CanvasTool.shape:
-      return _buildShapeOptionsRow(context, c, palette);
-    case CanvasTool.eraser:
-      return _buildEraserOptionsRow(context, c, palette);
-    case CanvasTool.lasso:
-      // Hint + Paste (the row handles the empty-selection state itself).
-      return _buildLassoActionRow(context, c, palette);
-    case CanvasTool.text:
-      return _buildTextStyleRow(context, c, palette);
-  }
-}
-
-const Map<ShapeToolKind, IconData> _shapeKindIcons = {
-  ShapeToolKind.line: Icons.horizontal_rule,
-  ShapeToolKind.arrow: Icons.north_east,
-  ShapeToolKind.rectangle: Icons.crop_square,
-  ShapeToolKind.ellipse: Icons.circle_outlined,
-  ShapeToolKind.triangle: Icons.change_history,
-  ShapeToolKind.diamond: Icons.diamond_outlined,
-  ShapeToolKind.pentagon: Icons.pentagon_outlined,
-  ShapeToolKind.hexagon: Icons.hexagon_outlined,
-  ShapeToolKind.star: Icons.star_outline,
-};
-
-/// The Shapes tool options: a kind picker (line/rect/ellipse/…) plus the pen
-/// color/size (drawn shapes use the pen's ink), so one place controls the whole
-/// tool. Shown on a re-tap of the active Shapes tool.
-Widget _buildShapeOptionsRow(
-  BuildContext context,
-  CanvasController c,
-  AppPalette palette,
-) {
-  final templates = SettingsService().shapeTemplates;
-  return Column(
-    mainAxisSize: MainAxisSize.min,
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            for (final entry in _shapeKindIcons.entries)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: _ShapeKindButton(
-                  icon: entry.value,
-                  selected:
-                      c.shapeToolTemplate == null && c.shapeToolKind == entry.key,
-                  onTap: () => c.setShapeToolKind(entry.key),
-                  palette: palette,
-                ),
-              ),
-            if (templates.isNotEmpty)
-              Container(
-                width: 1,
-                height: 28,
-                margin: const EdgeInsets.symmetric(horizontal: 6),
-                color: palette.border,
-              ),
-            for (final t in templates)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: _TemplateThumb(
-                  template: t,
-                  selected: c.shapeToolTemplate?.id == t.id,
-                  onTap: () => c.setShapeToolTemplate(t),
-                  onDelete: () => _confirmDeleteTemplate(context, c, t),
-                  palette: palette,
-                ),
-              ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 6),
-      _buildPenOptionsRow(context, c, palette),
-    ],
-  );
-}
-
-/// Prompts for a name and saves the current strokes-only selection as a custom
-/// shape template (Phase 3).
-Future<void> _promptSaveShape(BuildContext context, CanvasController c) async {
-  final field = TextEditingController(text: 'My shape');
-  final name = await showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('Save as shape'),
-      content: TextField(
-        controller: field,
-        autofocus: true,
-        decoration: const InputDecoration(hintText: 'Shape name'),
-        onSubmitted: (v) => Navigator.pop(ctx, v),
-      ),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, field.text),
-            child: const Text('Save')),
-      ],
-    ),
-  );
-  if (name == null) return;
-  await c.saveSelectionAsShape(name);
-  if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Text('Saved to your shapes — pick it in the Shapes tool'),
-      behavior: SnackBarBehavior.floating,
-    ));
-  }
-}
-
-Future<void> _confirmDeleteTemplate(
-    BuildContext context, CanvasController c, ShapeTemplate t) async {
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text('Delete “${t.name}”?'),
-      content: const Text('This removes the saved shape from this device.'),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel')),
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete')),
-      ],
-    ),
-  );
-  if (ok == true) await c.deleteShapeTemplate(t.id);
-}
-
-/// A saved-template chip: a tiny thumbnail of the template's polylines; tap to
-/// select it for stamping, long-press to delete.
-class _TemplateThumb extends StatelessWidget {
-  final ShapeTemplate template;
-  final bool selected;
-  final VoidCallback onTap;
-  final VoidCallback onDelete;
-  final AppPalette palette;
-  const _TemplateThumb({
-    required this.template,
-    required this.selected,
-    required this.onTap,
-    required this.onDelete,
-    required this.palette,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: template.name,
-      child: GestureDetector(
-        onTap: onTap,
-        onLongPress: onDelete,
-        child: Container(
-          width: 38,
-          height: 38,
-          padding: const EdgeInsets.all(6),
-          decoration: BoxDecoration(
-            color: selected ? palette.accent.withValues(alpha: 0.16) : null,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: selected ? palette.accent : palette.border,
-              width: selected ? 1.5 : 1,
-            ),
-          ),
-          child: CustomPaint(
-            painter: _TemplateThumbPainter(
-                template, selected ? palette.accent : palette.textDim),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TemplateThumbPainter extends CustomPainter {
-  final ShapeTemplate template;
-  final Color color;
-  _TemplateThumbPainter(this.template, this.color);
-
-  @override
-  void paint(ui.Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    for (final poly in template.polylines) {
-      if (poly.length < 2) continue;
-      final path = Path()
-        ..moveTo(poly.first.dx * size.width, poly.first.dy * size.height);
-      for (var i = 1; i < poly.length; i++) {
-        path.lineTo(poly[i].dx * size.width, poly[i].dy * size.height);
-      }
-      canvas.drawPath(path, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_TemplateThumbPainter old) =>
-      old.template != template || old.color != color;
-}
-
-class _ShapeKindButton extends StatelessWidget {
-  final IconData icon;
-  final bool selected;
-  final VoidCallback onTap;
-  final AppPalette palette;
-  const _ShapeKindButton({
-    required this.icon,
-    required this.selected,
-    required this.onTap,
-    required this.palette,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        width: 38,
-        height: 38,
-        decoration: BoxDecoration(
-          color: selected ? palette.accent.withValues(alpha: 0.16) : null,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: selected ? palette.accent : palette.border,
-            width: selected ? 1.5 : 1,
-          ),
-        ),
-        child: Icon(icon,
-            size: 20, color: selected ? palette.accent : palette.textDim),
-      ),
-    );
-  }
-}
-
-Widget _buildEraserOptionsRow(
-  BuildContext context,
-  CanvasController c,
-  AppPalette palette,
-) {
-  return Row(
-    children: [
-      SegmentedButton<bool>(
-        showSelectedIcon: false,
-        style: const ButtonStyle(
-          visualDensity: VisualDensity.compact,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-        segments: const [
-          ButtonSegment(
-            value: false,
-            label: Text('Stroke'),
-            tooltip: 'Erase whole strokes',
-          ),
-          ButtonSegment(
-            value: true,
-            label: Text('Partial'),
-            tooltip: 'Erase only where you rub',
-          ),
-        ],
-        selected: {c.eraserPartial},
-        onSelectionChanged: (sel) {
-          c.eraserPartial = sel.first;
-          SettingsService().setEraserPrefs(partial: sel.first);
-          c.notifyRepaint();
-        },
-      ),
-      Container(
-        width: 1,
-        height: 24,
-        margin: const EdgeInsets.symmetric(horizontal: 8),
-        color: palette.border,
-      ),
-      _ThicknessPreview(
-        color: palette.textDim,
-        size: c.eraserSize.clamp(4, 40),
-        min: 4,
-        max: 40,
-      ),
-      SizedBox(
-        width: 110,
-        child: Slider(
-          value: c.eraserSize.clamp(4, 40),
-          min: 4,
-          max: 40,
-          divisions: 18,
-          label: c.eraserSize.toStringAsFixed(0),
-          onChanged: (v) {
-            c.eraserSize = v;
-            SettingsService().setEraserPrefs(size: v);
-            c.notifyRepaint();
-          },
-        ),
-      ),
-    ],
-  );
-}
-
-Widget _buildPenOptionsRow(
-  BuildContext context,
-  CanvasController c,
-  AppPalette palette,
-) {
-  return Row(
-    children: [
-      Flexible(
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: [
-              for (final preset in _presetColors)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 3),
-                  child: _ColorDot(
-                    color: preset,
-                    selected: preset.toARGB32() == c.color.toARGB32(),
-                    ringColor: palette.accent,
-                    borderColor: palette.border,
-                    onTap: () {
-                      c.color = preset;
-                      c.notifyRepaint();
-                    },
-                  ),
-                ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 3),
-                child: _WheelDot(
-                  current: c.color,
-                  selected: _presetColors
-                      .every((p) => p.toARGB32() != c.color.toARGB32()),
-                  ringColor: palette.accent,
-                  onPicked: (color) {
-                    c.color = color;
-                    c.notifyRepaint();
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      Container(
-        width: 1,
-        height: 24,
-        margin: const EdgeInsets.symmetric(horizontal: 8),
-        color: palette.border,
-      ),
-      _ThicknessPreview(color: c.color, size: c.strokeSize, min: 1, max: 20),
-      SizedBox(
-        width: 110,
-        child: Slider(
-          value: c.strokeSize,
-          min: 1,
-          max: 20,
-          divisions: 19,
-          label: c.strokeSize.toStringAsFixed(0),
-          onChanged: (v) {
-            c.strokeSize = v;
-            c.notifyRepaint();
-          },
-        ),
-      ),
-    ],
-  );
-}
-
-/// The mockup's thickness "preview": a chip holding a dot whose diameter tracks
-/// the current stroke size, tinted with the tool's color (grey for the eraser).
-class _ThicknessPreview extends StatelessWidget {
-  final Color color;
-  final double size;
-  final double min;
-  final double max;
-
-  const _ThicknessPreview({
-    required this.color,
-    required this.size,
-    required this.min,
-    required this.max,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<AppPalette>()!;
-    final t = ((size - min) / (max - min)).clamp(0.0, 1.0);
-    final d = 4 + t * 18; // 4..22px
-    return Container(
-      width: 34,
-      height: 34,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: palette.surface2,
-        border: Border.all(color: palette.border),
-        borderRadius: BorderRadius.circular(kRadius),
-      ),
-      child: Container(
-        width: d,
-        height: d,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      ),
-    );
-  }
-}
-
-Widget _buildLassoActionRow(
-  BuildContext context,
-  CanvasController c,
-  AppPalette palette,
-) {
-  if (c.selection.isEmpty) {
-    return Row(
-      children: [
-        Expanded(
-          child: _HintRow(
-            icon: Icons.gesture,
-            text: 'Draw around items to select them',
-            palette: palette,
-          ),
-        ),
-        // Always available: internal clipboard first, else the OS clipboard
-        // (image, then text).
-        TextButton.icon(
-          onPressed: c.pasteClipboard,
-          icon: const Icon(Icons.content_paste, size: 16),
-          label: const Text('Paste'),
-        ),
-      ],
-    );
-  }
-  return SingleChildScrollView(
-    scrollDirection: Axis.horizontal,
-    child: Row(
-      children: [
-        Text(
-          '${c.selection.length} selected',
-          style: TextStyle(fontSize: 12, color: palette.textDim),
-        ),
-        const SizedBox(width: 8),
-        _SelAction(
-          icon: Icons.delete_outline,
-          label: 'Delete',
-          onTap: c.deleteSelection,
-        ),
-        _SelAction(icon: Icons.copy, label: 'Copy', onTap: c.copySelection),
-        _SelAction(icon: Icons.cut, label: 'Cut', onTap: c.cutSelection),
-        _SelAction(
-          icon: Icons.control_point_duplicate,
-          label: 'Duplicate',
-          onTap: c.duplicateSelection,
-        ),
-        _SelAction(
-          icon: Icons.palette_outlined,
-          label: 'Color',
-          onTap: c.applyColorToSelection,
-        ),
-        _SelAction(
-          icon: Icons.flip_to_front,
-          label: 'Front',
-          onTap: c.bringSelectionToFront,
-        ),
-        _SelAction(
-          icon: Icons.flip_to_back,
-          label: 'Back',
-          onTap: c.sendSelectionToBack,
-        ),
-        // Save a strokes-only selection as a reusable custom shape (Phase 3).
-        if (c.selectionIsStrokesOnly)
-          _SelAction(
-            icon: Icons.add_box_outlined,
-            label: 'Save as shape',
-            onTap: () => _promptSaveShape(context, c),
-          ),
-        // Split pasted text (linked boxes across pages): act on ALL parts.
-        // "Cut all" + paste elsewhere re-flows it there = the move story.
-        if (c.selectionHasLinkedText) ...[
-          _SelAction(
-            icon: Icons.cut,
-            label: 'Cut all parts',
-            onTap: c.cutLinkedText,
-          ),
-          _SelAction(
-            icon: Icons.delete_sweep_outlined,
-            label: 'Delete all parts',
-            onTap: c.deleteLinkedText,
-          ),
-        ],
-      ],
-    ),
-  );
-}
-
-Widget _buildTextStyleRow(
-  BuildContext context,
-  CanvasController c,
-  AppPalette palette,
-) {
-  final showActions = c.selection.isNotEmpty && !c.isEditingText;
-  Widget divider() => Container(
-    width: 1,
-    height: 24,
-    margin: const EdgeInsets.symmetric(horizontal: 8),
-    color: palette.border,
-  );
-
-  // TextFieldTapRegion: taps on these controls count as "inside" the text
-  // editor, so they no longer unfocus the TextField / fire onTapOutside —
-  // which used to commit the edit and collapse the selection the instant any
-  // style button was tapped ("selecting a style deselects and does nothing").
-  return TextFieldTapRegion(
-    child: SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          PopupMenuButton<String>(
-            tooltip: 'Font',
-            initialValue: c.textFontFamily,
-            onSelected: c.setTextFontFamily,
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'sans', child: Text('Sans')),
-              PopupMenuItem(
-                value: 'serif',
-                child: Text('Serif', style: TextStyle(fontFamily: 'Georgia')),
-              ),
-              PopupMenuItem(
-                value: 'mono',
-                child: Text(
-                  'Mono',
-                  style: TextStyle(fontFamily: 'Courier New'),
-                ),
-              ),
-            ],
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Aa',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontFamily: switch (c.textFontFamily) {
-                        'serif' => 'Georgia',
-                        'mono' => 'Courier New',
-                        _ => null,
-                      },
-                    ),
-                  ),
-                  Icon(Icons.arrow_drop_down, size: 18, color: palette.textDim),
-                ],
-              ),
-            ),
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Smaller',
-            icon: const Icon(Icons.text_decrease, size: 18),
-            onPressed: () => c.setTextFontSize(c.textFontSize - 2),
-          ),
-          Text(
-            c.textFontSize.toStringAsFixed(0),
-            style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Larger',
-            icon: const Icon(Icons.text_increase, size: 18),
-            onPressed: () => c.setTextFontSize(c.textFontSize + 2),
-          ),
-          const SizedBox(width: 4),
-          _ToggleChip(
-            label: 'B',
-            bold: true,
-            active: c.textBold,
-            onTap: c.toggleTextBold,
-          ),
-          _ToggleChip(
-            label: 'I',
-            italic: true,
-            active: c.textItalic,
-            onTap: c.toggleTextItalic,
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Alignment',
-            icon: Icon(switch (c.textAlign) {
-              TextAlignOption.center => Icons.format_align_center,
-              TextAlignOption.right => Icons.format_align_right,
-              _ => Icons.format_align_left,
-            }, size: 18),
-            onPressed: c.cycleTextAlign,
-          ),
-          if (c.isEditingText) ...[
-            divider(),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              tooltip: 'Bullet list',
-              icon: const Icon(Icons.format_list_bulleted, size: 18),
-              onPressed: () =>
-                  c.toggleTextListPrefix(RichTextController.bulletPrefix),
-            ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              tooltip: 'Star list',
-              icon: const Icon(Icons.star_outline, size: 18),
-              onPressed: () =>
-                  c.toggleTextListPrefix(RichTextController.starPrefix),
-            ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              tooltip: 'Checkbox (tap again to check)',
-              icon: const Icon(Icons.check_box_outlined, size: 18),
-              onPressed: () => c.toggleTextListPrefix(
-                RichTextController.uncheckedPrefix,
-                cycle: true,
-              ),
-            ),
-          ],
-          divider(),
-          for (final preset in _presetColors)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: _ColorDot(
-                color: preset,
-                selected: preset.toARGB32() == c.textColor.toARGB32(),
-                ringColor: palette.accent,
-                borderColor: palette.border,
-                onTap: () => c.setTextColor(preset),
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 3),
-            child: _WheelDot(
-              current: c.textColor,
-              selected: _presetColors
-                  .every((p) => p.toARGB32() != c.textColor.toARGB32()),
-              ringColor: palette.accent,
-              onPicked: c.setTextColor,
-            ),
-          ),
-          if (showActions) ...[
-            divider(),
-            _SelAction(
-              icon: Icons.control_point_duplicate,
-              label: 'Duplicate',
-              onTap: c.duplicateSelection,
-            ),
-            _SelAction(
-              icon: Icons.delete_outline,
-              label: 'Delete',
-              onTap: c.deleteSelection,
-            ),
-            // A text-only selection shows THIS row, not the lasso action row
-            // — so the linked (split-paste) whole-text actions must live here
-            // too, or they'd be unreachable for text boxes.
-            if (c.selectionHasLinkedText) ...[
-              _SelAction(
-                icon: Icons.cut,
-                label: 'Cut all parts',
-                onTap: c.cutLinkedText,
-              ),
-              _SelAction(
-                icon: Icons.delete_sweep_outlined,
-                label: 'Delete all parts',
-                onTap: c.deleteLinkedText,
-              ),
-            ],
-          ],
-        ],
-      ),
-    ),
-  );
-}
-
-/// A single tool's tappable icon — used both in the normal toolbar's tool
-/// row and the full-screen floating control (collapsed icon + picker row).
-class _ToolIconButton extends StatelessWidget {
-  final CanvasTool tool;
-  final bool active;
-  final VoidCallback onTap;
-
-  const _ToolIconButton({
-    required this.tool,
-    required this.active,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<AppPalette>()!;
-    return Tooltip(
-      message: _labelForTool(tool),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(kRadius),
-        child: Container(
-          width: 40,
-          height: 40,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: active ? palette.accentSoft : null,
-            borderRadius: BorderRadius.circular(kRadius),
-          ),
-          child: Icon(
-            _iconForTool(tool),
-            size: 20,
-            color: active ? palette.accent : null,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A small floating action button used for full-screen's exit control.
-class _FloatingIconButton extends StatelessWidget {
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback onTap;
-
-  const _FloatingIconButton({
-    required this.icon,
-    required this.tooltip,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final palette = theme.extension<AppPalette>()!;
-    return _FloatingPanel(
-      padding: EdgeInsets.zero,
-      child: Tooltip(
-        message: tooltip,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(kRadius + 6),
-          child: SizedBox(
-            width: 40,
-            height: 40,
-            child: Icon(icon, size: 20, color: palette.textDim),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Elevated, bordered container full-screen's floating controls sit in —
-/// legible over any page content underneath.
-class _FloatingPanel extends StatelessWidget {
-  final Widget child;
-  final EdgeInsetsGeometry padding;
-
-  const _FloatingPanel({
-    required this.child,
-    this.padding = const EdgeInsets.all(8),
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final palette = theme.extension<AppPalette>()!;
-    return Material(
-      color: theme.colorScheme.surface,
-      elevation: 6,
-      borderRadius: BorderRadius.circular(kRadius + 6),
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(kRadius + 6),
-          border: Border.all(color: palette.border),
-        ),
-        padding: padding,
-        child: child,
-      ),
-    );
-  }
-}
+// ToolIconButton, FloatingIconButton, FloatingPanel now live in
+// canvas_toolbar/canvas_chrome_shared.dart.
 
 class _CanvasToolbar extends StatelessWidget {
   final CanvasController controller;
@@ -3336,10 +2696,12 @@ class _CanvasToolbar extends StatelessWidget {
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
 
-    return ListenableBuilder(
-      listenable: controller,
-      builder: (context, _) {
-        final c = controller;
+    // Only the active tool matters here — listen to the narrow toolNotifier,
+    // not the whole controller, so a fast pen stroke's per-point
+    // notifyListeners() (see updateToolGesture) never rebuilds this row.
+    return ValueListenableBuilder<CanvasTool>(
+      valueListenable: controller.toolNotifier,
+      builder: (context, activeTool, _) {
         return Container(
           width: double.infinity,
           decoration: BoxDecoration(
@@ -3347,9 +2709,9 @@ class _CanvasToolbar extends StatelessWidget {
             border: Border(bottom: BorderSide(color: palette.border)),
           ),
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-          // Fixed height: just the tool icon row. The per-tool options panel
-          // is drawn separately as a floating overlay (see _ToolOptionsPanel)
-          // so opening it never resizes/moves the canvas below.
+          // Fixed height: just the tool icon row. Pen/highlighter/shape/
+          // eraser options drop down under the active tool (ToolOptionsPopover
+          // in the canvas Stack); lasso/text use their own floating menu / bar.
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -3357,10 +2719,10 @@ class _CanvasToolbar extends StatelessWidget {
                 for (final tool in kCanvasToolOrder)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 2),
-                    child: _ToolIconButton(
+                    child: ToolIconButton(
                       tool: tool,
-                      active: c.tool == tool,
-                      onTap: () => c.setTool(tool),
+                      active: activeTool == tool,
+                      onTap: () => controller.setTool(tool),
                     ),
                   ),
               ],
@@ -3387,11 +2749,30 @@ class _ToolOptionsPanel extends StatelessWidget {
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
 
+    // buildToolContextRow reads tool/toolOptionsOpen/selection/isEditingText/
+    // clipboard state — none of which change on a stroke's per-point
+    // notifyListeners() (see updateToolGesture) — plus chromeContentTick for
+    // in-place content refreshes (a color/size pick) while already open. This
+    // merge deliberately excludes the whole controller so drawing doesn't
+    // rebuild this panel every sampled point.
     return ListenableBuilder(
-      listenable: controller,
+      listenable: Listenable.merge([
+        controller.toolNotifier,
+        controller.toolOptionsOpenNotifier,
+        controller.hasSelectionNotifier,
+        controller.isEditingTextNotifier,
+        controller.clipboardNotifier,
+        controller.chromeContentTick,
+      ]),
       builder: (context, _) {
-        final contextRow =
-            _buildToolContextRow(context, controller, palette);
+        final contextRow = buildToolContextRow(
+          context,
+          controller,
+          palette,
+          includePopoverTools: false,
+          includeLassoRow: false,
+          includeTextRow: false,
+        );
         return AnimatedSwitcher(
           duration: const Duration(milliseconds: 180),
           switchInCurve: Curves.easeOutCubic,
@@ -3437,221 +2818,8 @@ class _ToolOptionsPanel extends StatelessWidget {
   }
 }
 
-class _HintRow extends StatelessWidget {
-  final IconData icon;
-  final String text;
-  final AppPalette palette;
-
-  const _HintRow({
-    required this.icon,
-    required this.text,
-    required this.palette,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Icon(icon, size: 16, color: palette.textDim),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              text,
-              style: TextStyle(fontSize: 11.5, color: palette.textDim),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SelAction extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  const _SelAction({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 2),
-      child: TextButton.icon(
-        onPressed: onTap,
-        icon: Icon(icon, size: 16),
-        label: Text(label, style: const TextStyle(fontSize: 12)),
-        style: TextButton.styleFrom(
-          visualDensity: VisualDensity.compact,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-        ),
-      ),
-    );
-  }
-}
-
-class _ToggleChip extends StatelessWidget {
-  final String label;
-  final bool bold;
-  final bool italic;
-  final bool active;
-  final VoidCallback onTap;
-
-  const _ToggleChip({
-    required this.label,
-    this.bold = false,
-    this.italic = false,
-    required this.active,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(kRadius),
-        child: Container(
-          width: 30,
-          height: 30,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: active
-                ? theme.colorScheme.primary.withValues(alpha: 0.15)
-                : null,
-            borderRadius: BorderRadius.circular(kRadius),
-            border: Border.all(
-              color: active ? theme.colorScheme.primary : theme.dividerColor,
-            ),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
-              fontStyle: italic ? FontStyle.italic : FontStyle.normal,
-              color: active ? theme.colorScheme.primary : null,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ColorDot extends StatelessWidget {
-  final Color color;
-  final bool selected;
-  final Color ringColor;
-  final Color borderColor;
-  final VoidCallback onTap;
-
-  const _ColorDot({
-    required this.color,
-    required this.selected,
-    required this.ringColor,
-    required this.borderColor,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOut,
-        width: 26,
-        height: 26,
-        padding: EdgeInsets.all(selected ? 3 : 0),
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: selected ? ringColor : Colors.transparent,
-            width: 2,
-          ),
-        ),
-        child: Container(
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: color,
-            border: Border.all(color: borderColor, width: 1),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// The rainbow "more colors" dot at the end of a color row: opens the full
-/// color wheel. [selected] (the active color isn't one of the presets) shows
-/// the ring and the current custom color in the dot's center.
-class _WheelDot extends StatelessWidget {
-  final Color current;
-  final bool selected;
-  final Color ringColor;
-  final ValueChanged<Color> onPicked;
-
-  const _WheelDot({
-    required this.current,
-    required this.selected,
-    required this.ringColor,
-    required this.onPicked,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () async {
-        final picked = await showColorWheelPicker(context, initial: current);
-        if (picked != null) onPicked(picked);
-      },
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOut,
-        width: 26,
-        height: 26,
-        padding: EdgeInsets.all(selected ? 3 : 0),
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: selected ? ringColor : Colors.transparent,
-            width: 2,
-          ),
-        ),
-        child: Container(
-          decoration: const BoxDecoration(
-            shape: BoxShape.circle,
-            gradient: kColorWheelGradient,
-          ),
-          alignment: Alignment.center,
-          child: selected
-              ? Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: current,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 1.5),
-                  ),
-                )
-              : const Icon(Icons.colorize, color: Colors.white, size: 12),
-        ),
-      ),
-    );
-  }
-}
+// _HintRow, _SelAction, _ToggleChip, _ColorDot, _WheelDot now live in
+// canvas_toolbar/tool_option_rows.dart (private to that file).
 
 class _SheetLabel extends StatelessWidget {
   final String text;

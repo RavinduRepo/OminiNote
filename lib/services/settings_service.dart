@@ -127,6 +127,65 @@ class SettingsService {
     await _persist();
   }
 
+  // ── Toolbar customization (device-local) ────────────────────────────────
+
+  /// Which "+" (Add) menu actions are promoted to show directly on the app
+  /// bar, in bar order — anything not listed here stays in the "+" menu.
+  /// Separate per layout (mobile's bar has far less room than desktop's).
+  /// Action ids reuse the exact strings already used as
+  /// `_runAddAction`/menu `onSelected` values ('blank', 'horizontal', 'pdf',
+  /// 'image', 'camera', 'paste', 'pastePage'). Desktop starts seeded to
+  /// today's hardcoded layout so existing users see no change until they
+  /// open "Customize toolbar…"; mobile starts empty (today's mobile bar
+  /// promotes nothing).
+  List<String> promotedAddActionsMobile = [];
+  List<String> promotedAddActionsDesktop = ['blank', 'image'];
+
+  /// Same idea for the "⋯" (overflow) menu ('fullscreen', 'toggle_toolbar',
+  /// 'rename', 'export', 'navigator', 'bookmarks', 'attachments',
+  /// 'page_settings', 'shape_snap', 'finger_draw').
+  List<String> promotedOverflowActionsMobile = [];
+  List<String> promotedOverflowActionsDesktop = ['fullscreen', 'toggle_toolbar'];
+
+  Future<void> setPromotedActions({
+    required bool mobile,
+    required String origin, // 'add' | 'overflow'
+    required List<String> ids,
+  }) async {
+    if (origin == 'add') {
+      if (mobile) {
+        promotedAddActionsMobile = ids;
+      } else {
+        promotedAddActionsDesktop = ids;
+      }
+    } else {
+      if (mobile) {
+        promotedOverflowActionsMobile = ids;
+      } else {
+        promotedOverflowActionsDesktop = ids;
+      }
+    }
+    await _persist();
+  }
+
+  /// Per-tool-kind pin state for the pen/highlighter/shape/eraser options
+  /// popover ('pen', 'highlighter', 'shape', 'eraser'): pinned stays open
+  /// across tool switches; unpinned (default) auto-closes on tool switch,
+  /// same as `CanvasController.setTool`'s usual behavior.
+  Set<String> pinnedToolOptionPopovers = {};
+
+  bool isToolOptionPopoverPinned(String toolKind) =>
+      pinnedToolOptionPopovers.contains(toolKind);
+
+  Future<void> setToolOptionPopoverPinned(String toolKind, bool pinned) async {
+    if (pinned) {
+      if (!pinnedToolOptionPopovers.add(toolKind)) return;
+    } else {
+      if (!pinnedToolOptionPopovers.remove(toolKind)) return;
+    }
+    await _persist();
+  }
+
   // ── Sync-related fields ─────────────────────────────────────────────────
 
   /// Stable identifier for this installation, generated once and persisted.
@@ -275,6 +334,27 @@ class SettingsService {
         data['canvasViewports'] as Map,
       );
     }
+    if (data['promotedAddActionsMobile'] is List) {
+      promotedAddActionsMobile =
+          (data['promotedAddActionsMobile'] as List).cast<String>();
+    }
+    if (data['promotedAddActionsDesktop'] is List) {
+      promotedAddActionsDesktop =
+          (data['promotedAddActionsDesktop'] as List).cast<String>();
+    }
+    if (data['promotedOverflowActionsMobile'] is List) {
+      promotedOverflowActionsMobile =
+          (data['promotedOverflowActionsMobile'] as List).cast<String>();
+    }
+    if (data['promotedOverflowActionsDesktop'] is List) {
+      promotedOverflowActionsDesktop =
+          (data['promotedOverflowActionsDesktop'] as List).cast<String>();
+    }
+    if (data['pinnedToolOptionPopovers'] is List) {
+      pinnedToolOptionPopovers = Set<String>.from(
+        (data['pinnedToolOptionPopovers'] as List).cast<String>(),
+      );
+    }
 
     // Persist device ID if it was just generated.
     if (data['deviceId'] == null) await _persist();
@@ -374,6 +454,11 @@ class SettingsService {
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'defaultNotebookId': defaultNotebookId,
         'canvasViewports': _canvasViewports,
+        'promotedAddActionsMobile': promotedAddActionsMobile,
+        'promotedAddActionsDesktop': promotedAddActionsDesktop,
+        'promotedOverflowActionsMobile': promotedOverflowActionsMobile,
+        'promotedOverflowActionsDesktop': promotedOverflowActionsDesktop,
+        'pinnedToolOptionPopovers': pinnedToolOptionPopovers.toList(),
       }),
     );
   }

@@ -83,6 +83,10 @@ Future<void> showActionSheet(
     context: context,
     backgroundColor: Colors.transparent,
     barrierColor: Colors.black.withValues(alpha: 0.45),
+    // Let the sheet grow to its content (capped + scrolled internally below);
+    // without this the sheet is capped at ~half-screen and a long menu
+    // overflows instead of scrolling.
+    isScrollControlled: true,
     builder: (sheetContext) {
       final theme = Theme.of(sheetContext);
       final palette = theme.extension<AppPalette>()!;

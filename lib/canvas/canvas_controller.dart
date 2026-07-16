@@ -406,9 +406,37 @@ class CanvasController extends ChangeNotifier {
     return layout.pageAt(center) ?? layout.nearestPage(center);
   }
 
+  // ── Narrow UI-chrome notifiers ──────────────────────────────────────────
+  // Mirror specific fields below (tool/toolOptionsOpen/selection/drag-mode/
+  // editing) but are updated ONLY at their existing discrete mutation
+  // points — never from the per-point drawing path (updateToolGesture,
+  // _eraseAt, the hold-timer, snap-adjust). Chrome widgets (toolbar,
+  // popovers, floating menus) must listen to these instead of the whole
+  // controller: a fast pen stroke calls notifyListeners() on every sampled
+  // point, and a widget listening to the whole controller rebuilds on every
+  // one of those — the exact jank this was introduced to fix.
+  final ValueNotifier<CanvasTool> toolNotifier =
+      ValueNotifier(CanvasTool.text);
+  final ValueNotifier<bool> toolOptionsOpenNotifier = ValueNotifier(false);
+  final ValueNotifier<bool> hasSelectionNotifier = ValueNotifier(false);
+  final ValueNotifier<bool> isDraggingSelectionNotifier =
+      ValueNotifier(false);
+  final ValueNotifier<bool> isEditingTextNotifier = ValueNotifier(false);
+  final ValueNotifier<bool> clipboardNotifier = ValueNotifier(false);
+
+  /// Bumped whenever an open popover's own content may have changed (a
+  /// color/size pick, a completed op) — a content-only refresh signal,
+  /// deliberately separate from the visibility notifiers above.
+  final ValueNotifier<int> chromeContentTick = ValueNotifier(0);
+
   // ── Tool & style state ─────────────────────────────────────────────────
 
-  CanvasTool tool = CanvasTool.text;
+  CanvasTool _tool = CanvasTool.text;
+  CanvasTool get tool => _tool;
+  set tool(CanvasTool t) {
+    _tool = t;
+    toolNotifier.value = t;
+  }
 
   /// The one automatic tool switch: an S-Pen / stylus touching the canvas while
   /// the Text tool is active switches to the Pen (draw) tool. Only from Text —
@@ -484,6 +512,7 @@ class CanvasController extends ChangeNotifier {
     _editingElement = element;
     _richController = controller;
     editingElementId = element?.id;
+    isEditingTextNotifier.value = element != null;
     if (element != null) {
       textFontFamily = element.fontFamily;
       textFontSize = element.fontSize;
@@ -499,7 +528,12 @@ class CanvasController extends ChangeNotifier {
   /// toggles this; switching to a different tool always closes it — so
   /// options only ever appear on a deliberate re-tap, in both the normal
   /// toolbar and the full-screen floating tool control.
-  bool toolOptionsOpen = false;
+  bool _toolOptionsOpen = false;
+  bool get toolOptionsOpen => _toolOptionsOpen;
+  set toolOptionsOpen(bool v) {
+    _toolOptionsOpen = v;
+    toolOptionsOpenNotifier.value = v;
+  }
 
   void setTool(CanvasTool t) {
     if (tool == t) {
@@ -523,7 +557,10 @@ class CanvasController extends ChangeNotifier {
 
   /// Public nudge for widgets that mutate simple style fields directly
   /// (color, sizes) and need the toolbar/painter to refresh.
-  void notifyRepaint() => notifyListeners();
+  void notifyRepaint() {
+    chromeContentTick.value++;
+    notifyListeners();
+  }
 
   // ── Text style application ───────────────────────────────────────────
   //
@@ -729,6 +766,7 @@ class CanvasController extends ChangeNotifier {
   void _afterMutation(_CanvasOp op) {
     if (op.structural) _relayout();
     _markDirty(op.dirtyPageIds, structural: op.structural);
+    chromeContentTick.value++;
     notifyListeners();
   }
 
@@ -1197,6 +1235,7 @@ class CanvasController extends ChangeNotifier {
       return;
     }
     _dragMode = SelectionHit.none;
+    isDraggingSelectionNotifier.value = false;
     notifyListeners();
   }
 
@@ -1538,7 +1577,13 @@ class CanvasController extends ChangeNotifier {
   // ── Selection (lasso) ──────────────────────────────────────────────────
 
   /// Live references into the selected page's element list.
-  List<CanvasElement> selection = [];
+  List<CanvasElement> _selection = [];
+  List<CanvasElement> get selection => _selection;
+  set selection(List<CanvasElement> v) {
+    _selection = v;
+    hasSelectionNotifier.value = v.isNotEmpty;
+  }
+
   String? selectionPageId;
   Rect? selectionBounds; // page-local
 
@@ -1551,6 +1596,7 @@ class CanvasController extends ChangeNotifier {
     selectionPageId = null;
     selectionBounds = null;
     _dragMode = SelectionHit.none;
+    isDraggingSelectionNotifier.value = false;
     if (notify) notifyListeners();
   }
 
@@ -1714,6 +1760,7 @@ class CanvasController extends ChangeNotifier {
 
   void _beginSelectionDrag(SelectionHit hit, Offset canvasPos) {
     _dragMode = hit;
+    isDraggingSelectionNotifier.value = true;
     _dragLast = canvasPos;
     _dragBefore = [for (final el in selection) el.deepCopy()];
   }
@@ -1886,6 +1933,7 @@ class CanvasController extends ChangeNotifier {
 
   void _endSelectionDrag() {
     _dragMode = SelectionHit.none;
+    isDraggingSelectionNotifier.value = false;
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) {
       _dragBefore = [];
@@ -2112,6 +2160,7 @@ class CanvasController extends ChangeNotifier {
 
   void copySelection() {
     _appClipboard = [for (final el in selection) el.deepCopy()];
+    clipboardNotifier.value = clipboardHasContent;
     unawaited(systemCopyHook?.call()); // mirror to the OS clipboard
     notifyListeners();
   }
@@ -2829,6 +2878,7 @@ class CanvasController extends ChangeNotifier {
       align: first.align,
     );
     _appClipboard = [merged];
+    clipboardNotifier.value = clipboardHasContent;
     deleteLinkedText();
     notifyListeners();
   }
@@ -3639,6 +3689,13 @@ class CanvasController extends ChangeNotifier {
     flushSaves();
     renderCache.dispose();
     pictureCache.dispose();
+    toolNotifier.dispose();
+    toolOptionsOpenNotifier.dispose();
+    hasSelectionNotifier.dispose();
+    isDraggingSelectionNotifier.dispose();
+    isEditingTextNotifier.dispose();
+    clipboardNotifier.dispose();
+    chromeContentTick.dispose();
     super.dispose();
   }
 }
