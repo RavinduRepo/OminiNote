@@ -453,8 +453,10 @@ class RichTextController extends TextEditingController {
           _attrs[j].sameStyle(attr)) {
         j++;
       }
-      children.add(
-        TextSpan(text: text.substring(i, j), style: _styleFor(attr)),
+      // checkboxSafeSpans: pins ☐/☑ to a consistent symbol font on Android
+      // (same fix as the painter's textSpanForElement — see text_measure).
+      children.addAll(
+        checkboxSafeSpans(text.substring(i, j), _styleFor(attr)),
       );
       i = j;
     }

@@ -111,6 +111,51 @@ int? checkboxOffsetAt(TextElement el, Offset localOffset) {
   return boxes.first.toRect().inflate(6).contains(localOffset) ? g : null;
 }
 
+/// Android font-fallback quirk (KNOWN_ISSUES, SM X510): ☑ U+2611 also lives in
+/// the emoji font while ☐ U+2610 only lives in symbol fonts, so when both share
+/// one shaping run a leading ☑ can steer the ☐s after it onto a mismatched
+/// "voting box" glyph. Fixed at render time only: each checkbox glyph goes in
+/// its own span whose fallback chain leads with the symbol fonts — the distinct
+/// style forces a shaping-run boundary and pins both glyphs to the same font.
+/// Stored text keeps the plain 1-char glyphs (hit-test/toggle/sync untouched);
+/// unresolvable family names in the fallback list are skipped harmlessly on
+/// other platforms.
+const List<String> _kCheckboxFallback = [
+  'Noto Sans Symbols',
+  'Noto Sans Symbols 2',
+];
+
+/// [text] styled with [style], but with every ☐/☑ isolated into its own span
+/// using the symbol-font-first fallback above. Character counts are unchanged,
+/// so layouts built from these spans keep the same text offsets.
+List<TextSpan> checkboxSafeSpans(String text, TextStyle style) {
+  if (!text.contains('☐') && !text.contains('☑')) {
+    return [TextSpan(text: text, style: style)];
+  }
+  final glyphStyle = style.copyWith(
+    fontFamilyFallback: [
+      ..._kCheckboxFallback,
+      ...?style.fontFamilyFallback,
+    ],
+  );
+  final spans = <TextSpan>[];
+  var start = 0;
+  for (var i = 0; i < text.length; i++) {
+    final ch = text[i];
+    if (ch == '☐' || ch == '☑') {
+      if (i > start) {
+        spans.add(TextSpan(text: text.substring(start, i), style: style));
+      }
+      spans.add(TextSpan(text: ch, style: glyphStyle));
+      start = i + 1;
+    }
+  }
+  if (start < text.length) {
+    spans.add(TextSpan(text: text.substring(start), style: style));
+  }
+  return spans;
+}
+
 /// The element's content as a multi-style span (one child per run).
 InlineSpan textSpanForElement(TextElement el) {
   if (el.runs.isEmpty) {
@@ -119,7 +164,7 @@ InlineSpan textSpanForElement(TextElement el) {
   return TextSpan(
     children: [
       for (final r in el.runs)
-        TextSpan(text: r.text, style: textStyleForRun(r)),
+        ...checkboxSafeSpans(r.text, textStyleForRun(r)),
     ],
   );
 }

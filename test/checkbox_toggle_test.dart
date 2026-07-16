@@ -1,4 +1,5 @@
-import 'dart:ui';
+import 'dart:ui' hide TextStyle;
+import 'package:flutter/painting.dart' show TextStyle;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omininote/canvas/canvas_controller.dart';
 import 'package:omininote/canvas/text_measure.dart';
@@ -98,6 +99,42 @@ void main() {
     test('plain text boxes bail out early', () {
       final el = _box('no boxes here');
       expect(checkboxOffsetAt(el, const Offset(8, 10)), isNull);
+    });
+  });
+
+  group('checkboxSafeSpans (Android glyph-consistency fix)', () {
+    const base = TextStyle(fontSize: 16, fontFamilyFallback: ['serif']);
+
+    test('glyph-free text is one untouched span', () {
+      final spans = checkboxSafeSpans('plain text', base);
+      expect(spans, hasLength(1));
+      expect(spans.single.text, 'plain text');
+      expect(spans.single.style, same(base));
+    });
+
+    test('each ☐/☑ gets its own span with symbol-font-first fallback', () {
+      final spans = checkboxSafeSpans('☑ done\n☐ todo', base);
+      expect(spans.map((s) => s.text).toList(),
+          ['☑', ' done\n', '☐', ' todo']);
+      for (final s in spans) {
+        final fb = s.style!.fontFamilyFallback!;
+        if (s.text == '☐' || s.text == '☑') {
+          // Symbol fonts lead; the style's own fallback is preserved after.
+          expect(fb.first, 'Noto Sans Symbols');
+          expect(fb.last, 'serif');
+        } else {
+          expect(fb, ['serif']);
+        }
+      }
+      // Character counts unchanged → text offsets in layouts stay aligned.
+      expect(spans.map((s) => s.text).join(), '☑ done\n☐ todo');
+    });
+
+    test('checkboxOffsetAt still hit-tests through the split spans', () {
+      final el = _box('☑ done\n☐ todo');
+      expect(checkboxOffsetAt(el, const Offset(8, 10)), 0);
+      // Second line's glyph (Ahem: 16px line height ×1.3 → ~y 21+).
+      expect(checkboxOffsetAt(el, const Offset(8, 31)), 7);
     });
   });
 }
