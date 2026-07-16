@@ -50,6 +50,34 @@ TextStyle textStyleForElement(TextElement el) {
   );
 }
 
+/// The text-edit overlay's base style: [textStyleForElement]'s fields with
+/// `inherit: false`. Material's TextField merges the theme's bodyLarge UNDER
+/// its style parameter — but `TextStyle.merge` returns a non-inheriting style
+/// verbatim, so nothing from the theme (letterSpacing 0.5, an explicit
+/// fontFamily that may resolve to a different face than the engine default,
+/// leadingDistribution.even) can leak into the editor. Null fields then mean
+/// "engine default" — exactly what they mean in the painter's TextPainter —
+/// so the editor lays text out identically to the committed rendering.
+TextStyle editorBaseStyle(TextElement el) {
+  final s = textStyleForElement(el);
+  return TextStyle(
+    inherit: false,
+    color: s.color,
+    fontSize: s.fontSize,
+    fontFamily: s.fontFamily,
+    fontFamilyFallback: s.fontFamilyFallback,
+    fontWeight: s.fontWeight,
+    fontStyle: s.fontStyle,
+    height: s.height,
+    // Explicit zeros (== the engine default the painter gets from null), so
+    // no future merge path can reintroduce spacing drift.
+    letterSpacing: 0,
+    wordSpacing: 0,
+    leadingDistribution: TextLeadingDistribution.proportional,
+    textBaseline: TextBaseline.alphabetic,
+  );
+}
+
 /// The link URL at [localOffset] (relative to the box's top-left) within [el],
 /// or null if that point isn't on a link run. Uses the same layout the painter
 /// does, so it lines up with what's drawn.
@@ -133,10 +161,7 @@ List<TextSpan> checkboxSafeSpans(String text, TextStyle style) {
     return [TextSpan(text: text, style: style)];
   }
   final glyphStyle = style.copyWith(
-    fontFamilyFallback: [
-      ..._kCheckboxFallback,
-      ...?style.fontFamilyFallback,
-    ],
+    fontFamilyFallback: [..._kCheckboxFallback, ...?style.fontFamilyFallback],
   );
   final spans = <TextSpan>[];
   var start = 0;
@@ -163,8 +188,7 @@ InlineSpan textSpanForElement(TextElement el) {
   }
   return TextSpan(
     children: [
-      for (final r in el.runs)
-        ...checkboxSafeSpans(r.text, textStyleForRun(r)),
+      for (final r in el.runs) ...checkboxSafeSpans(r.text, textStyleForRun(r)),
     ],
   );
 }

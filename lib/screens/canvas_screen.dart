@@ -3,9 +3,11 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
+import 'package:flutter/rendering.dart'
+    show RenderRepaintBoundary, RenderEditable;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -81,7 +83,8 @@ class CanvasScreen extends StatefulWidget {
   State<CanvasScreen> createState() => _CanvasScreenState();
 }
 
-class _CanvasScreenState extends State<CanvasScreen> {
+class _CanvasScreenState extends State<CanvasScreen>
+    with WidgetsBindingObserver {
   final _service = NotebookService();
   CanvasController? _controller;
   bool _showToolbar = true;
@@ -125,12 +128,22 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// OS clipboard.
   final GlobalKey _canvasBoundaryKey = GlobalKey();
 
+  /// Keys the text style bar floating at the canvas bottom so the caret
+  /// auto-scroll can keep the caret above it, not just above the keyboard.
+  final GlobalKey _textBarKey = GlobalKey();
+
+  /// TEMP (debug parity instrumentation — remove once the editor-vs-painter
+  /// wrap mismatch is closed): keys the editing TextField so the dump below
+  /// can find its RenderEditable.
+  final GlobalKey _editorFieldKey = GlobalKey();
+
   /// Keyboard focus for canvas shortcuts (Ctrl+C/V/X/Z/Y/D, Delete, Esc).
   final FocusNode _canvasFocus = FocusNode(debugLabel: 'canvas-shortcuts');
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
     // Close this view if its notebook is moved to another account or deleted on
     // another device (its notebooks.json entry is tombstoned here). Only when
@@ -140,12 +153,23 @@ class _CanvasScreenState extends State<CanvasScreen> {
     }
   }
 
+  @override
+  void didChangeMetrics() {
+    // Keyboard opening/closing (or a window resize) moves the visible area —
+    // keep the editing caret in view. The Scaffold consumes the keyboard inset
+    // when it resizes, so watching MediaQuery from inside the body misses
+    // this; window metrics don't lie.
+    if (_textEdit != null) _scheduleEnsureEditVisible();
+  }
+
   bool _closing = false;
 
   Future<void> _onSyncData() async {
     if (_closing || !mounted) return;
     final nb = await _service.getNotebook(widget.canvas.notebookId);
-    if (nb != null || _closing || !mounted) return; // still here — nothing to do
+    if (nb != null || _closing || !mounted) {
+      return; // still here — nothing to do
+    }
     _closing = true;
     // The whole notebook is gone (moved/deleted), so the section + notebook
     // screens beneath this canvas are stale too — pop all the way back to the
@@ -154,10 +178,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final messenger = ScaffoldMessenger.of(context);
     if (navigator.canPop()) {
       navigator.popUntil((route) => route.isFirst);
-      messenger.showSnackBar(const SnackBar(
-        content: Text('This notebook was moved or deleted on another device.'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This notebook was moved or deleted on another device.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
@@ -338,12 +366,14 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // mis-convert literal syntax its content merely mentions (found live on a
     // Markdown spec page whose escaped examples became headings).
     final first = runs.first;
-    final uniform = runs.every((r) =>
-        r.fontSize == first.fontSize &&
-        r.bold == first.bold &&
-        r.italic == first.italic &&
-        r.fontFamily == first.fontFamily &&
-        r.link == null);
+    final uniform = runs.every(
+      (r) =>
+          r.fontSize == first.fontSize &&
+          r.bold == first.bold &&
+          r.italic == first.italic &&
+          r.fontFamily == first.fontFamily &&
+          r.link == null,
+    );
     final joined = runs.map((r) => r.text).join();
     var wasMarkdown = false;
     if (uniform && looksLikeMarkdown(joined)) {
@@ -356,9 +386,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
     final boxes = c.insertRunsAsText(target.pageId, runs);
     final what = wasMarkdown ? 'Markdown as formatted text' : 'formatted text';
-    _toast(
-      boxes > 1 ? 'Pasted $what across $boxes pages' : 'Pasted $what',
-    );
+    _toast(boxes > 1 ? 'Pasted $what across $boxes pages' : 'Pasted $what');
     return boxes > 0;
   }
 
@@ -410,6 +438,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (!widget.embedded) {
       SyncService().dataVersion.removeListener(_onSyncData);
     }
@@ -487,7 +516,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
       // Text (below) — commit immediately rather than defer, or the session
       // would be orphaned open once the tool is no longer Text by the time
       // pointer-up's fallback check runs.
-      final stylusAutoSwitch = e.kind == PointerDeviceKind.stylus ||
+      final stylusAutoSwitch =
+          e.kind == PointerDeviceKind.stylus ||
           e.kind == PointerDeviceKind.invertedStylus;
       if (c.tool != CanvasTool.text || stylusAutoSwitch) {
         _commitTextEdit();
@@ -675,7 +705,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
         return;
       }
       final now = DateTime.now();
-      final isDouble = _lastTapTime != null &&
+      final isDouble =
+          _lastTapTime != null &&
           _lastTapPos != null &&
           now.difference(_lastTapTime!) < const Duration(milliseconds: 350) &&
           (screenPos - _lastTapPos!).distance < 24;
@@ -923,6 +954,81 @@ class _CanvasScreenState extends State<CanvasScreen> {
     // Routes toolbar style changes to the in-box selection, and hides the
     // element from the painter (the TextField draws it while editing).
     c.setEditing(el, rc);
+    _scheduleEnsureEditVisible();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _debugDumpEditorParity(),
+    );
+  }
+
+  /// TEMP (remove with _editorFieldKey): prints the editing field's actual
+  /// laid-out width + first line-break offsets next to the painter's, so an
+  /// on-device wrap mismatch shows its numbers in `flutter run` logs.
+  void _debugDumpEditorParity() {
+    if (!kDebugMode) return;
+    final session = _textEdit;
+    final c = _controller;
+    if (session == null || c == null || !mounted) return;
+    final el = session.element;
+    RenderEditable? re;
+    void visit(RenderObject o) {
+      if (re != null) return;
+      if (o is RenderEditable) {
+        re = o;
+        return;
+      }
+      o.visitChildren(visit);
+    }
+
+    final root = _editorFieldKey.currentContext?.findRenderObject();
+    if (root == null) return;
+    visit(root);
+    final ed = re;
+    if (ed == null) return;
+
+    List<int> lineEnds(double Function(int) yOf, int count) {
+      final ends = <int>[];
+      var prevY = yOf(0);
+      for (var i = 1; i <= el.text.length && ends.length < count; i++) {
+        final y = yOf(i);
+        if ((y - prevY).abs() > 1) {
+          ends.add(i);
+          prevY = y;
+        }
+      }
+      return ends;
+    }
+
+    final tp = TextPainter(
+      text: textSpanForElement(el),
+      textDirection: TextDirection.ltr,
+      textAlign: switch (el.align) {
+        TextAlignOption.center => TextAlign.center,
+        TextAlignOption.right => TextAlign.right,
+        _ => TextAlign.left,
+      },
+    )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+    final edEnds = lineEnds(
+      (i) => ed.getLocalRectForCaret(TextPosition(offset: i)).top,
+      3,
+    );
+    final tpEnds = lineEnds(
+      (i) => tp.getOffsetForCaret(TextPosition(offset: i), Rect.zero).dy,
+      3,
+    );
+    tp.dispose();
+    final expectedField =
+        math.max(el.rect.width, 60 / c.zoom) + (2 / c.zoom) + 1;
+    debugPrint(
+      'EDITPARITY zoom=${c.zoom.toStringAsFixed(4)} '
+      'rectW=${el.rect.width.toStringAsFixed(2)} '
+      'fieldW=${ed.size.width.toStringAsFixed(2)} '
+      'fieldMaxW=${ed.constraints.maxWidth.toStringAsFixed(2)} '
+      'expectedField=${expectedField.toStringAsFixed(2)} '
+      'cursorW=${(2 / c.zoom).toStringAsFixed(2)} '
+      'align=${el.align.name} runs=${el.runs.length} '
+      'edLineEnds=$edEnds tpLineEnds=$tpEnds '
+      '${edEnds.toString() == tpEnds.toString() ? "MATCH" : "MISMATCH"}',
+    );
   }
 
   /// Fires on any text or selection change while editing: re-measures the box
@@ -957,8 +1063,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
     c.textFontSize = display.fontSize;
     c.textBold = display.bold;
     c.textItalic = display.italic;
-    c.textColor = display.color; // text's own color slot, whatever tool is active
+    c.textColor =
+        display.color; // text's own color slot, whatever tool is active
     _remeasureEditing();
+    // Typing or moving the caret can carry it off screen (below the keyboard,
+    // past the viewport edge while zoomed) — glide it back into view.
+    _scheduleEnsureEditVisible();
     c.notifyRepaint(); // refresh toolbar highlight
   }
 
@@ -981,9 +1091,99 @@ class _CanvasScreenState extends State<CanvasScreen> {
         (_) => _handleTypingOverflow(),
       );
     }
+    // TEMP parity instrumentation: re-dump after each remeasure so the log
+    // reflects the settled (post-rebuild) geometry, not just edit-open.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _debugDumpEditorParity(),
+    );
   }
 
   bool _handlingOverflow = false;
+  bool _ensureVisibleScheduled = false;
+
+  /// Schedules a post-frame viewport glide that brings the editing caret into
+  /// view — the post-frame delay lets a pending remeasure/keyboard resize land
+  /// first so the geometry we correct against is current.
+  void _scheduleEnsureEditVisible() {
+    if (_ensureVisibleScheduled) return;
+    _ensureVisibleScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ensureVisibleScheduled = false;
+      _ensureEditCaretVisible();
+    });
+  }
+
+  /// Glides the viewport so the editing caret is on screen. Matters most on
+  /// mobile: the keyboard shrinks the canvas (resizeToAvoidBottomInset) and
+  /// the box being edited can end up hidden under where it appeared.
+  void _ensureEditCaretVisible() {
+    final session = _textEdit;
+    final c = _controller;
+    if (session == null || c == null || !mounted || c.screenSize.isEmpty) {
+      return;
+    }
+    final el = session.element;
+    final sel = session.controller.selection;
+    final caretIdx = (sel.isValid ? sel.extentOffset : el.text.length).clamp(
+      0,
+      el.text.length,
+    );
+    // Caret position in page points, from the same layout the painter uses.
+    final tp = TextPainter(
+      text: textSpanForElement(el),
+      textDirection: TextDirection.ltr,
+      textAlign: switch (el.align) {
+        TextAlignOption.center => TextAlign.center,
+        TextAlignOption.right => TextAlign.right,
+        _ => TextAlign.left,
+      },
+    )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+    final caret = tp.getOffsetForCaret(
+      TextPosition(offset: caretIdx),
+      Rect.zero,
+    );
+    final lineH = tp.preferredLineHeight;
+    tp.dispose();
+    final screen = c.pageScreenRect(
+      session.pageId,
+      Rect.fromLTWH(el.rect.left + caret.dx, el.rect.top + caret.dy, 1, lineH),
+    );
+    // Visible area: the canvas height, minus however much of it the keyboard
+    // covers — computed from window metrics + the canvas's global position,
+    // which is correct whether or not the Scaffold resized for the keyboard
+    // (when it did, the overlap is simply ≤ 0).
+    const margin = 28.0;
+    var visibleBottom = c.screenSize.height;
+    final rb = _canvasBoundaryKey.currentContext?.findRenderObject();
+    if (rb is RenderBox && rb.hasSize) {
+      final view = View.of(context);
+      final keyboardTop =
+          (view.physicalSize.height - view.viewInsets.bottom) /
+          view.devicePixelRatio;
+      final canvasTop = rb.localToGlobal(Offset.zero).dy;
+      visibleBottom = math.min(visibleBottom, keyboardTop - canvasTop);
+      // The text style bar floats over the canvas bottom (above the
+      // keyboard) — keep the caret above IT, not just above the keyboard.
+      final bar = _textBarKey.currentContext?.findRenderObject();
+      if (bar is RenderBox && bar.hasSize && bar.size.height > 0) {
+        final barTop = bar.localToGlobal(Offset.zero).dy - canvasTop;
+        visibleBottom = math.min(visibleBottom, barTop);
+      }
+    }
+    var dy = 0.0;
+    if (screen.bottom > visibleBottom - margin) {
+      dy = (visibleBottom - margin) - screen.bottom;
+    } else if (screen.top < margin) {
+      dy = margin - screen.top;
+    }
+    var dx = 0.0;
+    if (screen.right > c.screenSize.width - margin) {
+      dx = (c.screenSize.width - margin) - screen.right;
+    } else if (screen.left < margin) {
+      dx = margin - screen.left;
+    }
+    if (dx != 0 || dy != 0) c.scrollByWheel(Offset(dx, dy));
+  }
 
   /// Live-typing page flow (the paste-splitter's typing counterpart): when the
   /// editing box crosses the page bottom, the lines that no longer fit move to
@@ -1032,13 +1232,11 @@ class _CanvasScreenState extends State<CanvasScreen> {
 
       if (caret > fitLen) {
         // The caret rode the overflow: hop the session to the continuation.
-        final rel =
-            math.min(math.max(caret - fitLen, 0), targetEl.text.length);
+        final rel = math.min(math.max(caret - fitLen, 0), targetEl.text.length);
         _commitTextEdit();
         c.jumpToPage(targetPageId);
         _startTextEdit(targetPageId, targetEl, isNew: false);
-        _textEdit?.controller.selection =
-            TextSelection.collapsed(offset: rel);
+        _textEdit?.controller.selection = TextSelection.collapsed(offset: rel);
       }
     } finally {
       _handlingOverflow = false;
@@ -1099,62 +1297,74 @@ class _CanvasScreenState extends State<CanvasScreen> {
       return IconButton(
         icon: Icon(Icons.more_vert, color: palette.textDim),
         tooltip: 'More',
-        onPressed: () => showActionSheet(context, items: [
-          if (shown('fullscreen'))
-            ActionSheetItem(
+        onPressed: () => showActionSheet(
+          context,
+          items: [
+            if (shown('fullscreen'))
+              ActionSheetItem(
                 icon: Icons.fullscreen,
                 label: 'Full screen',
-                onTap: _toggleFullScreen),
-          if (shown('toggle_toolbar'))
-            ActionSheetItem(
+                onTap: _toggleFullScreen,
+              ),
+            if (shown('toggle_toolbar'))
+              ActionSheetItem(
                 icon: _showToolbar ? Icons.expand_less : Icons.brush_outlined,
                 label: _showToolbar ? 'Hide tools' : 'Show tools',
-                onTap: () => setState(() => _showToolbar = !_showToolbar)),
-          if (shown('rename'))
-            ActionSheetItem(
+                onTap: () => setState(() => _showToolbar = !_showToolbar),
+              ),
+            if (shown('rename'))
+              ActionSheetItem(
                 icon: Icons.edit_outlined,
                 label: 'Rename',
-                onTap: _renameCanvas),
-          if (shown('export'))
-            ActionSheetItem(
+                onTap: _renameCanvas,
+              ),
+            if (shown('export'))
+              ActionSheetItem(
                 icon: Icons.picture_as_pdf_outlined,
                 label: 'Export PDF',
-                onTap: _exportPdf),
-          if (shown('navigator'))
-            ActionSheetItem(
+                onTap: _exportPdf,
+              ),
+            if (shown('navigator'))
+              ActionSheetItem(
                 icon: Icons.grid_view_outlined,
                 label: 'Pages',
-                onTap: _showNavigator),
-          if (shown('bookmarks'))
-            ActionSheetItem(
+                onTap: _showNavigator,
+              ),
+            if (shown('bookmarks'))
+              ActionSheetItem(
                 icon: Icons.bookmark_border,
                 label: 'Bookmarks',
-                onTap: _showBookmarks),
-          if (shown('attachments'))
-            ActionSheetItem(
+                onTap: _showBookmarks,
+              ),
+            if (shown('attachments'))
+              ActionSheetItem(
                 icon: Icons.attach_file,
                 label: 'Attachments',
-                onTap: _showAttachments),
-          if (shown('page_settings'))
-            ActionSheetItem(
+                onTap: _showAttachments,
+              ),
+            if (shown('page_settings'))
+              ActionSheetItem(
                 icon: Icons.description_outlined,
                 label: 'Page settings',
-                onTap: _showPageSettings),
-          if (shown('shape_snap'))
-            ActionSheetItem(
+                onTap: _showPageSettings,
+              ),
+            if (shown('shape_snap'))
+              ActionSheetItem(
                 icon: SettingsService().shapeSnap
                     ? Icons.check_box_outlined
                     : Icons.check_box_outline_blank,
                 label: 'Snap drawn shapes',
-                onTap: _toggleShapeSnap),
-          if (shown('finger_draw'))
-            ActionSheetItem(
+                onTap: _toggleShapeSnap,
+              ),
+            if (shown('finger_draw'))
+              ActionSheetItem(
                 icon: SettingsService().fingerDraw
                     ? Icons.check_box_outlined
                     : Icons.check_box_outline_blank,
                 label: 'Draw with finger',
-                onTap: _toggleFingerDraw),
-          ActionSheetItem(
+                onTap: _toggleFingerDraw,
+              ),
+            ActionSheetItem(
               icon: Icons.tune,
               label: 'Customize toolbar…',
               onTap: () async {
@@ -1163,8 +1373,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
                 // notifies this screen, so force a rebuild to pick up the
                 // new promoted-action lists.
                 if (mounted) setState(() {});
-              }),
-        ]),
+              },
+            ),
+          ],
+        ),
       );
     }
     return PopupMenuButton<String>(
@@ -1204,9 +1416,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
           iconMenuItem('fullscreen', Icons.fullscreen, 'Full screen'),
         if (shown('toggle_toolbar'))
           iconMenuItem(
-              'toggle_toolbar',
-              _showToolbar ? Icons.expand_less : Icons.brush_outlined,
-              _showToolbar ? 'Hide tools' : 'Show tools'),
+            'toggle_toolbar',
+            _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+            _showToolbar ? 'Hide tools' : 'Show tools',
+          ),
         if (shown('rename'))
           iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
         if (shown('export'))
@@ -1218,23 +1431,28 @@ class _CanvasScreenState extends State<CanvasScreen> {
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         if (shown('page_settings'))
-          iconMenuItem('page_settings', Icons.description_outlined,
-              'Page settings'),
+          iconMenuItem(
+            'page_settings',
+            Icons.description_outlined,
+            'Page settings',
+          ),
         // Checkbox glyphs reflect toggle state, matching the mobile sheet.
         if (shown('shape_snap'))
           iconMenuItem(
-              'shape_snap',
-              SettingsService().shapeSnap
-                  ? Icons.check_box_outlined
-                  : Icons.check_box_outline_blank,
-              'Snap drawn shapes'),
+            'shape_snap',
+            SettingsService().shapeSnap
+                ? Icons.check_box_outlined
+                : Icons.check_box_outline_blank,
+            'Snap drawn shapes',
+          ),
         if (shown('finger_draw'))
           iconMenuItem(
-              'finger_draw',
-              SettingsService().fingerDraw
-                  ? Icons.check_box_outlined
-                  : Icons.check_box_outline_blank,
-              'Draw with finger'),
+            'finger_draw',
+            SettingsService().fingerDraw
+                ? Icons.check_box_outlined
+                : Icons.check_box_outline_blank,
+            'Draw with finger',
+          ),
         iconMenuItem('customize', Icons.tune, 'Customize toolbar…'),
       ],
     );
@@ -1253,63 +1471,63 @@ class _CanvasScreenState extends State<CanvasScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-              const SizedBox(height: 8),
-              const _SheetLabel('Pages'),
-              if (shown('blank'))
-                ListTile(
-                  leading: const Icon(Icons.note_add_outlined),
-                  title: const Text('Blank page'),
-                  subtitle: const Text('Above · below · or at the end'),
-                  onTap: () => Navigator.pop(context, 'blank'),
+            const SizedBox(height: 8),
+            const _SheetLabel('Pages'),
+            if (shown('blank'))
+              ListTile(
+                leading: const Icon(Icons.note_add_outlined),
+                title: const Text('Blank page'),
+                subtitle: const Text('Above · below · or at the end'),
+                onTap: () => Navigator.pop(context, 'blank'),
+              ),
+            if (shown('horizontal'))
+              ListTile(
+                leading: const Icon(Icons.swap_horiz),
+                title: const Text('Horizontal page'),
+                subtitle: const Text('Extend this row to the right'),
+                onTap: () => Navigator.pop(context, 'horizontal'),
+              ),
+            if (shown('pdf'))
+              ListTile(
+                leading: const Icon(Icons.picture_as_pdf_outlined),
+                title: const Text('Insert PDF'),
+                subtitle: const Text(
+                  'As annotatable pages, or as an attachment',
                 ),
-              if (shown('horizontal'))
-                ListTile(
-                  leading: const Icon(Icons.swap_horiz),
-                  title: const Text('Horizontal page'),
-                  subtitle: const Text('Extend this row to the right'),
-                  onTap: () => Navigator.pop(context, 'horizontal'),
-                ),
-              if (shown('pdf'))
-                ListTile(
-                  leading: const Icon(Icons.picture_as_pdf_outlined),
-                  title: const Text('Insert PDF'),
-                  subtitle: const Text(
-                    'As annotatable pages, or as an attachment',
-                  ),
-                  onTap: () => Navigator.pop(context, 'pdf'),
-                ),
-              if (PageClipboard().hasPage.value)
-                ListTile(
-                  leading: const Icon(Icons.content_paste_go_outlined),
-                  title: const Text('Paste page'),
-                  subtitle: const Text('A page copied from any canvas'),
-                  onTap: () => Navigator.pop(context, 'pastePage'),
-                ),
-              const Divider(),
-              const _SheetLabel('Content'),
-              if (shown('image'))
-                ListTile(
-                  leading: const Icon(Icons.image_outlined),
-                  title: const Text('Image'),
-                  subtitle: const Text('From files'),
-                  onTap: () => Navigator.pop(context, 'image'),
-                ),
-              if (Platform.isAndroid || Platform.isIOS)
-                ListTile(
-                  leading: const Icon(Icons.photo_camera_outlined),
-                  title: const Text('Take photo'),
-                  subtitle: const Text('Capture with the camera'),
-                  onTap: () => Navigator.pop(context, 'camera'),
-                ),
-              if (shown('paste'))
-                ListTile(
-                  leading: const Icon(Icons.content_paste),
-                  title: const Text('Paste'),
-                  onTap: () => Navigator.pop(context, 'paste'),
-                ),
-              const SizedBox(height: 8),
-            ],
-          ),
+                onTap: () => Navigator.pop(context, 'pdf'),
+              ),
+            if (PageClipboard().hasPage.value)
+              ListTile(
+                leading: const Icon(Icons.content_paste_go_outlined),
+                title: const Text('Paste page'),
+                subtitle: const Text('A page copied from any canvas'),
+                onTap: () => Navigator.pop(context, 'pastePage'),
+              ),
+            const Divider(),
+            const _SheetLabel('Content'),
+            if (shown('image'))
+              ListTile(
+                leading: const Icon(Icons.image_outlined),
+                title: const Text('Image'),
+                subtitle: const Text('From files'),
+                onTap: () => Navigator.pop(context, 'image'),
+              ),
+            if (Platform.isAndroid || Platform.isIOS)
+              ListTile(
+                leading: const Icon(Icons.photo_camera_outlined),
+                title: const Text('Take photo'),
+                subtitle: const Text('Capture with the camera'),
+                onTap: () => Navigator.pop(context, 'camera'),
+              ),
+            if (shown('paste'))
+              ListTile(
+                leading: const Icon(Icons.content_paste),
+                title: const Text('Paste'),
+                onTap: () => Navigator.pop(context, 'paste'),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
     if (!mounted || action == null) return;
@@ -1370,10 +1588,12 @@ class _CanvasScreenState extends State<CanvasScreen> {
         if (shown('image'))
           iconMenuItem('image', Icons.image_outlined, 'Insert image'),
         if (PageClipboard().hasPage.value)
-          iconMenuItem('pastePage', Icons.content_paste_go_outlined,
-              'Paste page'),
-        if (shown('paste'))
-          iconMenuItem('paste', Icons.content_paste, 'Paste'),
+          iconMenuItem(
+            'pastePage',
+            Icons.content_paste_go_outlined,
+            'Paste page',
+          ),
+        if (shown('paste')) iconMenuItem('paste', Icons.content_paste, 'Paste'),
       ],
     );
   }
@@ -1665,113 +1885,122 @@ class _CanvasScreenState extends State<CanvasScreen> {
           return scrollableSheetBody(
             context,
             child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const _SheetLabel('Background color'),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    for (final preset in presets)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 10),
-                        child: GestureDetector(
-                          onTap: () => setSheetState(() => color = preset),
-                          child: Container(
-                            width: 36,
-                            height: 36,
-                            decoration: BoxDecoration(
-                              color: preset,
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: color == preset
-                                    ? Theme.of(context).colorScheme.primary
-                                    : Theme.of(context).dividerColor,
-                                width: color == preset ? 3 : 1,
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _SheetLabel('Background color'),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      for (final preset in presets)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 10),
+                          child: GestureDetector(
+                            onTap: () => setSheetState(() => color = preset),
+                            child: Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: preset,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: color == preset
+                                      ? Theme.of(context).colorScheme.primary
+                                      : Theme.of(context).dividerColor,
+                                  width: color == preset ? 3 : 1,
+                                ),
                               ),
                             ),
                           ),
                         ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  const _SheetLabel('Pattern'),
+                  const SizedBox(height: 8),
+                  SegmentedButton<BgPattern>(
+                    segments: const [
+                      ButtonSegment(
+                        value: BgPattern.blank,
+                        label: Text('Blank'),
                       ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                const _SheetLabel('Pattern'),
-                const SizedBox(height: 8),
-                SegmentedButton<BgPattern>(
-                  segments: const [
-                    ButtonSegment(value: BgPattern.blank, label: Text('Blank')),
-                    ButtonSegment(value: BgPattern.ruled, label: Text('Ruled')),
-                    ButtonSegment(value: BgPattern.grid, label: Text('Grid')),
-                    ButtonSegment(
-                      value: BgPattern.dotted,
-                      label: Text('Dotted'),
+                      ButtonSegment(
+                        value: BgPattern.ruled,
+                        label: Text('Ruled'),
+                      ),
+                      ButtonSegment(value: BgPattern.grid, label: Text('Grid')),
+                      ButtonSegment(
+                        value: BgPattern.dotted,
+                        label: Text('Dotted'),
+                      ),
+                    ],
+                    selected: {pattern},
+                    showSelectedIcon: false,
+                    onSelectionChanged: (s) =>
+                        setSheetState(() => pattern = s.first),
+                  ),
+                  const SizedBox(height: 16),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Apply to all pages'),
+                    subtitle: const Text(
+                      'Changes every page in this canvas now, and becomes the default for new pages',
+                    ),
+                    value: asDefault,
+                    onChanged: (v) =>
+                        setSheetState(() => asDefault = v ?? false),
+                  ),
+                  if (crossing) ...[
+                    const SizedBox(height: 8),
+                    const Divider(height: 1),
+                    const SizedBox(height: 10),
+                    const _SheetLabel('Adjust ink so it stays visible'),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Flips the lightness of ink (keeps the colour) so it stays '
+                      'readable on the new background.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).hintColor,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('Pen strokes'),
+                      value: adjPen,
+                      onChanged: (v) =>
+                          setSheetState(() => adjPen = v ?? false),
+                    ),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('Highlighter'),
+                      value: adjHl,
+                      onChanged: (v) => setSheetState(() => adjHl = v ?? false),
+                    ),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('Text'),
+                      value: adjText,
+                      onChanged: (v) =>
+                          setSheetState(() => adjText = v ?? false),
                     ),
                   ],
-                  selected: {pattern},
-                  showSelectedIcon: false,
-                  onSelectionChanged: (s) =>
-                      setSheetState(() => pattern = s.first),
-                ),
-                const SizedBox(height: 16),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Apply to all pages'),
-                  subtitle: const Text(
-                    'Changes every page in this canvas now, and becomes the default for new pages',
-                  ),
-                  value: asDefault,
-                  onChanged: (v) => setSheetState(() => asDefault = v ?? false),
-                ),
-                if (crossing) ...[
                   const SizedBox(height: 8),
-                  const Divider(height: 1),
-                  const SizedBox(height: 10),
-                  const _SheetLabel('Adjust ink so it stays visible'),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Flips the lightness of ink (keeps the colour) so it stays '
-                    'readable on the new background.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).hintColor,
-                        ),
-                  ),
-                  const SizedBox(height: 4),
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: const Text('Pen strokes'),
-                    value: adjPen,
-                    onChanged: (v) => setSheetState(() => adjPen = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: const Text('Highlighter'),
-                    value: adjHl,
-                    onChanged: (v) => setSheetState(() => adjHl = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: const Text('Text'),
-                    value: adjText,
-                    onChanged: (v) => setSheetState(() => adjText = v ?? false),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Apply'),
+                    ),
                   ),
                 ],
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    child: const Text('Apply'),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
           );
         },
       ),
@@ -1788,9 +2017,7 @@ class _CanvasScreenState extends State<CanvasScreen> {
       // Only when the background actually crossed light↔dark and at least one
       // ink type is enabled. Scope matches the "apply to all" choice.
       if (wasDark != willBeDark && (adjPen || adjHl || adjText)) {
-        final ids = asDefault
-            ? c.pages.keys.toSet()
-            : {current.pageId};
+        final ids = asDefault ? c.pages.keys.toSet() : {current.pageId};
         c.adjustInkForContrast(
           ids,
           pen: adjPen,
@@ -2028,20 +2255,17 @@ class _CanvasScreenState extends State<CanvasScreen> {
     final banner = ProgressOverlay.show(context, 'Exporting PDF…');
 
     try {
-      final bytes = await exportPdfInIsolate(
-        [
-          PdfExportItem(
-            outline: const [],
-            canvas: widget.canvas,
-            pages: c.pages,
-            assetBytes: (assetId) =>
-                _service.assetFile(widget.canvas, assetId).readAsBytes(),
-            assetPath: (assetId) =>
-                _service.assetFile(widget.canvas, assetId).path,
-          ),
-        ],
-        onProgress: (fraction, label) => banner.report(fraction, label),
-      );
+      final bytes = await exportPdfInIsolate([
+        PdfExportItem(
+          outline: const [],
+          canvas: widget.canvas,
+          pages: c.pages,
+          assetBytes: (assetId) =>
+              _service.assetFile(widget.canvas, assetId).readAsBytes(),
+          assetPath: (assetId) =>
+              _service.assetFile(widget.canvas, assetId).path,
+        ),
+      ], onProgress: (fraction, label) => banner.report(fraction, label));
       banner.close();
       if (!mounted) return;
 
@@ -2136,27 +2360,43 @@ class _CanvasScreenState extends State<CanvasScreen> {
   Widget _buildPromotedButton(String id) {
     switch (id) {
       case 'blank':
-        return tbBtn(Icons.note_add_outlined, 'Add page',
-            () => _runAddAction('blank'));
+        return tbBtn(
+          Icons.note_add_outlined,
+          'Add page',
+          () => _runAddAction('blank'),
+        );
       case 'horizontal':
-        return tbBtn(Icons.swap_horiz, 'Horizontal page',
-            () => _runAddAction('horizontal'));
+        return tbBtn(
+          Icons.swap_horiz,
+          'Horizontal page',
+          () => _runAddAction('horizontal'),
+        );
       case 'pdf':
-        return tbBtn(Icons.picture_as_pdf_outlined, 'Insert PDF',
-            () => _runAddAction('pdf'));
+        return tbBtn(
+          Icons.picture_as_pdf_outlined,
+          'Insert PDF',
+          () => _runAddAction('pdf'),
+        );
       case 'image':
-        return tbBtn(Icons.image_outlined, 'Insert image',
-            () => _runAddAction('image'));
+        return tbBtn(
+          Icons.image_outlined,
+          'Insert image',
+          () => _runAddAction('image'),
+        );
       case 'paste':
-        return tbBtn(Icons.content_paste, 'Paste',
-            () => _runAddAction('paste'));
+        return tbBtn(
+          Icons.content_paste,
+          'Paste',
+          () => _runAddAction('paste'),
+        );
       case 'fullscreen':
         return tbBtn(Icons.fullscreen, 'Full screen', _toggleFullScreen);
       case 'toggle_toolbar':
         return tbBtn(
-            _showToolbar ? Icons.expand_less : Icons.brush_outlined,
-            _showToolbar ? 'Hide tools' : 'Show tools',
-            () => setState(() => _showToolbar = !_showToolbar));
+          _showToolbar ? Icons.expand_less : Icons.brush_outlined,
+          _showToolbar ? 'Hide tools' : 'Show tools',
+          () => setState(() => _showToolbar = !_showToolbar),
+        );
       case 'rename':
         return tbBtn(Icons.edit_outlined, 'Rename', _renameCanvas);
       case 'export':
@@ -2168,22 +2408,27 @@ class _CanvasScreenState extends State<CanvasScreen> {
       case 'attachments':
         return tbBtn(Icons.attach_file, 'Attachments', _showAttachments);
       case 'page_settings':
-        return tbBtn(Icons.description_outlined, 'Page settings',
-            _showPageSettings);
+        return tbBtn(
+          Icons.description_outlined,
+          'Page settings',
+          _showPageSettings,
+        );
       case 'shape_snap':
         return tbBtn(
-            SettingsService().shapeSnap
-                ? Icons.check_box_outlined
-                : Icons.check_box_outline_blank,
-            'Snap drawn shapes',
-            _toggleShapeSnap);
+          SettingsService().shapeSnap
+              ? Icons.check_box_outlined
+              : Icons.check_box_outline_blank,
+          'Snap drawn shapes',
+          _toggleShapeSnap,
+        );
       case 'finger_draw':
         return tbBtn(
-            SettingsService().fingerDraw
-                ? Icons.check_box_outlined
-                : Icons.check_box_outline_blank,
-            'Draw with finger',
-            _toggleFingerDraw);
+          SettingsService().fingerDraw
+              ? Icons.check_box_outlined
+              : Icons.check_box_outline_blank,
+          'Draw with finger',
+          _toggleFingerDraw,
+        );
       default:
         return const SizedBox.shrink();
     }
@@ -2194,7 +2439,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// horizontally-scrollable row — so a long name never hides and promoted
   /// tools scroll instead of overflowing.
   Widget _buildMobileToolbar(
-      BuildContext context, CanvasController c, AppPalette palette) {
+    BuildContext context,
+    CanvasController c,
+    AppPalette palette,
+  ) {
     final s = SettingsService();
     return Row(
       children: [
@@ -2246,7 +2494,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
   }
 
   Widget _buildDesktopToolbar(
-      BuildContext context, CanvasController c, AppPalette palette) {
+    BuildContext context,
+    CanvasController c,
+    AppPalette palette,
+  ) {
     final s = SettingsService();
     final promotedAdd = s.promotedAddActionsDesktop;
     final promotedOverflow = s.promotedOverflowActionsDesktop;
@@ -2418,7 +2669,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
                     child: _ToolOptionsPanel(controller: c),
                   ),
                 if (_showToolbar) LassoFloatingMenu(controller: c),
-                if (_showToolbar) TextBottomBar(controller: c),
+                if (_showToolbar)
+                  TextBottomBar(key: _textBarKey, controller: c),
                 // Pen/highlighter/shape/eraser options, dropping down under
                 // the active tool's icon (re-tap to open, or pinned).
                 if (_showToolbar) ToolOptionsPopover(controller: c),
@@ -2629,48 +2881,118 @@ class _CanvasScreenState extends State<CanvasScreen> {
       builder: (context, _) {
         final el = session.element;
         final rect = c.pageScreenRect(session.pageId, el.rect);
-        session.controller.displayScale = c.zoom; // scale per-run sizes
+        // Lay the editor out in PAGE POINTS at scale 1 — identical metrics to
+        // the painter's TextPainter — and scale the whole overlay visually by
+        // zoom (Transform.scale below). Laying out at fontSize×zoom instead
+        // made glyph advances round differently from the painter's, so the
+        // editor wrapped lines at different words than the committed text.
+        session.controller.displayScale = 1.0;
+        // RenderEditable wraps its text `cursorWidth + 1` (its caret margin)
+        // narrower than the field width — widen the field by exactly that so
+        // the EFFECTIVE wrap width equals el.rect.width, the same width the
+        // painter lays out at. Without this the editor broke lines a few
+        // points earlier than the committed text. Left-aligned text only:
+        // widening a center/right-aligned field would shift the text sideways
+        // by (part of) the margin, which is worse than the slightly-early
+        // wrap it avoids.
+        final cursorWidth = 2 / c.zoom;
+        final caretExtra = el.align == TextAlignOption.left
+            ? cursorWidth + 1
+            : 0.0;
+        final boxWidth = math.max(el.rect.width, 60 / c.zoom);
         return Positioned(
           left: rect.left,
           top: rect.top,
-          width: math.max(rect.width, 60),
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              // foregroundDecoration paints the border *over* the child without
-              // insetting it — so the TextField keeps the full box width and
-              // wraps at the same width the painter/autoTextRect measured. A
-              // bordered `decoration` (which insets by the border width) plus
-              // content padding made the live editor narrower than the box,
-              // wrapping the first line early then snapping back on commit.
-              foregroundDecoration: BoxDecoration(
-                border: Border.all(
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-              ),
-              child: TextField(
-                controller: session.controller,
-                autofocus: true,
-                maxLines: null,
-                cursorColor: Theme.of(context).colorScheme.primary,
-                // Fallback style (per-run styles come from buildTextSpan).
-                style: textStyleForElement(
-                  el,
-                ).copyWith(fontSize: el.fontSize * c.zoom),
-                textAlign: switch (el.align) {
-                  TextAlignOption.center => TextAlign.center,
-                  TextAlignOption.right => TextAlign.right,
-                  _ => TextAlign.left,
-                },
-                decoration: const InputDecoration(
-                  isDense: true,
-                  // Zero padding so the text area matches the box width exactly
-                  // (the painter draws text flush at the rect's top-left too).
-                  contentPadding: EdgeInsets.zero,
-                  border: InputBorder.none,
-                  filled: false,
-                ),
-                onTapOutside: (_) => _commitTextEdit(),
+          // Width in page points (the Transform scales it to rect.width on
+          // screen); the min keeps a tappable field for a fresh empty box.
+          width: boxWidth + caretExtra,
+          child: Transform.scale(
+            scale: c.zoom,
+            alignment: Alignment.topLeft,
+            child: Material(
+              color: Colors.transparent,
+              child: Stack(
+                children: [
+                  // SizedBox is load-bearing: the Stack hands its
+                  // non-positioned children LOOSE constraints, under which
+                  // the field can size to its own intrinsics and lose the
+                  // caret-margin width compensation (observed on-device as a
+                  // ~3px-narrower wrap). Tight width restores the invariant:
+                  // field width == boxWidth + caretExtra, text wraps at
+                  // exactly boxWidth like the painter.
+                  SizedBox(
+                    width: boxWidth + caretExtra,
+                    // The canvas is a document: the painter draws text at its
+                    // absolute point size (TextPainter never system-scales),
+                    // so the editor must too — otherwise a non-default OS
+                    // font-size setting makes text visibly grow/shrink
+                    // (and re-wrap) on commit.
+                    child: MediaQuery.withNoTextScaling(
+                      child: TextField(
+                        key: _editorFieldKey,
+                        controller: session.controller,
+                        autofocus: true,
+                        maxLines: null,
+                        // Counter the Transform: ~2px caret at any zoom (also
+                        // feeds the caret-margin width compensation above).
+                        cursorWidth: cursorWidth,
+                        cursorColor: Theme.of(context).colorScheme.primary,
+                        // Base style in page points (per-run styles come from
+                        // buildTextSpan; the Transform provides the zoom).
+                        // `inherit: false` is load-bearing: TextField merges
+                        // the theme's bodyLarge UNDER its style, and any field
+                        // we leave null inherits from it — its letterSpacing
+                        // 0.5 made editor glyphs wider than the painter's, and
+                        // its explicit fontFamily 'Roboto' can resolve to a
+                        // DIFFERENT face than the painter's null→engine-default
+                        // family (e.g. Samsung system-font substitution), which
+                        // re-wraps lines during editing. With inherit false the
+                        // merge returns this style verbatim, so every unset
+                        // field falls back to the same engine defaults the
+                        // painter's TextPainter uses — parity by construction.
+                        style: editorBaseStyle(el),
+                        textAlign: switch (el.align) {
+                          TextAlignOption.center => TextAlign.center,
+                          TextAlignOption.right => TextAlign.right,
+                          _ => TextAlign.left,
+                        },
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          // Zero padding so the text area matches the box width
+                          // exactly (the painter draws text flush at the rect's
+                          // top-left too).
+                          contentPadding: EdgeInsets.zero,
+                          border: InputBorder.none,
+                          filled: false,
+                        ),
+                        onTapOutside: (_) => _commitTextEdit(),
+                      ),
+                    ),
+                  ),
+                  // The border sits on ITS OWN box at exactly the element's
+                  // width — not on the (caret-margin-widened) field — so it
+                  // hugs the text like the lasso selection box. It's the LAST
+                  // child so it paints over the text (a first-child border
+                  // was painted under it and only its corners showed), and
+                  // IgnorePointer keeps taps flowing to the field.
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    bottom: 0,
+                    width: boxWidth,
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: Theme.of(context).colorScheme.primary,
+                            // Counter the Transform: ~1px at any zoom.
+                            width: 1 / c.zoom,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -2811,7 +3133,10 @@ class _ToolOptionsPanel extends StatelessWidget {
             ),
           ),
           child: contextRow == null
-              ? const SizedBox(key: ValueKey('opts-none'), width: double.infinity)
+              ? const SizedBox(
+                  key: ValueKey('opts-none'),
+                  width: double.infinity,
+                )
               // Opaque Listener: the panel floats over the canvas, so it must
               // swallow pointer-downs itself — otherwise a tap on the panel
               // (a swatch, or an empty gap) would fall through to the canvas
