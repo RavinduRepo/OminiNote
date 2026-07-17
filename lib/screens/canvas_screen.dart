@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -16,6 +17,7 @@ import '../utils/html_text.dart';
 import '../utils/markdown_text.dart';
 import '../utils/url_text.dart';
 import '../canvas/canvas_controller.dart';
+import '../canvas/canvas_layout.dart';
 import '../canvas/canvas_painter.dart';
 import '../canvas/rich_text_controller.dart';
 import '../canvas/text_measure.dart';
@@ -127,6 +129,22 @@ class _CanvasScreenState extends State<CanvasScreen>
   double _lastScale = 1.0;
 
   _TextEditSession? _textEdit;
+
+  /// Where the caret sat when the last edit session committed.
+  ///
+  /// Needed because a paste triggered from a control OUTSIDE the editor — the
+  /// Add sheet's Paste — fires the field's `onTapOutside` first, committing the
+  /// session and clearing `_textEdit` before the handler ever runs. Without
+  /// this the caret is simply gone by paste time. Holds an ID, not a ref:
+  /// committing routes through `updateTextElement` → `_replaceElements`, which
+  /// swaps in a `deepCopy`, so the session's instance is stale afterwards.
+  ///
+  /// Only consulted when NO session is live (an open one is the better answer)
+  /// and only while the text tool is still active — switching tools means the
+  /// user moved on, and a stale caret shouldn't drag an image across the page.
+  /// Rewritten by each commit, cleared when the committed box doesn't survive
+  /// (an emptied box is dropped) and once a paste consumes it.
+  ({String pageId, String elementId, int caret})? _lastCaret;
 
   /// Captures the rendered canvas so "copy selection" can put pixels on the
   /// OS clipboard.
@@ -390,6 +408,111 @@ class _CanvasScreenState extends State<CanvasScreen>
   }
 
   /// Decodes [bytes], stores them as an asset, and drops an ImageElement
+  /// Paste while a text box is being edited (Ctrl/Cmd+V or the context menu's
+  /// Paste — both route through [PasteTextIntent]).
+  ///
+  /// An image on the clipboard goes into the DOCUMENT at the caret;
+  /// [_insertImageBytes] → [_placeImage] commits the session and does the
+  /// block-insert. Text keeps its normal in-field behaviour.
+  ///
+  /// The check can't be synchronous (reading the clipboard is async, the
+  /// intent's handler is not), so this replaces the default paste rather than
+  /// deferring to it: `TextField` exposes no handle on its inner
+  /// `EditableText`, so there's no `pasteText` to delegate back to. Inserting
+  /// through the controller is equivalent for our purposes —
+  /// `TextEditingValue.replaced` drops the selection and moves the caret just
+  /// like the default action, `RichTextController`'s setter reconciles the
+  /// per-character styles, and the field's undo history tracks the controller.
+  Future<void> _handleEditorPaste(SelectionChangedCause? cause) async {
+    Uint8List? image;
+    try {
+      image = await ClipboardImages.read();
+    } catch (_) {
+      image = null; // platform without image-clipboard support
+    }
+    if (!mounted) return;
+    if (image != null && image.isNotEmpty) {
+      await _insertImageBytes(image);
+      return;
+    }
+
+    final rc = _textEdit?.controller;
+    if (rc == null) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.isEmpty || !mounted) return;
+    if (_textEdit?.controller != rc) return; // session changed under the await
+    final sel = rc.selection;
+    rc.value = rc.value.replaced(
+      sel.isValid ? sel : TextSelection.collapsed(offset: rc.text.length),
+      text,
+    );
+  }
+
+  /// Places a freshly-built [image] on [pageId]: at the caret when the user is
+  /// (or just was) typing in a text box — as a block, pushing the text after
+  /// the caret below it (see [CanvasController.insertImageAtCaret]) — else at
+  /// the top-left of what's currently on screen.
+  ///
+  /// Commits any live edit session FIRST: the caret indexes the box's committed
+  /// runs, and until commit the editor's controller — not the element — holds
+  /// the real text.
+  void _placeImage(PageLayout target, ImageElement image) {
+    final c = _controller!;
+    final pageId = target.pageId;
+
+    // Resolve the caret to (page, element id, offset) BEFORE committing:
+    // committing swaps the element instance for a deepCopy, so a ref taken
+    // here would go stale.
+    ({String pageId, String elementId, int caret})? at;
+    final session = _textEdit;
+    if (session != null) {
+      final sel = session.controller.selection;
+      at = (
+        pageId: session.pageId,
+        elementId: session.element.id,
+        caret: sel.isValid ? sel.baseOffset : session.element.text.length,
+      );
+      _commitTextEdit(); // writes the controller's runs onto the element
+    } else if (c.tool == CanvasTool.text) {
+      at = _lastCaret;
+    }
+
+    if (at != null) {
+      final host = c.pages[at.pageId];
+      final el = host?.objects
+          .whereType<TextElement>()
+          .cast<TextElement?>()
+          .firstWhere((e) => e!.id == at!.elementId, orElse: () => null);
+      // The box can be gone (an emptied box is dropped on commit) — fall
+      // through to the viewport placement rather than losing the paste.
+      if (el != null && c.insertImageAtCaret(at.pageId, el, at.caret, image) != null) {
+        _lastCaret = null; // consumed; the text around it just moved
+        return;
+      }
+    }
+
+    // No caret: land at the top-left of the visible viewport, nudged in so the
+    // image doesn't sit flush against the edge, and clamped onto the page (the
+    // viewport can be scrolled past the page's own bounds).
+    final page = c.pages[pageId]!;
+    final view = c.screenToCanvas(const Offset(24, 24)) - target.rect.topLeft;
+    final local = Offset(
+      view.dx.clamp(0.0, math.max(0.0, page.width - image.rect.width)),
+      view.dy.clamp(0.0, math.max(0.0, page.height - image.rect.height)),
+    );
+    c.addImageBelowInk(
+      pageId,
+      image
+        ..rect = Rect.fromLTWH(
+          local.dx,
+          local.dy,
+          image.rect.width,
+          image.rect.height,
+        ),
+    );
+  }
+
   /// centered on the current page (scaled to fit).
   Future<void> _insertImageBytes(Uint8List bytes) async {
     final c = _controller!;
@@ -419,16 +542,12 @@ class _CanvasScreenState extends State<CanvasScreen>
     final w = decoded.width * scale, h = decoded.height * scale;
     decoded.dispose();
     if (!mounted) return;
-    c.addImageBelowInk(
-      target.pageId,
+    _placeImage(
+      target,
       ImageElement(
         id: newModelId('el'),
         deviceId: SettingsService().deviceId,
-        rect: Rect.fromCenter(
-          center: Offset(page.width / 2, page.height / 2),
-          width: w,
-          height: h,
-        ),
+        rect: Rect.fromLTWH(0, 0, w, h), // _placeImage positions it
         assetId: assetId,
       ),
     );
@@ -1202,6 +1321,9 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (session == null) return;
     final c = _controller!;
     final rc = session.controller;
+    // Remember the caret before the controller goes away, so a paste routed
+    // through a control outside the editor can still land on it.
+    final caretSel = rc.selection;
     rc.removeListener(_onEditingChanged);
     _textEdit = null;
     c.setEditing(null, null);
@@ -1217,6 +1339,7 @@ class _CanvasScreenState extends State<CanvasScreen>
 
     if (el.text.trim().isEmpty) {
       // Nothing typed: drop a new box, or delete an emptied existing one.
+      _lastCaret = null; // no box survives — nothing to anchor a paste to
       if (!session.isNew) c.removeElement(session.pageId, session.before);
       setState(() {});
       return;
@@ -1227,6 +1350,14 @@ class _CanvasScreenState extends State<CanvasScreen>
     } else {
       c.updateTextElement(session.pageId, session.before, el);
     }
+    _lastCaret = (
+      pageId: session.pageId,
+      elementId: el.id,
+      caret: (caretSel.isValid ? caretSel.baseOffset : el.text.length).clamp(
+        0,
+        el.text.length,
+      ),
+    );
     setState(() {});
   }
 
@@ -1712,16 +1843,12 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
     final w = imgW * scale, h = imgH * scale;
 
-    c.addImageBelowInk(
-      target.pageId,
+    _placeImage(
+      target,
       ImageElement(
         id: newModelId('el'),
         deviceId: SettingsService().deviceId,
-        rect: Rect.fromCenter(
-          center: Offset(page.width / 2, page.height / 2),
-          width: w,
-          height: h,
-        ),
+        rect: Rect.fromLTWH(0, 0, w, h), // _placeImage positions it
         assetId: assetId,
       ),
     );
@@ -2892,10 +3019,28 @@ class _CanvasScreenState extends State<CanvasScreen>
                     // font-size setting makes text visibly grow/shrink
                     // (and re-wrap) on commit.
                     child: MediaQuery.withNoTextScaling(
-                      child: TextField(
-                        controller: session.controller,
-                        autofocus: true,
-                        maxLines: null,
+                      // Intercept paste so an image on the clipboard lands in
+                      // the document instead of being silently dropped. The
+                      // field owns Ctrl/Cmd+V while it has focus (the canvas's
+                      // own shortcut handler bails out entirely while editing),
+                      // and Flutter's default paste reads text/plain only — so
+                      // pasting an image while typing did nothing at all.
+                      // Overriding the intent catches BOTH the keyboard and the
+                      // built-in context-menu Paste. Text still takes the
+                      // default path untouched.
+                      child: Actions(
+                        actions: {
+                          PasteTextIntent: CallbackAction<PasteTextIntent>(
+                            onInvoke: (intent) {
+                              unawaited(_handleEditorPaste(intent.cause));
+                              return null;
+                            },
+                          ),
+                        },
+                        child: TextField(
+                          controller: session.controller,
+                          autofocus: true,
+                          maxLines: null,
                         // Counter the Transform: ~2px caret at any zoom (also
                         // feeds the caret-margin width compensation above).
                         cursorWidth: cursorWidth,
@@ -2962,7 +3107,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                           focusedErrorBorder: InputBorder.none,
                           filled: false,
                         ),
-                        onTapOutside: (_) => _commitTextEdit(),
+                          onTapOutside: (_) => _commitTextEdit(),
+                        ),
                       ),
                     ),
                   ),

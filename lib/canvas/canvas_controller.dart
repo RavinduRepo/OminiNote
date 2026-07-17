@@ -64,6 +64,10 @@ class _CanvasOp {
   });
 }
 
+/// Vertical breathing room between an image pasted at the caret and the text
+/// above/below it. See [CanvasController.insertImageAtCaret].
+const double kImageBlockGap = 6.0;
+
 /// A revivable element slot for undo/redo. Holds the (mutable) element — its
 /// `rev` is bumped above the tombstone on revive, keeping the same id — and
 /// its insertion index (-1 = append). See [CanvasController._reviveSlots].
@@ -2893,15 +2897,124 @@ class CanvasController extends ChangeNotifier {
   /// strokes-under-objects z tie-break — would drop the image on top of ink.)
   void addImageBelowInk(String pageId, ImageElement image) {
     final page = pages[pageId]!;
-    // Anchor to the lowest stroke z (default 0) so a freshly drawn stroke at
-    // z=0 renders above this image; images tie among themselves and fall back
-    // to insertion order (newest on top).
+    image.zIndex = _belowInkZ(page);
+    _doOp(_addElementsOp('Insert image', pageId, [image]));
+  }
+
+  /// The z that puts an image *beneath the ink layer*. Anchors to the lowest
+  /// stroke z (default 0) so a freshly drawn stroke at z=0 renders above the
+  /// image; images tie among themselves and fall back to insertion order
+  /// (newest on top).
+  double _belowInkZ(CanvasPage page) {
     var minStrokeZ = 0.0;
     for (final s in page.strokes) {
       if (s.zIndex < minStrokeZ) minStrokeZ = s.zIndex;
     }
-    image.zIndex = minStrokeZ - 1;
-    _doOp(_addElementsOp('Insert image', pageId, [image]));
+    return minStrokeZ - 1;
+  }
+
+  /// Pastes [image] into the text box [source] at [caretOffset] as a BLOCK,
+  /// Word-style: the image never sits inline in a line of text. It lands on the
+  /// line AFTER the caret, left-aligned to the box, and the text that followed
+  /// the caret continues in a new box below it.
+  ///
+  /// Three shapes, all one undoable op:
+  /// * caret at the END → nothing moves; the image lands under the box.
+  /// * caret at the START → the image takes the box's top-left and the whole
+  ///   box slides below it (no second box — the source *is* the after-text).
+  /// * caret in the MIDDLE → the box is truncated to the text before the caret
+  ///   and the remainder becomes a new box under the image.
+  ///
+  /// [caretOffset] indexes the runs' concatenated text, so the caller must pass
+  /// an offset from a *committed* box (the live editor's controller is the
+  /// source of truth until then). Returns the placed image, or null when
+  /// [source] isn't live on [pageId].
+  ///
+  /// The new box is deliberately NOT given [source]'s linkId: the linked-text
+  /// chain is page-ordered (`insertTypingContinuation` looks for the next
+  /// part on the NEXT page), so a same-page part would make the chain's order
+  /// ambiguous. Known limit: splitting a box that is already part of a flowed
+  /// text leaves the after-text outside that chain.
+  ImageElement? insertImageAtCaret(
+    String pageId,
+    TextElement source,
+    int caretOffset,
+    ImageElement image,
+  ) {
+    final page = pages[pageId];
+    if (page == null) return null;
+    if (!page.objects.any((e) => e.id == source.id)) return null;
+
+    final caret = caretOffset.clamp(0, source.text.length);
+    final beforeRuns = sliceRuns(source.runs, 0, caret);
+    final afterRuns = sliceRuns(source.runs, caret, source.text.length);
+
+    final left = source.rect.left;
+    final imgW = image.rect.width, imgH = image.rect.height;
+    // Keep the image on the page when the box starts near the right edge (the
+    // caller already capped its width).
+    final imgLeft = math.max(0.0, math.min(left, page.width - imgW));
+
+    final sourceBefore = source.deepCopy();
+    final sourceAfter = source.deepCopy();
+    final added = <CanvasElement>[];
+    final double imageTop;
+
+    if (beforeRuns.isEmpty) {
+      // Caret at the very start: the image takes the box's top-left and the
+      // box (with all its text) slides down under it.
+      imageTop = source.rect.top;
+      sourceAfter.rect = Rect.fromLTWH(
+        left,
+        imageTop + imgH + kImageBlockGap,
+        sourceAfter.rect.width,
+        sourceAfter.rect.height,
+      );
+      _remeasureText(sourceAfter, pageId);
+    } else {
+      sourceAfter.runs = beforeRuns;
+      _remeasureText(sourceAfter, pageId);
+      imageTop = sourceAfter.rect.bottom + kImageBlockGap;
+      if (afterRuns.isNotEmpty) {
+        final below = TextElement(
+          id: newModelId('el'),
+          deviceId: SettingsService().deviceId,
+          rect: Rect.fromLTWH(left, imageTop + imgH + kImageBlockGap, 10, 10),
+          runs: afterRuns,
+          fontFamily: source.fontFamily,
+          fontSize: source.fontSize,
+          color: source.color,
+          bold: source.bold,
+          italic: source.italic,
+          align: source.align,
+        );
+        _remeasureText(below, pageId);
+        added.add(below);
+      }
+    }
+
+    image.rect = Rect.fromLTWH(imgLeft, imageTop, imgW, imgH);
+    image.zIndex = _belowInkZ(page);
+    added.add(image);
+
+    _stamp([sourceAfter, ...added]);
+    final slots = [for (final el in added) _ElSlot(el)];
+
+    _doOp(
+      _CanvasOp(
+        label: 'Paste image',
+        dirtyPageIds: {pageId},
+        apply: () {
+          _replaceElements(pageId, [sourceAfter]);
+          _reviveSlots(page, slots);
+        },
+        revert: () {
+          _replaceElements(pageId, [sourceBefore]);
+          _tombstoneSlots(page, slots);
+        },
+      ),
+    );
+    return image;
   }
 
   /// Drops an attachment chip near the top of the current page (stacking

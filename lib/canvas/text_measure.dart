@@ -78,6 +78,23 @@ TextStyle editorBaseStyle(TextElement el) {
   );
 }
 
+/// Slices [runs] to the `[a, b)` character range (offsets are over the runs'
+/// concatenated text), preserving each run's styling. Ranges outside a run are
+/// dropped, so an empty result means the range holds no text.
+List<TextRun> sliceRuns(List<TextRun> runs, int a, int b) {
+  final out = <TextRun>[];
+  var pos = 0;
+  for (final r in runs) {
+    final start = math.max(a - pos, 0);
+    final end = math.min(b - pos, r.text.length);
+    if (start < end) {
+      out.add(r.clone()..text = r.text.substring(start, end));
+    }
+    pos += r.text.length;
+  }
+  return out;
+}
+
 /// The character offset [localOffset] (relative to the box's top-left) falls
 /// on within [el] — i.e. where a tap should put the caret. Uses the same layout
 /// the painter does, so the caret lands under the finger on the glyph the user
@@ -308,20 +325,7 @@ List<List<TextRun>> splitRunsByHeight(
   final cap = math.max(maxWidth - kTextBoxPad, 8.0);
   final budget = maxHeight - kTextBoxPad;
 
-  /// Slices the run list to the [a, b) character range, styles preserved.
-  List<TextRun> slice(int a, int b) {
-    final out = <TextRun>[];
-    var pos = 0;
-    for (final r in runs) {
-      final start = math.max(a - pos, 0);
-      final end = math.min(b - pos, r.text.length);
-      if (start < end) {
-        out.add(r.clone()..text = r.text.substring(start, end));
-      }
-      pos += r.text.length;
-    }
-    return out;
-  }
+  List<TextRun> slice(int a, int b) => sliceRuns(runs, a, b);
 
   double heightOf(List<TextRun> chunk) {
     final span = TextSpan(
