@@ -3,11 +3,9 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart'
-    show RenderRepaintBoundary, RenderEditable;
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -41,6 +39,12 @@ import 'canvas_toolbar/text_bottom_bar.dart';
 import 'canvas_toolbar/tool_option_rows.dart';
 import 'canvas_toolbar/tool_options_popover.dart';
 import 'page_organizer.dart';
+
+/// Stroke width of the box drawn around the text element being edited, in
+/// SCREEN px (call sites divide by zoom — the overlay lays out in page
+/// points). Matches the lasso selection box's 1.5px stroke so a box looks the
+/// same whether it's selected or being edited.
+const double kEditBorderStroke = 1.5;
 
 /// The Canvas: a freely pannable/zoomable surface of pages (blank or
 /// PDF-backed) with ink, text, and images. The app owns the viewport;
@@ -131,11 +135,6 @@ class _CanvasScreenState extends State<CanvasScreen>
   /// Keys the text style bar floating at the canvas bottom so the caret
   /// auto-scroll can keep the caret above it, not just above the keyboard.
   final GlobalKey _textBarKey = GlobalKey();
-
-  /// TEMP (debug parity instrumentation — remove once the editor-vs-painter
-  /// wrap mismatch is closed): keys the editing TextField so the dump below
-  /// can find its RenderEditable.
-  final GlobalKey _editorFieldKey = GlobalKey();
 
   /// Keyboard focus for canvas shortcuts (Ctrl+C/V/X/Z/Y/D, Delete, Esc).
   final FocusNode _canvasFocus = FocusNode(debugLabel: 'canvas-shortcuts');
@@ -955,80 +954,6 @@ class _CanvasScreenState extends State<CanvasScreen>
     // element from the painter (the TextField draws it while editing).
     c.setEditing(el, rc);
     _scheduleEnsureEditVisible();
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _debugDumpEditorParity(),
-    );
-  }
-
-  /// TEMP (remove with _editorFieldKey): prints the editing field's actual
-  /// laid-out width + first line-break offsets next to the painter's, so an
-  /// on-device wrap mismatch shows its numbers in `flutter run` logs.
-  void _debugDumpEditorParity() {
-    if (!kDebugMode) return;
-    final session = _textEdit;
-    final c = _controller;
-    if (session == null || c == null || !mounted) return;
-    final el = session.element;
-    RenderEditable? re;
-    void visit(RenderObject o) {
-      if (re != null) return;
-      if (o is RenderEditable) {
-        re = o;
-        return;
-      }
-      o.visitChildren(visit);
-    }
-
-    final root = _editorFieldKey.currentContext?.findRenderObject();
-    if (root == null) return;
-    visit(root);
-    final ed = re;
-    if (ed == null) return;
-
-    List<int> lineEnds(double Function(int) yOf, int count) {
-      final ends = <int>[];
-      var prevY = yOf(0);
-      for (var i = 1; i <= el.text.length && ends.length < count; i++) {
-        final y = yOf(i);
-        if ((y - prevY).abs() > 1) {
-          ends.add(i);
-          prevY = y;
-        }
-      }
-      return ends;
-    }
-
-    final tp = TextPainter(
-      text: textSpanForElement(el),
-      textDirection: TextDirection.ltr,
-      textAlign: switch (el.align) {
-        TextAlignOption.center => TextAlign.center,
-        TextAlignOption.right => TextAlign.right,
-        _ => TextAlign.left,
-      },
-    )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
-    final edEnds = lineEnds(
-      (i) => ed.getLocalRectForCaret(TextPosition(offset: i)).top,
-      3,
-    );
-    final tpEnds = lineEnds(
-      (i) => tp.getOffsetForCaret(TextPosition(offset: i), Rect.zero).dy,
-      3,
-    );
-    tp.dispose();
-    final expectedField =
-        math.max(el.rect.width, 60 / c.zoom) + (2 / c.zoom) + 1;
-    debugPrint(
-      'EDITPARITY zoom=${c.zoom.toStringAsFixed(4)} '
-      'rectW=${el.rect.width.toStringAsFixed(2)} '
-      'fieldW=${ed.size.width.toStringAsFixed(2)} '
-      'fieldMaxW=${ed.constraints.maxWidth.toStringAsFixed(2)} '
-      'expectedField=${expectedField.toStringAsFixed(2)} '
-      'cursorW=${(2 / c.zoom).toStringAsFixed(2)} '
-      'align=${el.align.name} runs=${el.runs.length} '
-      'edLineEnds=$edEnds tpLineEnds=$tpEnds '
-      '${edEnds.toString() == tpEnds.toString() ? "MATCH" : "MISMATCH"}',
-    );
   }
 
   /// Fires on any text or selection change while editing: re-measures the box
@@ -1091,11 +1016,6 @@ class _CanvasScreenState extends State<CanvasScreen>
         (_) => _handleTypingOverflow(),
       );
     }
-    // TEMP parity instrumentation: re-dump after each remeasure so the log
-    // reflects the settled (post-rebuild) geometry, not just edit-open.
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _debugDumpEditorParity(),
-    );
   }
 
   bool _handlingOverflow = false;
@@ -2899,12 +2819,15 @@ class _CanvasScreenState extends State<CanvasScreen>
         final caretExtra = el.align == TextAlignOption.left
             ? cursorWidth + 1
             : 0.0;
-        final boxWidth = math.max(el.rect.width, 60 / c.zoom);
+        // Width in page points (the Transform scales it to rect.width on
+        // screen). This must track el.rect.width EXACTLY: a `max(..., 60/zoom)`
+        // floor used to widen the field past the element for small/empty boxes,
+        // so the editor wrapped at a different width than the painter and the
+        // border no longer hugged the box.
+        final boxWidth = el.rect.width;
         return Positioned(
           left: rect.left,
           top: rect.top,
-          // Width in page points (the Transform scales it to rect.width on
-          // screen); the min keeps a tappable field for a fresh empty box.
           width: boxWidth + caretExtra,
           child: Transform.scale(
             scale: c.zoom,
@@ -2912,6 +2835,13 @@ class _CanvasScreenState extends State<CanvasScreen>
             child: Material(
               color: Colors.transparent,
               child: Stack(
+                // Clip.none is load-bearing: the border below is deliberately
+                // OUTSET past this Stack's bounds (negative left/top/bottom) so
+                // it brackets the text instead of covering it. Stack clips to
+                // its own size by default (Clip.hardEdge), which erased the
+                // outset left/top/bottom edges and left only the right one
+                // visible — the "text box is barely there" bug.
+                clipBehavior: Clip.none,
                 children: [
                   // SizedBox is load-bearing: the Stack hands its
                   // non-positioned children LOOSE constraints, under which
@@ -2929,7 +2859,6 @@ class _CanvasScreenState extends State<CanvasScreen>
                     // (and re-wrap) on commit.
                     child: MediaQuery.withNoTextScaling(
                       child: TextField(
-                        key: _editorFieldKey,
                         controller: session.controller,
                         autofocus: true,
                         maxLines: null,
@@ -2962,7 +2891,26 @@ class _CanvasScreenState extends State<CanvasScreen>
                           // exactly (the painter draws text flush at the rect's
                           // top-left too).
                           contentPadding: EdgeInsets.zero,
+                          // EVERY border slot must be cleared, not just
+                          // `border`. InputDecoration.applyDefaults falls back
+                          // to the theme PER SLOT (`focusedBorder ??
+                          // theme.focusedBorder`), and this field is always
+                          // autofocused — so with only `border` set, the app
+                          // theme's focusedBorder (an OutlineInputBorder) still
+                          // applied. Material then adds that border's
+                          // `gapPadding` (4.0) to contentPadding on BOTH sides
+                          // (InputDecorator's `inputGap`, Material 3 only),
+                          // which shifted the editor's text 4pt right and cut
+                          // 8pt off its wrap width — so the editor broke lines
+                          // at different words than the painter, and the
+                          // theme's accent outline was drawn on top of our own
+                          // border. Zero-width borders here keep inputGap 0.
                           border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          errorBorder: InputBorder.none,
+                          focusedErrorBorder: InputBorder.none,
                           filled: false,
                         ),
                         onTapOutside: (_) => _commitTextEdit(),
@@ -2971,22 +2919,29 @@ class _CanvasScreenState extends State<CanvasScreen>
                   ),
                   // The border sits on ITS OWN box at exactly the element's
                   // width — not on the (caret-margin-widened) field — so it
-                  // hugs the text like the lasso selection box. It's the LAST
-                  // child so it paints over the text (a first-child border
-                  // was painted under it and only its corners showed), and
-                  // IgnorePointer keeps taps flowing to the field.
+                  // hugs the text like the lasso selection box. IgnorePointer
+                  // keeps taps flowing to the field.
+                  //
+                  // It's OUTSET by its own stroke width on every side so it
+                  // brackets the text rather than painting over it (Border.all
+                  // strokes INSIDE its box, and the text starts flush at x=0),
+                  // and extends kTextBoxPad further down because the field is
+                  // only as tall as its text while el.rect adds that pad. The
+                  // outset only renders because the Stack above sets
+                  // Clip.none — without it these edges are clipped away.
                   Positioned(
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    width: boxWidth,
+                    left: -kEditBorderStroke / c.zoom,
+                    top: -kEditBorderStroke / c.zoom,
+                    bottom: -kTextBoxPad - (kEditBorderStroke / c.zoom),
+                    width: boxWidth + (2 * kEditBorderStroke / c.zoom),
                     child: IgnorePointer(
                       child: DecoratedBox(
                         decoration: BoxDecoration(
                           border: Border.all(
                             color: Theme.of(context).colorScheme.primary,
-                            // Counter the Transform: ~1px at any zoom.
-                            width: 1 / c.zoom,
+                            // Counter the Transform: a constant ~1.5px at any
+                            // zoom, matching the lasso selection box's stroke.
+                            width: kEditBorderStroke / c.zoom,
                           ),
                         ),
                       ),

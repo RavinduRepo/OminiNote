@@ -403,7 +403,14 @@ Rect autoTextRect(TextElement el, double maxWidth) {
   return Rect.fromLTWH(
     el.rect.left,
     el.rect.top,
-    el.manualWidth ?? wrapped.width + kTextBoxPad,
+    // A manually-resized box normally keeps its chosen width, but it must
+    // never report narrower than the text it actually contains: contentWidth
+    // above is clamped UP to el.fontSize, so raising the font size on a narrow
+    // box lays the text out wider than manualWidth and it spilled outside its
+    // own box (and its border/selection handles). Grow to fit in that case.
+    el.manualWidth != null
+        ? math.max(el.manualWidth!, wrapped.width + kTextBoxPad)
+        : wrapped.width + kTextBoxPad,
     wrapped.height + kTextBoxPad,
   );
 }
