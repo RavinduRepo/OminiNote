@@ -2880,6 +2880,21 @@ class _CanvasScreenState extends State<CanvasScreen>
                         // field falls back to the same engine defaults the
                         // painter's TextPainter uses — parity by construction.
                         style: editorBaseStyle(el),
+                        // No strut — the painter's TextPainter has none, so the
+                        // editor must not either. With strutStyle null,
+                        // EditableText applies
+                        // `StrutStyle.fromTextStyle(style, forceStrutHeight:
+                        // true)`, which forces EVERY line to the BASE style's
+                        // height (el.fontSize × 1.3) no matter what sizes the
+                        // runs on that line actually use. A box mixing sizes
+                        // (or one whose size changed after creation, leaving
+                        // el.fontSize stale) then laid out with crushed line
+                        // spacing while editing and sprang back on commit.
+                        // StrutStyle.disabled survives EditableText's
+                        // inheritFromTextStyle (its explicit height 0.0 wins
+                        // over the base style's), so lines size to their own
+                        // content exactly like the painter's.
+                        strutStyle: StrutStyle.disabled,
                         textAlign: switch (el.align) {
                           TextAlignOption.center => TextAlign.center,
                           TextAlignOption.right => TextAlign.right,
