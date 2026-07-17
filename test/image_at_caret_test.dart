@@ -210,4 +210,105 @@ void main() {
     expect(live.rev, greaterThan(revBefore),
         reason: 'the truncated box must out-rev its old copy for LWW');
   });
+
+  /// Pasting near the page bottom used to place the after-text below the page
+  /// edge, where the painter clips per page — the text was still in the data but
+  /// invisible and unreachable, and nothing ever reflowed it (the typing-overflow
+  /// check only runs for the box being EDITED, and this box isn't). It has to
+  /// flow onto the next page instead, in the same op.
+  group('overflow past the page bottom', () {
+    // A box low on the page: only ~60pt of room left under it.
+    TextElement lowBox(String text) => TextElement(
+          id: 'txt',
+          deviceId: 'test_device',
+          rect: Rect.fromLTWH(boxLeft, kDefaultPageHeight - 120, 200, 40),
+          text: text,
+          fontSize: 16,
+          color: const Color(0xFF000000),
+        );
+
+    test('after-text with no room flows to a NEW page, not below the edge', () {
+      final el = lowBox('before|after text that cannot possibly fit down here');
+      final h = harness(el);
+      const caret = 6; // 'before|'
+
+      // A tall image eats what little room was left under the caret.
+      final placed = h.c.insertImageAtCaret('p1', el, caret, img(h: 300));
+      expect(placed, isNotNull);
+
+      // Nothing on the origin page may sit below the page edge.
+      for (final t in textsOn(h.page)) {
+        expect(t.rect.bottom, lessThanOrEqualTo(kDefaultPageHeight),
+            reason: 'text "${t.text}" is stranded below the page edge');
+      }
+
+      // A second page now exists and carries the after-text.
+      expect(h.c.pages.length, 2, reason: 'a continuation page must be created');
+      final other = h.c.pages.values.firstWhere((p) => p.id != 'p1');
+      final flowed = other.objects.whereType<TextElement>().toList();
+      expect(flowed, hasLength(1));
+      expect(flowed.single.text, contains('after'));
+      expect(textsOn(h.page).map((e) => e.text).join(), 'before');
+    });
+
+    test('the flowed text is lossless and linked to the box it came from', () {
+      const tail = 'after text that cannot possibly fit down here';
+      final el = lowBox('before$tail');
+      final h = harness(el);
+
+      h.c.insertImageAtCaret('p1', el, 6, img(h: 300));
+
+      final other = h.c.pages.values.firstWhere((p) => p.id != 'p1');
+      final flowed = other.objects.whereType<TextElement>().single;
+      final stayed = textsOn(h.page).single;
+      expect(stayed.text + flowed.text, 'before$tail',
+          reason: 'the split must lose no characters');
+      expect(stayed.linkId, isNotNull);
+      expect(flowed.linkId, stayed.linkId,
+          reason: 'the parts must join one page-ordered chain');
+    });
+
+    test('ONE undo removes the image, the new page and restores the box', () {
+      final el = lowBox('before after text that cannot possibly fit down here');
+      final original = el.text;
+      final h = harness(el);
+
+      h.c.insertImageAtCaret('p1', el, 6, img(h: 300));
+      expect(h.c.pages.length, 2);
+
+      h.c.undo();
+      expect(h.c.pages.length, 1, reason: 'the continuation page must go too');
+      expect(h.page.objects.whereType<ImageElement>(), isEmpty);
+      expect(textsOn(h.page).single.text, original);
+
+      h.c.redo();
+      expect(h.c.pages.length, 2);
+      expect(h.page.objects.whereType<ImageElement>(), hasLength(1));
+    });
+
+    test('caret at the START with a full-page image still flows the text', () {
+      // The box slides under the image; with no room left, its text must flow
+      // rather than ride off the page edge with it.
+      final el = lowBox('all of this text belongs somewhere visible please');
+      final h = harness(el);
+
+      h.c.insertImageAtCaret('p1', el, 0, img(h: 300));
+
+      expect(h.c.pages.length, 2);
+      final other = h.c.pages.values.firstWhere((p) => p.id != 'p1');
+      expect(other.objects.whereType<TextElement>(), hasLength(1));
+    });
+
+    test('a paste with room to spare still creates no page and one undo', () {
+      final el = box('hello world'); // high on the page, plenty of room
+      final h = harness(el);
+
+      h.c.insertImageAtCaret('p1', el, 5, img());
+      expect(h.c.pages.length, 1, reason: 'no overflow → no new page');
+
+      h.c.undo();
+      expect(h.page.objects.whereType<ImageElement>(), isEmpty);
+      expect(textsOn(h.page).single.text, 'hello world');
+    });
+  });
 }

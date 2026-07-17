@@ -68,6 +68,10 @@ class _CanvasOp {
 /// above/below it. See [CanvasController.insertImageAtCaret].
 const double kImageBlockGap = 6.0;
 
+/// Slack kept below the last line of text on a page before it's treated as
+/// overflowing — matches the `page.height - 8` the typing-overflow check uses.
+const double kPageTextMargin = 8.0;
+
 /// A revivable element slot for undo/redo. Holds the (mutable) element — its
 /// `rev` is bumped above the tombstone on revive, keeping the same id — and
 /// its insertion index (-1 = append). See [CanvasController._reviveSlots].
@@ -2671,6 +2675,23 @@ class CanvasController extends ChangeNotifier {
     TextElement source,
     List<TextRun> overflowRuns,
   ) {
+    final built = _buildContinuation(pageId, source, overflowRuns);
+    if (built == null) return null;
+    _doOp(built.op);
+    return (built.pageId, built.el);
+  }
+
+  /// [insertTypingContinuation]'s body, returning its op instead of running it
+  /// so a caller can fold the continuation into a LARGER op — image-at-caret
+  /// paste has to place the image, truncate the box and flow the leftover text
+  /// as ONE undo. Building already mutates (branch 1 edits the existing
+  /// continuation in place and no-ops its first apply, exactly as before), so
+  /// the returned op MUST be handed to [_doOp] exactly once.
+  ({_CanvasOp op, String pageId, TextElement el})? _buildContinuation(
+    String pageId,
+    TextElement source,
+    List<TextRun> overflowRuns,
+  ) {
     final page = pages[pageId];
     if (page == null || overflowRuns.isEmpty) return null;
     final rowIndex = canvas.rows.indexWhere((r) => r.pageIds.contains(pageId));
@@ -2708,8 +2729,8 @@ class CanvasController extends ChangeNotifier {
         _stamp([existing]);
         final after = existing.deepCopy();
         var applied = true;
-        _doOp(
-          _CanvasOp(
+        return (
+          op: _CanvasOp(
             label: 'Continue text',
             dirtyPageIds: {nid},
             apply: () {
@@ -2721,8 +2742,9 @@ class CanvasController extends ChangeNotifier {
             },
             revert: () => _replaceElements(nid, [before]),
           ),
+          pageId: nid,
+          el: existing,
         );
-        return (nid, existing);
       }
     }
 
@@ -2749,8 +2771,11 @@ class CanvasController extends ChangeNotifier {
         next.strokes.isEmpty &&
         next.objects.isEmpty) {
       final el = buildBox(next);
-      _doOp(_addElementsOp('Continue text', nextId, [el]));
-      return (nextId, el);
+      return (
+        op: _addElementsOp('Continue text', nextId, [el]),
+        pageId: nextId,
+        el: el,
+      );
     }
 
     // 3. Insert a fresh page right after this one.
@@ -2765,8 +2790,8 @@ class CanvasController extends ChangeNotifier {
     final newRow = horizontal
         ? null
         : PageRow(id: _service.newId(), pageIds: [newPage.id]);
-    _doOp(
-      _CanvasOp(
+    return (
+      op: _CanvasOp(
         label: 'Continue text on new page',
         structural: true,
         dirtyPageIds: {pageId, newPage.id},
@@ -2800,8 +2825,9 @@ class CanvasController extends ChangeNotifier {
           pages.remove(newPage.id);
         },
       ),
+      pageId: newPage.id,
+      el: el,
     );
-    return (newPage.id, el);
   }
 
   /// True when the lasso selection holds a text box that is part of a split
@@ -2935,6 +2961,26 @@ class CanvasController extends ChangeNotifier {
   /// part on the NEXT page), so a same-page part would make the chain's order
   /// ambiguous. Known limit: splitting a box that is already part of a flowed
   /// text leaves the after-text outside that chain.
+  /// Splits [runs] into the part that fits within [budget] height at
+  /// [maxWidth], and the remainder that must flow onto the next page.
+  ///
+  /// Returns `([], runs)` when there isn't room for even one line — the
+  /// [splitRunsByHeight] binary search always keeps at least one line in its
+  /// first chunk, which here would strand that line below the page edge where
+  /// the painter clips it away.
+  (List<TextRun>, List<TextRun>) _fitRunsInHeight(
+    List<TextRun> runs,
+    double maxWidth,
+    double budget,
+  ) {
+    if (runs.isEmpty) return (const [], const []);
+    final tallest = runs.fold<double>(0, (m, r) => math.max(m, r.fontSize));
+    if (budget < tallest * 1.3 + kTextBoxPad) return (const [], runs);
+    final chunks = splitRunsByHeight(runs, maxWidth, budget);
+    if (chunks.length < 2) return (runs, const []);
+    return (chunks.first, [for (final ch in chunks.skip(1)) ...ch]);
+  }
+
   ImageElement? insertImageAtCaret(
     String pageId,
     TextElement source,
@@ -2954,42 +3000,75 @@ class CanvasController extends ChangeNotifier {
     // Keep the image on the page when the box starts near the right edge (the
     // caller already capped its width).
     final imgLeft = math.max(0.0, math.min(left, page.width - imgW));
+    final maxW = page.width - left - 6;
 
     final sourceBefore = source.deepCopy();
     final sourceAfter = source.deepCopy();
     final added = <CanvasElement>[];
     final double imageTop;
+    // Text that has no room left under the image on THIS page — flowed onto the
+    // next one below, as one op with the paste.
+    var overflow = const <TextRun>[];
+    // The box the overflow continues from (the linked chain is page-ordered, so
+    // this is always the last part still on this page).
+    TextElement linkSource;
 
     if (beforeRuns.isEmpty) {
       // Caret at the very start: the image takes the box's top-left and the
-      // box (with all its text) slides down under it.
+      // box slides down under it — keeping only what still fits beneath.
       imageTop = source.rect.top;
+      final belowTop = imageTop + imgH + kImageBlockGap;
+      final (fits, rest) = _fitRunsInHeight(
+        sourceAfter.runs,
+        maxW,
+        page.height - belowTop - kPageTextMargin,
+      );
+      // Never leave the box empty: it is the anchor the overflow links from,
+      // and an emptied box would just be litter. Keeping one (possibly
+      // clipped) line matches what typing overflow does with an unsplittable
+      // line, and only bites when the image alone fills the page.
+      overflow = rest;
+      if (fits.isNotEmpty) sourceAfter.runs = fits;
       sourceAfter.rect = Rect.fromLTWH(
         left,
-        imageTop + imgH + kImageBlockGap,
+        belowTop,
         sourceAfter.rect.width,
         sourceAfter.rect.height,
       );
       _remeasureText(sourceAfter, pageId);
+      linkSource = sourceAfter;
     } else {
       sourceAfter.runs = beforeRuns;
       _remeasureText(sourceAfter, pageId);
       imageTop = sourceAfter.rect.bottom + kImageBlockGap;
+      linkSource = sourceAfter;
       if (afterRuns.isNotEmpty) {
-        final below = TextElement(
-          id: newModelId('el'),
-          deviceId: SettingsService().deviceId,
-          rect: Rect.fromLTWH(left, imageTop + imgH + kImageBlockGap, 10, 10),
-          runs: afterRuns,
-          fontFamily: source.fontFamily,
-          fontSize: source.fontSize,
-          color: source.color,
-          bold: source.bold,
-          italic: source.italic,
-          align: source.align,
+        final belowTop = imageTop + imgH + kImageBlockGap;
+        final (fits, rest) = _fitRunsInHeight(
+          afterRuns,
+          maxW,
+          page.height - belowTop - kPageTextMargin,
         );
-        _remeasureText(below, pageId);
-        added.add(below);
+        overflow = rest;
+        // No room under the image at all → the whole remainder flows, and the
+        // truncated box above the image stays the link anchor.
+        if (fits.isNotEmpty) {
+          final below = TextElement(
+            id: newModelId('el'),
+            deviceId: SettingsService().deviceId,
+            rect: Rect.fromLTWH(left, belowTop, 10, 10),
+            runs: fits,
+            fontFamily: source.fontFamily,
+            fontSize: source.fontSize,
+            color: source.color,
+            bold: source.bold,
+            italic: source.italic,
+            align: source.align,
+          );
+          _remeasureText(below, pageId);
+          added.add(below);
+          linkSource = below;
+        }
       }
     }
 
@@ -2997,18 +3076,28 @@ class CanvasController extends ChangeNotifier {
     image.zIndex = _belowInkZ(page);
     added.add(image);
 
-    _stamp([sourceAfter, ...added]);
+    // Built BEFORE the op and the stamp, for two reasons: folding its op into
+    // ours keeps one paste = one undo, and it assigns linkSource.linkId, which
+    // must be stamped and snapshotted along with everything else.
+    final cont = overflow.isEmpty
+        ? null
+        : _buildContinuation(pageId, linkSource, overflow);
+
+    _stamp([sourceAfter, ...added]); // linkSource is one of these
     final slots = [for (final el in added) _ElSlot(el)];
 
     _doOp(
       _CanvasOp(
         label: 'Paste image',
-        dirtyPageIds: {pageId},
+        structural: cont?.op.structural ?? false,
+        dirtyPageIds: {pageId, ...?cont?.op.dirtyPageIds},
         apply: () {
           _replaceElements(pageId, [sourceAfter]);
           _reviveSlots(page, slots);
+          cont?.op.apply();
         },
         revert: () {
+          cont?.op.revert();
           _replaceElements(pageId, [sourceBefore]);
           _tombstoneSlots(page, slots);
         },
