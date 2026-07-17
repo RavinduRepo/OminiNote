@@ -78,6 +78,26 @@ TextStyle editorBaseStyle(TextElement el) {
   );
 }
 
+/// The character offset [localOffset] (relative to the box's top-left) falls
+/// on within [el] — i.e. where a tap should put the caret. Uses the same layout
+/// the painter does, so the caret lands under the finger on the glyph the user
+/// actually aimed at.
+int caretOffsetAt(TextElement el, Offset localOffset) {
+  if (el.runs.isEmpty) return 0;
+  final tp = TextPainter(
+    text: textSpanForElement(el),
+    textDirection: TextDirection.ltr,
+    textAlign: switch (el.align) {
+      TextAlignOption.center => TextAlign.center,
+      TextAlignOption.right => TextAlign.right,
+      _ => TextAlign.left,
+    },
+  )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+  final idx = tp.getPositionForOffset(localOffset).offset;
+  tp.dispose();
+  return idx.clamp(0, el.text.length);
+}
+
 /// The link URL at [localOffset] (relative to the box's top-left) within [el],
 /// or null if that point isn't on a link run. Uses the same layout the painter
 /// does, so it lines up with what's drawn.

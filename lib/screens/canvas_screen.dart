@@ -904,10 +904,16 @@ class _CanvasScreenState extends State<CanvasScreen>
     final page = c.pages[pageLayout.pageId]!;
     final local = canvasPos - pageLayout.rect.topLeft;
 
-    // Tap an existing text element → edit it.
+    // Tap an existing text element → edit it, caret under the finger. (Local
+    // space is the box's top-left, matching the link/checkbox hit-tests above.)
     final existing = _textElementAt(screenPos);
     if (existing != null) {
-      _startTextEdit(page.id, existing, isNew: false);
+      _startTextEdit(
+        page.id,
+        existing,
+        isNew: false,
+        caretAt: local - existing.rect.topLeft,
+      );
       return;
     }
 
@@ -929,10 +935,33 @@ class _CanvasScreenState extends State<CanvasScreen>
       italic: c.textItalic,
       align: c.textAlign,
     );
-    _startTextEdit(page.id, el, isNew: true);
+    // A fresh box is empty, so the caret can only go at 0 — but passing it
+    // explicitly keeps the selection VALID, which stops EditableText's
+    // focus-time `selection = collapsed(text.length)` fixup from firing a
+    // redundant _onEditingChanged (and viewport glide) on open.
+    _startTextEdit(page.id, el, isNew: true, caretAt: Offset.zero);
   }
 
-  void _startTextEdit(String pageId, TextElement el, {required bool isNew}) {
+  /// Opens an edit session on [el]. [caretAt] is the tap point in the box's
+  /// local (page-point) space, when the session was opened BY a tap: the caret
+  /// goes exactly there, which is both what every text editor does and what
+  /// keeps the viewport still.
+  ///
+  /// Leaving the selection invalid instead makes the viewport jump TWICE before
+  /// the user can aim: `_ensureEditCaretVisible` falls back to end-of-text for
+  /// an invalid selection, and `EditableText` separately assigns
+  /// `controller.selection = collapsed(text.length)` on focus — which notifies,
+  /// firing `_onEditingChanged` and a second glide. Zoomed in on a box taller
+  /// than the screen, both scroll to the box's END, dragging the spot the user
+  /// was aiming at out from under them. With the caret placed at the tap, it is
+  /// visible by construction, so the ensure-visible below is a no-op and only
+  /// does its real job — lifting the caret above the keyboard.
+  void _startTextEdit(
+    String pageId,
+    TextElement el, {
+    required bool isNew,
+    Offset? caretAt,
+  }) {
     final c = _controller!;
     c.clearSelection(notify: false);
     final rc = RichTextController(
@@ -940,6 +969,11 @@ class _CanvasScreenState extends State<CanvasScreen>
       attrs: attrsFromElement(el),
       defaults: defaultAttrOf(el),
     );
+    if (caretAt != null) {
+      rc.selection = TextSelection.collapsed(
+        offset: caretOffsetAt(el, caretAt),
+      );
+    }
     rc.addListener(_onEditingChanged);
     setState(() {
       _textEdit = _TextEditSession(
