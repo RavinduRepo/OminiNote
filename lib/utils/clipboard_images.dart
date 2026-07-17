@@ -1,6 +1,41 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+import 'package:flutter/services.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+
+const MethodChannel _clipboardGuard = MethodChannel('omninote/clipboard_guard');
+
+/// Whether `super_clipboard` can safely read the clipboard right now.
+///
+/// **Android only, and load-bearing — do not call `SystemClipboard.read()`
+/// without it.** `super_native_extensions`' `ClipDataHelper.getFormats` calls
+/// `ContentResolver.getStreamTypes()` on any clipboard item carrying a URI and
+/// does NOT catch `SecurityException` (still true on their `main`; 0.9.1 is the
+/// newest release — there is no version to upgrade to). Clipboard items
+/// routinely point at a `FileProvider` that isn't exported and never granted us
+/// a URI permission — content synced from a desktop is the common one. The
+/// throw then happens on Android's main Looper *inside the plugin's Java*, so it
+/// never becomes a Dart exception: it is **not catchable from Dart** and takes
+/// the whole process down.
+///
+/// So `MainActivity.canEnumerateClipboard` makes the same call first, where the
+/// catch is ours, and this gates every read on the answer. A `false` costs us
+/// nothing — it means we had no permission to read that item's data anyway — so
+/// callers just fall back to plain text (`Clipboard.getData`, which routes
+/// through Android's own `coerceToText` and already swallows the exception).
+///
+/// Fails **open** on anything unexpected: every other platform, and any channel
+/// error, behaves exactly as before this guard existed.
+Future<bool> clipboardIsReadable() async {
+  if (!Platform.isAndroid) return true;
+  try {
+    return await _clipboardGuard.invokeMethod<bool>('canEnumerate') ?? true;
+  } catch (e) {
+    if (kDebugMode) debugPrint('clipboard guard unavailable: $e');
+    return true;
+  }
+}
 
 /// Cross-platform image clipboard (Android, iOS, macOS, Windows, Linux) on
 /// top of `super_clipboard`. Replaces the old `pasteboard` usage — that only
@@ -28,6 +63,9 @@ class ClipboardImages {
   static Future<Uint8List?> read() async {
     final clipboard = SystemClipboard.instance;
     if (clipboard == null) return null;
+    // Must come first — see [clipboardIsReadable]. Without it, an unreadable
+    // clipboard URI crashes the process instead of returning null.
+    if (!await clipboardIsReadable()) return null;
     final reader = await clipboard.read();
     // Try formats in preference order; first one the source app provides wins.
     const formats = [
@@ -67,6 +105,8 @@ class ClipboardHtml {
   static Future<String?> read() async {
     final clipboard = SystemClipboard.instance;
     if (clipboard == null) return null;
+    // Same crash, same guard — this read enumerates formats too.
+    if (!await clipboardIsReadable()) return null;
     final reader = await clipboard.read();
     if (!reader.canProvide(Formats.htmlText)) return null;
     final html = await reader.readValue(Formats.htmlText);
