@@ -53,6 +53,8 @@ dependencies:
   # the same Dart API (ReceiveSharingIntent.instance.getInitialMedia/getMediaStream).
   receive_sharing_intent: 1.8.1
   image_picker: ^1.2.3
+  record: ^6.2.1
+  audioplayers: ^6.7.1
 
 dev_dependencies:
   flutter_test:

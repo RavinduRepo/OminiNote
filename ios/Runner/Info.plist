@@ -16,6 +16,8 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>omininote</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OmniNote records voice notes over your canvas when you start a recording.</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

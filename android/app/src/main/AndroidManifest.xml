@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Required for Google Drive cloud sync (all build types, not just debug). -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Voice recording over a canvas (the `record` plugin). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
         android:label="omininote"
         android:name="${applicationName}"
