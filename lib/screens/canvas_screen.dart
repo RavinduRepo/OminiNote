@@ -1433,6 +1433,11 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Record audio',
                 onTap: _startAudioRecording,
               ),
+            ActionSheetItem(
+              icon: Icons.graphic_eq,
+              label: 'Recordings',
+              onTap: _showRecordings,
+            ),
             if (shown('page_settings'))
               ActionSheetItem(
                 icon: Icons.description_outlined,
@@ -1489,6 +1494,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showAttachments();
           case 'record_audio':
             _startAudioRecording();
+          case 'recordings':
+            _showRecordings();
           case 'page_settings':
             _showPageSettings();
           case 'finger_draw':
@@ -1525,6 +1532,7 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         if (!(_controller?.isRecordingAudio ?? false))
           iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
+        iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
         if (shown('page_settings'))
           iconMenuItem(
             'page_settings',
@@ -2330,6 +2338,84 @@ class _CanvasScreenState extends State<CanvasScreen>
           },
         ),
       ),
+    );
+  }
+
+  Future<void> _showRecordings() async {
+    final c = _controller!;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => cappedSheetBody(
+        context,
+        child: ListenableBuilder(
+          listenable: c,
+          builder: (context, _) {
+            final items = c.canvas.recordings;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                const _SheetLabel('Recordings'),
+                if (!c.isRecordingAudio)
+                  ListTile(
+                    leading: const Icon(Icons.mic_none),
+                    title: const Text('Record audio'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _startAudioRecording();
+                    },
+                  ),
+                const Divider(height: 1),
+                if (items.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('No recordings yet'),
+                  )
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: items.length,
+                      itemBuilder: (context, i) => _RecordingTile(
+                        controller: c,
+                        recording: items[i],
+                        onPlay: () => _playRecording(c, items[i]),
+                        onRename: () async {
+                          final name = await _promptText(
+                            title: 'Rename recording',
+                            initial: items[i].name,
+                            cta: 'Rename',
+                          );
+                          if (name != null && name.isNotEmpty) {
+                            c.renameRecording(items[i], name);
+                          }
+                        },
+                        onDelete: () => c.deleteRecording(items[i]),
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 8),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Starts (or resumes) playback of [rec], guarding against a not-yet-synced
+  /// audio asset.
+  Future<void> _playRecording(CanvasController c, AudioRecording rec) async {
+    final file = c.assetFileOf(rec.assetId);
+    if (!await file.exists()) {
+      _toast('Audio not available yet (still syncing?)');
+      return;
+    }
+    await c.audioPlayback.play(
+      rec.id,
+      file.path,
+      total: Duration(milliseconds: rec.durationMs),
     );
   }
 
@@ -3478,6 +3564,117 @@ class _RecordingBarState extends State<_RecordingBar>
           ],
         ),
       ),
+    );
+  }
+}
+
+String _fmtDuration(Duration d) {
+  final m = d.inMinutes;
+  final s = d.inSeconds % 60;
+  return '$m:${s.toString().padLeft(2, '0')}';
+}
+
+/// A recording row in the Recordings sheet: play/pause, a live scrubber while
+/// it's the active recording, and a rename/delete menu.
+class _RecordingTile extends StatelessWidget {
+  final CanvasController controller;
+  final AudioRecording recording;
+  final VoidCallback onPlay;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  const _RecordingTile({
+    required this.controller,
+    required this.recording,
+    required this.onPlay,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final playback = controller.audioPlayback;
+    return ValueListenableBuilder<String?>(
+      valueListenable: playback.currentId,
+      builder: (context, currentId, _) {
+        final active = currentId == recording.id;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: ValueListenableBuilder<bool>(
+                valueListenable: playback.playing,
+                builder: (context, playing, _) => IconButton(
+                  icon: Icon(
+                    active && playing
+                        ? Icons.pause_circle_filled
+                        : Icons.play_circle_fill,
+                    size: 36,
+                    color: palette.accent,
+                  ),
+                  onPressed: () {
+                    if (active && playing) {
+                      playback.pause();
+                    } else {
+                      onPlay();
+                    }
+                  },
+                ),
+              ),
+              title: Text(recording.name),
+              subtitle: Text(_fmtDuration(
+                  Duration(milliseconds: recording.durationMs))),
+              trailing: PopupMenuButton<String>(
+                onSelected: (a) {
+                  if (a == 'rename') onRename();
+                  if (a == 'delete') onDelete();
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'rename', child: Text('Rename')),
+                  PopupMenuItem(value: 'delete', child: Text('Delete')),
+                ],
+              ),
+            ),
+            // Live scrubber only for the recording being played.
+            if (active)
+              ValueListenableBuilder<Duration>(
+                valueListenable: playback.duration,
+                builder: (context, total, _) => ValueListenableBuilder<Duration>(
+                  valueListenable: playback.position,
+                  builder: (context, pos, _) {
+                    final maxMs = total.inMilliseconds > 0
+                        ? total.inMilliseconds
+                        : recording.durationMs;
+                    final value =
+                        pos.inMilliseconds.clamp(0, maxMs).toDouble();
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          Text(_fmtDuration(pos),
+                              style: TextStyle(
+                                  fontSize: 12, color: palette.textDim)),
+                          Expanded(
+                            child: Slider(
+                              value: value,
+                              max: maxMs.toDouble().clamp(1, double.infinity),
+                              onChanged: (v) => playback
+                                  .seek(Duration(milliseconds: v.round())),
+                            ),
+                          ),
+                          Text(_fmtDuration(Duration(milliseconds: maxMs)),
+                              style: TextStyle(
+                                  fontSize: 12, color: palette.textDim)),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

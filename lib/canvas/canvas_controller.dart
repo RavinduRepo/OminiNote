@@ -8,6 +8,7 @@ import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
 import '../models/shape_template.dart';
+import '../services/audio_playback_service.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
@@ -3672,6 +3673,14 @@ class CanvasController extends ChangeNotifier {
   AudioRecorderService? _recorder;
   AudioRecorderService get _audio => _recorder ??= AudioRecorderService();
 
+  AudioPlaybackService? _playback;
+
+  /// Lazily-created playback service (one AudioPlayer per open canvas) for the
+  /// Recordings sheet and audio-sync. Created on first use so canvases with no
+  /// recordings never touch the plugin.
+  AudioPlaybackService get audioPlayback =>
+      _playback ??= AudioPlaybackService();
+
   bool get isRecordingAudio => _recorder?.isRecording ?? false;
 
   /// Wall-clock start of the in-progress recording (for the UI elapsed timer),
@@ -3979,6 +3988,7 @@ class CanvasController extends ChangeNotifier {
     _holdTimer?.cancel();
     _saveTimer?.cancel();
     unawaited(_recorder?.dispose());
+    unawaited(_playback?.dispose());
     flushSaves();
     renderCache.dispose();
     pictureCache.dispose();
