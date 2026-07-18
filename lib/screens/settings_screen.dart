@@ -691,32 +691,202 @@ class _ThemeSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final settings = SettingsService();
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: SizedBox(
-        width: double.infinity,
-        child: SegmentedButton<ThemeMode>(
-          segments: const [
-            ButtonSegment(
-              value: ThemeMode.system,
-              icon: Icon(Icons.brightness_auto_outlined),
-              label: Text('System'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<ThemeMode>(
+              segments: const [
+                ButtonSegment(
+                  value: ThemeMode.system,
+                  icon: Icon(Icons.brightness_auto_outlined),
+                  label: Text('System'),
+                ),
+                ButtonSegment(
+                  value: ThemeMode.light,
+                  icon: Icon(Icons.light_mode_outlined),
+                  label: Text('Light'),
+                ),
+                ButtonSegment(
+                  value: ThemeMode.dark,
+                  icon: Icon(Icons.dark_mode_outlined),
+                  label: Text('Dark'),
+                ),
+              ],
+              selected: {current},
+              showSelectedIcon: false,
+              onSelectionChanged: (selection) => onChanged(selection.first),
             ),
-            ButtonSegment(
-              value: ThemeMode.light,
-              icon: Icon(Icons.light_mode_outlined),
-              label: Text('Light'),
-            ),
-            ButtonSegment(
-              value: ThemeMode.dark,
-              icon: Icon(Icons.dark_mode_outlined),
-              label: Text('Dark'),
-            ),
-          ],
-          selected: {current},
-          showSelectedIcon: false,
-          onSelectionChanged: (selection) => onChanged(selection.first),
+          ),
+          const SizedBox(height: 20),
+          _PaletteGroup(
+            label: 'Light palette',
+            variants: AppTheme.lightVariants,
+            selected: settings.lightThemeId,
+            onPick: settings.setLightThemeId,
+          ),
+          const SizedBox(height: 18),
+          _PaletteGroup(
+            label: 'Dark palette',
+            variants: AppTheme.darkVariants,
+            selected: settings.darkThemeId,
+            onPick: settings.setDarkThemeId,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A labelled row of palette-preview chips for one brightness. The selected id
+/// is a [ValueNotifier] so the highlight updates the moment a chip is tapped.
+class _PaletteGroup extends StatelessWidget {
+  final String label;
+  final List<ThemeVariant> variants;
+  final ValueNotifier<String> selected;
+  final ValueChanged<String> onPick;
+
+  const _PaletteGroup({
+    required this.label,
+    required this.variants,
+    required this.selected,
+    required this.onPick,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: palette.textDim,
+          ),
         ),
+        const SizedBox(height: 10),
+        ValueListenableBuilder<String>(
+          valueListenable: selected,
+          builder: (context, sel, _) => Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (final v in variants)
+                _VariantChip(
+                  variant: v,
+                  selected: v.id == sel,
+                  accent: palette.accent,
+                  onTap: () => onPick(v.id),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A tappable palette swatch: a mini "note card" preview (scaffold + surface +
+/// accent + text lines) in the variant's own colors, with its name below and an
+/// accent ring when selected.
+class _VariantChip extends StatelessWidget {
+  final ThemeVariant variant;
+  final bool selected;
+  final Color accent;
+  final VoidCallback onTap;
+
+  const _VariantChip({
+    required this.variant,
+    required this.selected,
+    required this.accent,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = variant.palette;
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(11),
+              border: Border.all(
+                color: selected ? accent : Colors.transparent,
+                width: 2,
+              ),
+            ),
+            child: Container(
+              width: 66,
+              height: 46,
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: variant.scaffold,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: p.border),
+              ),
+              child: Container(
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(
+                  color: variant.surface,
+                  borderRadius: BorderRadius.circular(5),
+                  border: Border.all(color: p.border),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 12,
+                          height: 3,
+                          color: variant.onSurface,
+                        ),
+                        const Spacer(),
+                        Container(
+                          width: 7,
+                          height: 7,
+                          decoration: BoxDecoration(
+                            color: p.accent,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Container(width: double.infinity, height: 2.5, color: p.textDim),
+                    const SizedBox(height: 3),
+                    Container(width: 20, height: 2.5, color: p.textDim),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 5),
+          SizedBox(
+            width: 70,
+            child: Text(
+              variant.name,
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

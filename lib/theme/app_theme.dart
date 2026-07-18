@@ -107,49 +107,246 @@ class AppPalette extends ThemeExtension<AppPalette> {
   }
 }
 
-/// Light + dark themes: Slate & Amber palette, flat/hairline (Graphite) shapes.
+/// One selectable theme "taste": a full palette + the handful of extra colors
+/// [AppTheme._build] needs. The user picks a light one and a dark one; System
+/// mode then shows the chosen light variant in light and the chosen dark in
+/// dark. All are tuned to stay easy on the eye for long reading/writing.
+@immutable
+class ThemeVariant {
+  final String id;
+  final String name;
+
+  /// One-word flavour shown under the name in the picker.
+  final String blurb;
+  final Brightness brightness;
+  final AppPalette palette;
+  final Color scaffold;
+  final Color surface;
+  final Color onSurface;
+  final Color onAccent;
+
+  const ThemeVariant({
+    required this.id,
+    required this.name,
+    required this.blurb,
+    required this.brightness,
+    required this.palette,
+    required this.scaffold,
+    required this.surface,
+    required this.onSurface,
+    required this.onAccent,
+  });
+
+  ThemeData build() => AppTheme._build(
+        brightness: brightness,
+        palette: palette,
+        scaffold: scaffold,
+        surface: surface,
+        onSurface: onSurface,
+        onAccent: onAccent,
+      );
+}
+
+/// Light + dark themes: flat/hairline (Graphite) shapes, in several palettes.
 class AppTheme {
-  static const _lightPalette = AppPalette(
-    canvas: Color(0xFFF5F6F9),
-    dot: Color(0xFFC7CCD6),
-    ink: Color(0xFF2B303B),
-    accent: Color(0xFFB8781E),
-    accentSoft: Color(0x1FB8781E),
-    surface2: Color(0xFFF7F8FA),
-    border: Color(0xFFDDE1E8),
-    textDim: Color(0xFF6B7280),
-  );
+  // ── Light variants ──────────────────────────────────────────────────────
 
-  // v2 redesign: cooler, deeper charcoal (mockup --void/--shell/--surface),
-  // amber accent unchanged in spirit.
-  static const _darkPalette = AppPalette(
-    canvas: Color(0xFF14171D), // drawing ground behind pages (mockup void)
-    dot: Color(0xFF2E3542),
-    ink: Color(0xFFE9ECF1),
-    accent: Color(0xFFE9A23B),
-    accentSoft: Color(0x24E9A23B), // ~.14 alpha
-    surface2: Color(0xFF1E232C), // raised inset (search bars, viewport)
-    border: Color(0xFF2A313D), // --line
-    textDim: Color(0xFF98A1AF), // --ink-2
-  );
-
-  static ThemeData light() => _build(
+  static const _slate = ThemeVariant(
+    id: 'slate',
+    name: 'Slate',
+    blurb: 'Cool grey · amber',
     brightness: Brightness.light,
-    palette: _lightPalette,
-    scaffold: const Color(0xFFEEF0F4),
-    surface: const Color(0xFFFFFFFF),
-    onSurface: const Color(0xFF232733),
+    palette: AppPalette(
+      canvas: Color(0xFFF5F6F9),
+      dot: Color(0xFFC7CCD6),
+      ink: Color(0xFF2B303B),
+      accent: Color(0xFFB8781E),
+      accentSoft: Color(0x1FB8781E),
+      surface2: Color(0xFFF7F8FA),
+      border: Color(0xFFDDE1E8),
+      textDim: Color(0xFF6B7280),
+    ),
+    scaffold: Color(0xFFEEF0F4),
+    surface: Color(0xFFFFFFFF),
+    onSurface: Color(0xFF232733),
     onAccent: Colors.white,
   );
 
-  static ThemeData dark() => _build(
-    brightness: Brightness.dark,
-    palette: _darkPalette,
-    scaffold: const Color(0xFF12151B), // --shell (screen background)
-    surface: const Color(0xFF171B22), // --surface (cards, app bar, sheets)
-    onSurface: const Color(0xFFE9ECF1),
-    onAccent: const Color(0xFF12151B),
+  static const _paper = ThemeVariant(
+    id: 'paper',
+    name: 'Paper',
+    blurb: 'Warm ivory',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFEFE9DD),
+      dot: Color(0xFFD8CFBE),
+      ink: Color(0xFF3A3327),
+      accent: Color(0xFFB67A2E),
+      accentSoft: Color(0x1FB67A2E),
+      surface2: Color(0xFFF6F1E8),
+      border: Color(0xFFE3DBCC),
+      textDim: Color(0xFF8A8070),
+    ),
+    scaffold: Color(0xFFF3EFE7),
+    surface: Color(0xFFFBF8F2),
+    onSurface: Color(0xFF2E2A22),
+    onAccent: Colors.white,
   );
+
+  static const _mist = ThemeVariant(
+    id: 'mist',
+    name: 'Mist',
+    blurb: 'Cool blue',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFF1F4F9),
+      dot: Color(0xFFC4D0DE),
+      ink: Color(0xFF263141),
+      accent: Color(0xFF3E76C4),
+      accentSoft: Color(0x1F3E76C4),
+      surface2: Color(0xFFF4F7FB),
+      border: Color(0xFFD6DFEA),
+      textDim: Color(0xFF64748B),
+    ),
+    scaffold: Color(0xFFEDF1F6),
+    surface: Color(0xFFFFFFFF),
+    onSurface: Color(0xFF1F2A38),
+    onAccent: Colors.white,
+  );
+
+  static const _sage = ThemeVariant(
+    id: 'sage',
+    name: 'Sage',
+    blurb: 'Soft green',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFEAEEE6),
+      dot: Color(0xFFCBD5C4),
+      ink: Color(0xFF2C332B),
+      accent: Color(0xFF4B8A5A),
+      accentSoft: Color(0x1F4B8A5A),
+      surface2: Color(0xFFF4F7F2),
+      border: Color(0xFFDBE2D6),
+      textDim: Color(0xFF6E7A69),
+    ),
+    scaffold: Color(0xFFEEF1EC),
+    surface: Color(0xFFFBFCFA),
+    onSurface: Color(0xFF232A22),
+    onAccent: Colors.white,
+  );
+
+  // ── Dark variants ───────────────────────────────────────────────────────
+
+  static const _charcoal = ThemeVariant(
+    id: 'charcoal',
+    name: 'Charcoal',
+    blurb: 'Deep grey · amber',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF14171D),
+      dot: Color(0xFF2E3542),
+      ink: Color(0xFFE9ECF1),
+      accent: Color(0xFFE9A23B),
+      accentSoft: Color(0x24E9A23B),
+      surface2: Color(0xFF1E232C),
+      border: Color(0xFF2A313D),
+      textDim: Color(0xFF98A1AF),
+    ),
+    scaffold: Color(0xFF12151B),
+    surface: Color(0xFF171B22),
+    onSurface: Color(0xFFE9ECF1),
+    onAccent: Color(0xFF12151B),
+  );
+
+  static const _midnight = ThemeVariant(
+    id: 'midnight',
+    name: 'Midnight',
+    blurb: 'Deep navy · blue',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF10151F),
+      dot: Color(0xFF29334A),
+      ink: Color(0xFFE4E9F2),
+      accent: Color(0xFF5E86D6),
+      accentSoft: Color(0x245E86D6),
+      surface2: Color(0xFF1B2233),
+      border: Color(0xFF262F44),
+      textDim: Color(0xFF8892A8),
+    ),
+    scaffold: Color(0xFF0F1420),
+    surface: Color(0xFF151B2A),
+    onSurface: Color(0xFFE4E9F2),
+    onAccent: Color(0xFF0F1420),
+  );
+
+  static const _espresso = ThemeVariant(
+    id: 'espresso',
+    name: 'Espresso',
+    blurb: 'Warm dark · amber',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF17130F),
+      dot: Color(0xFF3A3228),
+      ink: Color(0xFFEDE6DA),
+      accent: Color(0xFFE0A24B),
+      accentSoft: Color(0x24E0A24B),
+      surface2: Color(0xFF262019),
+      border: Color(0xFF332C24),
+      textDim: Color(0xFFA79C8C),
+    ),
+    scaffold: Color(0xFF1A1613),
+    surface: Color(0xFF221D18),
+    onSurface: Color(0xFFEDE6DA),
+    onAccent: Color(0xFF1A1613),
+  );
+
+  static const _carbon = ThemeVariant(
+    id: 'carbon',
+    name: 'Carbon',
+    blurb: 'Near-black · teal',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF0D0F13),
+      dot: Color(0xFF262B33),
+      ink: Color(0xFFE6E9EE),
+      accent: Color(0xFF3FB0A5),
+      accentSoft: Color(0x243FB0A5),
+      surface2: Color(0xFF16191E),
+      border: Color(0xFF23272E),
+      textDim: Color(0xFF8B929C),
+    ),
+    scaffold: Color(0xFF0B0D10),
+    surface: Color(0xFF121519),
+    onSurface: Color(0xFFE6E9EE),
+    onAccent: Color(0xFF0B0D10),
+  );
+
+  /// Pickable light palettes (first is the default).
+  static const List<ThemeVariant> lightVariants = [_slate, _paper, _mist, _sage];
+
+  /// Pickable dark palettes (first is the default).
+  static const List<ThemeVariant> darkVariants = [
+    _charcoal,
+    _midnight,
+    _espresso,
+    _carbon,
+  ];
+
+  /// The light variant for [id], or the default when unknown/null.
+  static ThemeVariant lightVariant(String? id) => lightVariants.firstWhere(
+        (v) => v.id == id,
+        orElse: () => lightVariants.first,
+      );
+
+  /// The dark variant for [id], or the default when unknown/null.
+  static ThemeVariant darkVariant(String? id) => darkVariants.firstWhere(
+        (v) => v.id == id,
+        orElse: () => darkVariants.first,
+      );
+
+  static ThemeData light() => lightVariants.first.build();
+
+  static ThemeData dark() => darkVariants.first.build();
 
   static ThemeData _build({
     required Brightness brightness,

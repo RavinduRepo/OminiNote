@@ -228,16 +228,20 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: SettingsService().themeMode,
-      builder: (context, themeMode, _) {
+    final s = SettingsService();
+    return ListenableBuilder(
+      // Rebuild on theme mode OR either palette-variant pick, so the chosen
+      // light/dark palettes apply live.
+      listenable:
+          Listenable.merge([s.themeMode, s.lightThemeId, s.darkThemeId]),
+      builder: (context, _) {
         return MaterialApp(
           title: 'Omininote',
           debugShowCheckedModeBanner: false,
           navigatorKey: _navigatorKey,
-          theme: AppTheme.light(),
-          darkTheme: AppTheme.dark(),
-          themeMode: themeMode,
+          theme: AppTheme.lightVariant(s.lightThemeId.value).build(),
+          darkTheme: AppTheme.darkVariant(s.darkThemeId.value).build(),
+          themeMode: s.themeMode.value,
           navigatorObservers: [searchRouteObserver],
           home: const _RootRouter(),
         );

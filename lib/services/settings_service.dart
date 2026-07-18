@@ -27,6 +27,12 @@ class SettingsService {
 
   final ValueNotifier<ThemeMode> themeMode = ValueNotifier(ThemeMode.system);
 
+  /// Chosen light/dark palette variants (`AppTheme.lightVariants`/`darkVariants`
+  /// ids). Whichever brightness is showing — via System or a manual pick — uses
+  /// its selected variant, so the two are remembered independently.
+  final ValueNotifier<String> lightThemeId = ValueNotifier('slate');
+  final ValueNotifier<String> darkThemeId = ValueNotifier('charcoal');
+
   /// App-wide default page background seeded into new sections/pages. Editable
   /// from Settings (outside a notebook) so the default applies everywhere.
   final ValueNotifier<PageBackground> defaultPageBackground = ValueNotifier(
@@ -286,6 +292,8 @@ class SettingsService {
     }
 
     themeMode.value = _parseThemeMode(data['themeMode']);
+    if (data['lightThemeId'] is String) lightThemeId.value = data['lightThemeId'];
+    if (data['darkThemeId'] is String) darkThemeId.value = data['darkThemeId'];
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
@@ -366,6 +374,18 @@ class SettingsService {
     await _persist();
   }
 
+  Future<void> setLightThemeId(String id) async {
+    if (lightThemeId.value == id) return;
+    lightThemeId.value = id;
+    await _persist();
+  }
+
+  Future<void> setDarkThemeId(String id) async {
+    if (darkThemeId.value == id) return;
+    darkThemeId.value = id;
+    await _persist();
+  }
+
   Future<void> setLayoutMode(LayoutMode mode) async {
     if (layoutMode.value == mode) return;
     layoutMode.value = mode;
@@ -435,6 +455,8 @@ class SettingsService {
     await _settingsFile.writeAsString(
       jsonEncode({
         'themeMode': themeMode.value.name,
+        'lightThemeId': lightThemeId.value,
+        'darkThemeId': darkThemeId.value,
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
