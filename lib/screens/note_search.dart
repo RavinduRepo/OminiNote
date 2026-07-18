@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import '../services/search_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
-import 'canvas_screen.dart';
+import 'canvas_workspace_screen.dart';
 import 'notebook_screen.dart';
 import 'section_screen.dart';
 
@@ -222,7 +222,8 @@ class _SearchScreenState extends State<_SearchScreen> {
     }
     if (r.canvas != null) {
       navigator.push(fadeThroughRoute(
-        CanvasScreen(canvas: r.canvas!, initialPageId: r.pageId),
+        CanvasWorkspaceScreen(
+            initialCanvas: r.canvas!, initialPageId: r.pageId),
       ));
     }
   }

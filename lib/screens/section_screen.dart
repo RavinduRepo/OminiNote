@@ -11,7 +11,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
-import 'canvas_screen.dart';
+import 'canvas_workspace_screen.dart';
 import 'note_search.dart'; // searchRouteObserver (glow-on-reveal)
 
 /// Mobile screen 3: a section's tree of **canvases** + nested super-sections.
@@ -108,7 +108,7 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
     if (!mounted) return;
     // Root navigator so the canvas editor covers the mobile bottom nav bar.
     Navigator.of(context, rootNavigator: true).push(
-      slideRoute(CanvasScreen(canvas: canvas)),
+      slideRoute(CanvasWorkspaceScreen(initialCanvas: canvas)),
     ).then((_) => _reload());
   }
 
@@ -122,7 +122,7 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
   void _openCanvas(Canvas canvas) {
     // Root navigator so the canvas editor covers the mobile bottom nav bar.
     Navigator.of(context, rootNavigator: true).push(
-      slideRoute(CanvasScreen(canvas: canvas)),
+      slideRoute(CanvasWorkspaceScreen(initialCanvas: canvas)),
     ).then((_) => _reload());
   }
 

@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import '../services/search_service.dart';
 import '../theme/app_theme.dart';
 import 'bin_screen.dart';
-import 'canvas_screen.dart';
+import 'canvas_workspace_screen.dart';
 import 'home_screen.dart';
 import 'note_search.dart';
 import 'notebook_screen.dart';
@@ -147,7 +147,8 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     if (r.canvas != null) {
       // Canvas opens on the root navigator so the bottom bar is hidden.
       Navigator.of(context, rootNavigator: true).push(slideRoute(
-        CanvasScreen(canvas: r.canvas!, initialPageId: r.pageId),
+        CanvasWorkspaceScreen(
+            initialCanvas: r.canvas!, initialPageId: r.pageId),
       ));
     }
   }
