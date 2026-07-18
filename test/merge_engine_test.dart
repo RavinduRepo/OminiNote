@@ -331,6 +331,281 @@ void main() {
     });
   });
 
+  group('reconcile — section.json membership union (concurrent canvas add)', () {
+    const rel = 'notebooks/n1/sections/s1/section.json';
+
+    Map<String, dynamic> sec({
+      int rev = 1,
+      String device = 'dev',
+      String name = 'S',
+      required List<Map<String, dynamic>> nodes,
+    }) =>
+        {
+          'schemaVersion': 1,
+          'id': 's1',
+          'rev': rev,
+          'updatedAt': 1000 + rev,
+          'deviceId': device,
+          'deletedAt': null,
+          'notebookId': 'n1',
+          'name': name,
+          'createdAt': '2026-01-01T00:00:00.000',
+          'nodes': nodes,
+        };
+
+    Map<String, dynamic> leaf(String id) => {'type': 'leaf', 'refId': id};
+    void collect(List nodes, Set<String> out) {
+      for (final n in nodes) {
+        final m = n as Map;
+        if (m['type'] == 'folder' || m['type'] == 'group') {
+          collect((m['children'] as List?) ?? const [], out);
+        } else {
+          out.add(m['refId'] as String);
+        }
+      }
+    }
+
+    Set<String> leavesOf(String content) {
+      final out = <String>{};
+      collect((jsonDecode(content) as Map)['nodes'] as List, out);
+      return out;
+    }
+
+    test('two devices each add a distinct canvas — BOTH survive (the reported '
+        'bug); merge is commutative', () {
+      // A has the shared c1 + its new c2; B has the shared c1 + its new c3.
+      final a = jsonEncode(
+          sec(rev: 5, device: 'devA', nodes: [leaf('c1'), leaf('c2')]));
+      final b = jsonEncode(
+          sec(rev: 5, device: 'devB', nodes: [leaf('c1'), leaf('c3')]));
+
+      final ab = MergeEngine.reconcile(rel, a, b);
+      final ba = MergeEngine.reconcile(rel, b, a);
+
+      expect(leavesOf(ab.content), {'c1', 'c2', 'c3'},
+          reason: 'the losing device\'s new canvas must not be dropped');
+      expect(leavesOf(ba.content), {'c1', 'c2', 'c3'});
+      // Byte-identical both directions → deterministic convergence.
+      expect(ab.content, ba.content, reason: 'merge must be commutative');
+    });
+
+    test('the merge converges: re-merging the result adds nothing and stops '
+        'flagging (no push loop)', () {
+      final a = jsonEncode(
+          sec(rev: 5, device: 'devA', nodes: [leaf('c1'), leaf('c2')]));
+      final b = jsonEncode(
+          sec(rev: 5, device: 'devB', nodes: [leaf('c1'), leaf('c3')]));
+
+      final merged = MergeEngine.reconcile(rel, a, b).content;
+      // Feed the merged doc back against each original — it is now a superset,
+      // so nothing new is contributed and it stays byte-stable.
+      final again = MergeEngine.reconcile(rel, merged, a);
+      expect(leavesOf(again.content), {'c1', 'c2', 'c3'});
+      expect(again.content, merged, reason: 'idempotent — no further change');
+
+      final settled = MergeEngine.reconcile(rel, merged, merged);
+      expect(settled.changedLocal, isFalse);
+      expect(settled.localContributed, isFalse,
+          reason: 'identical docs must not re-push forever');
+    });
+
+    test('local newer with the SAME membership → re-pushed, not rewritten '
+        '(unchanged metadata-LWW behavior)', () {
+      final a = jsonEncode(
+          sec(rev: 9, device: 'devA', name: 'mine', nodes: [leaf('c1')]));
+      final b = jsonEncode(
+          sec(rev: 4, device: 'devB', name: 'theirs', nodes: [leaf('c1')]));
+      final r = MergeEngine.reconcile(rel, a, b);
+      expect((jsonDecode(r.content) as Map)['name'], 'mine');
+      expect(r.changedLocal, isFalse, reason: 'nothing new locally');
+      expect(r.localContributed, isTrue, reason: 'remote is behind');
+    });
+
+    test('a loser\'s canvas nested in its own new folder survives at the top '
+        'level; the winner\'s folder grouping is preserved', () {
+      // Winner (A) keeps a folder "g1" holding c2. Loser (B) put its new c3 in
+      // a brand-new folder "g2". c3 must survive (top level); g2 grouping lost.
+      final a = jsonEncode(sec(rev: 9, device: 'devA', nodes: [
+        leaf('c1'),
+        {
+          'type': 'folder',
+          'id': 'g1',
+          'name': 'G1',
+          'collapsed': false,
+          'children': [leaf('c2')],
+        },
+      ]));
+      final b = jsonEncode(sec(rev: 4, device: 'devB', nodes: [
+        leaf('c1'),
+        {
+          'type': 'folder',
+          'id': 'g2',
+          'name': 'G2',
+          'collapsed': false,
+          'children': [leaf('c3')],
+        },
+      ]));
+
+      final r = MergeEngine.reconcile(rel, a, b);
+      final nodes = (jsonDecode(r.content) as Map)['nodes'] as List;
+      expect(leavesOf(r.content), {'c1', 'c2', 'c3'},
+          reason: 'no canvas lost regardless of grouping');
+      // Winner's folder g1 is intact; the merged tree still has exactly one
+      // folder (g1), with c3 appended as a plain top-level leaf.
+      final folderIds = [
+        for (final n in nodes)
+          if ((n as Map)['type'] == 'folder') n['id'],
+      ];
+      expect(folderIds, ['g1']);
+      expect(nodes.last, {'type': 'leaf', 'refId': 'c3'});
+    });
+
+    test('a leaf pointing at a since-deleted canvas is kept by the union but '
+        'the winner\'s metadata (incl. any deletedAt) is preserved — no '
+        'resurrection at this layer (the canvas.json tombstone gates display)',
+        () {
+      // B deleted c2 (dropped its leaf locally) and B won LWW. A still lists
+      // c2. Union re-adds c2's leaf, but that is harmless: c2's own canvas.json
+      // carries deletedAt, and getCanvasMap filters it out of the UI.
+      final a = jsonEncode(
+          sec(rev: 4, device: 'devA', nodes: [leaf('c1'), leaf('c2')]));
+      final b =
+          jsonEncode(sec(rev: 9, device: 'devB', name: 'won', nodes: [leaf('c1')]));
+      final r = MergeEngine.reconcile(rel, a, b);
+      expect((jsonDecode(r.content) as Map)['name'], 'won');
+      expect(leavesOf(r.content), {'c1', 'c2'},
+          reason: 'union keeps c2\'s leaf; display filter (not the tree) hides '
+              'the deleted canvas');
+    });
+  });
+
+  group('reconcile — canvas.json structure union (concurrent page add)', () {
+    const rel = 'notebooks/n1/sections/s1/canvases/c1/canvas.json';
+
+    Map<String, dynamic> canvas({
+      int rev = 1,
+      String device = 'dev',
+      required List<List<String>> rows,
+      List<Map<String, dynamic>> bookmarks = const [],
+      List<Map<String, dynamic>> attachments = const [],
+    }) =>
+        {
+          'schemaVersion': 1,
+          'id': 'c1',
+          'rev': rev,
+          'updatedAt': 1000 + rev,
+          'deviceId': device,
+          'deletedAt': null,
+          'notebookId': 'n1',
+          'sectionId': 's1',
+          'name': 'C',
+          'createdAt': '2026-01-01T00:00:00.000',
+          'defaultPageWidth': 595.0,
+          'defaultPageHeight': 842.0,
+          'defaultBackground': {'color': 0xFFFFFFFF, 'pattern': 'blank'},
+          'rows': [
+            for (var i = 0; i < rows.length; i++)
+              {'id': 'row$i', 'pageIds': rows[i]},
+          ],
+          'attachments': attachments,
+          'bookmarks': bookmarks,
+        };
+
+    Set<String> pagesOf(String content) {
+      final rows = (jsonDecode(content) as Map)['rows'] as List;
+      return {
+        for (final row in rows)
+          for (final pid in (row as Map)['pageIds'] as List) pid as String,
+      };
+    }
+
+    test('two devices each add a page — BOTH pages survive; commutative', () {
+      final a = jsonEncode(canvas(rev: 5, device: 'devA', rows: [
+        ['p1', 'p2'],
+      ]));
+      final b = jsonEncode(canvas(rev: 5, device: 'devB', rows: [
+        ['p1', 'p3'],
+      ]));
+
+      final ab = MergeEngine.reconcile(rel, a, b);
+      final ba = MergeEngine.reconcile(rel, b, a);
+      expect(pagesOf(ab.content), {'p1', 'p2', 'p3'});
+      expect(pagesOf(ba.content), {'p1', 'p2', 'p3'});
+      expect(ab.content, ba.content, reason: 'commutative → converges');
+    });
+
+    test('the orphan page is appended as its own new row with a stable, '
+        'device-agnostic id', () {
+      final a = jsonEncode(canvas(rev: 9, device: 'devA', rows: [
+        ['p1'],
+      ]));
+      final b = jsonEncode(canvas(rev: 4, device: 'devB', rows: [
+        ['p1', 'p2'],
+      ]));
+      final r = MergeEngine.reconcile(rel, a, b);
+      final rows = (jsonDecode(r.content) as Map)['rows'] as List;
+      expect(rows.last, {'id': 'r-p2', 'pageIds': ['p2']},
+          reason: 'stable derived id so both devices agree');
+      expect(pagesOf(r.content), {'p1', 'p2'});
+    });
+
+    test('no structural conflict → no spurious change flags (no push loop)', () {
+      final a = jsonEncode(canvas(rev: 9, device: 'devA', rows: [
+        ['p1', 'p2'],
+      ]));
+      final b = jsonEncode(canvas(rev: 4, device: 'devB', rows: [
+        ['p1', 'p2'],
+      ]));
+      final r = MergeEngine.reconcile(rel, a, b);
+      expect(r.changedLocal, isFalse);
+      expect(r.localContributed, isTrue, reason: 'remote is a rev behind');
+
+      final settled = MergeEngine.reconcile(rel, a, a);
+      expect(settled.changedLocal, isFalse);
+      expect(settled.localContributed, isFalse);
+    });
+
+    test('bookmarks and attachments added concurrently both survive', () {
+      Map<String, dynamic> bm(String id) =>
+          {'id': id, 'name': id, 'pageId': 'p1', 'createdAt': '2026-01-01'};
+      Map<String, dynamic> att(String id) => {
+            'id': id,
+            'name': id,
+            'assetId': 'a',
+            'mime': 'x',
+            'addedAt': '2026-01-01',
+          };
+
+      final a = jsonEncode(canvas(
+        rev: 5,
+        device: 'devA',
+        rows: [
+          ['p1'],
+        ],
+        bookmarks: [bm('b1')],
+        attachments: [att('t1')],
+      ));
+      final b = jsonEncode(canvas(
+        rev: 5,
+        device: 'devB',
+        rows: [
+          ['p1'],
+        ],
+        bookmarks: [bm('b2')],
+        attachments: [att('t2')],
+      ));
+
+      final ab = MergeEngine.reconcile(rel, a, b);
+      final ba = MergeEngine.reconcile(rel, b, a);
+      final m = jsonDecode(ab.content) as Map;
+      expect({for (final e in m['bookmarks'] as List) (e as Map)['id']},
+          {'b1', 'b2'});
+      expect({for (final e in m['attachments'] as List) (e as Map)['id']},
+          {'t1', 't2'});
+      expect(ab.content, ba.content, reason: 'commutative');
+    });
+  });
+
   group('purge — terminal, grow-only purgedAt', () {
     Map<String, dynamic> nb(String id,
             {int rev = 1, int? deletedAt, int? purgedAt}) =>

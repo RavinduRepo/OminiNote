@@ -26,7 +26,20 @@ class MergeResult {
 ///   • `notebooks.json` — union map keyed by notebook id; per-id LWW by
 ///     `(rev, updatedAt, deviceId)`. Union means two devices' distinct
 ///     notebooks both survive a first sync (no whole-file clobber).
-///   • `section.json` / `canvas.json` — single-document LWW by the same tuple.
+///   • `section.json` / `canvas.json` — **structure-aware** merge: LWW by the
+///     same tuple for all scalar/metadata fields, but the *membership* lists
+///     (a section's canvas leaves; a canvas's page rows, bookmarks and
+///     attachments) are **unioned** so a canvas/page/bookmark added
+///     concurrently on two devices is never dropped by the whole-doc clobber.
+///     The losing side's new items are appended (leaves at the top level,
+///     pages as new rows at the bottom) with deterministic ids/order so both
+///     devices converge to byte-identical output. Deletion is unaffected:
+///     item-level tombstones (`deletedAt`) in the separate section/canvas/page
+///     files remain the durable delete signal, and the UI already filters
+///     leaves whose backing item is tombstoned — so a unioned-in leaf that
+///     points at a deleted item is invisible, never a resurrection. Concurrent
+///     *folder* (super-section) grouping stays LWW (a loser's brand-new folder
+///     loses its grouping, but its canvases survive at the top level).
 ///   • page files — set-union of immutable strokes + grow-only erase
 ///     tombstones, LWW for text/image objects and page background.
 ///   • assets — content-addressed and immutable; handled outside the engine
@@ -84,7 +97,13 @@ class MergeEngine {
     if (relPath.endsWith('/pages/') || _isPagePath(relPath)) {
       return _mergePageJson(local, remote);
     }
-    // section.json, canvas.json, and any other enveloped single document.
+    if (relPath.endsWith('/section.json')) {
+      return _mergeStructuredDoc(local, remote, _foldSectionMembership);
+    }
+    if (relPath.endsWith('/canvas.json')) {
+      return _mergeStructuredDoc(local, remote, _foldCanvasMembership);
+    }
+    // Any other enveloped single document.
     return _mergeSingleDoc(local, remote);
   }
 
@@ -253,6 +272,189 @@ class MergeEngine {
       changedLocal: !localWins,
       localContributed: localWins,
     );
+  }
+
+  // ── section.json / canvas.json (LWW metadata + membership union) ──────────
+
+  /// Merges an enveloped structural doc: LWW picks the winner for every scalar
+  /// field, then [foldMembership] folds the loser's *new* membership (canvas
+  /// leaves / page rows / bookmarks / attachments) into the winner so nothing
+  /// added concurrently is lost. Purge stays terminal (content is gone, so no
+  /// membership to union). The merge is symmetric and does **not** bump `rev`,
+  /// so both devices compute byte-identical output and converge in one round
+  /// (a subsequent merge of the identical docs is a no-op → no push loop).
+  static MergeResult _mergeStructuredDoc(
+    String? local,
+    String remote,
+    void Function(Map<String, dynamic> merged, Map<String, dynamic> loser)
+        foldMembership,
+  ) {
+    if (local == null) {
+      return MergeResult(
+        content: remote,
+        changedLocal: true,
+        localContributed: false,
+      );
+    }
+    final l = _decodeMap(local);
+    final r = _decodeMap(remote);
+    final localWins = _envelopeWins(l, r);
+    final winner = localWins ? l : r;
+
+    // Terminal purge: content is permanently stripped, so there is no
+    // membership to union — fall back to the single-doc purge/LWW handling.
+    if (l['purgedAt'] != null || r['purgedAt'] != null) {
+      final purged = _withPurgeOverride(winner, l, r);
+      if (purged != null) {
+        return MergeResult(
+          content: jsonEncode(purged),
+          changedLocal: true,
+          localContributed: true,
+        );
+      }
+      return MergeResult(
+        content: localWins ? local : remote,
+        changedLocal: !localWins,
+        localContributed: localWins,
+      );
+    }
+
+    final loser = localWins ? r : l;
+    final merged = Map<String, dynamic>.from(winner);
+    foldMembership(merged, loser);
+
+    return MergeResult(
+      content: jsonEncode(merged),
+      changedLocal: !_jsonEquals(merged, l),
+      localContributed: !_jsonEquals(merged, r),
+    );
+  }
+
+  /// Union a section's canvas leaves: any leaf refId present on the loser but
+  /// not the winner is appended as a top-level [LeafNode] (deterministic id
+  /// order). Folder grouping is the winner's (LWW) — see the class policy.
+  static void _foldSectionMembership(
+    Map<String, dynamic> merged,
+    Map<String, dynamic> loser,
+  ) {
+    final winnerNodes = (merged['nodes'] as List?) ?? const [];
+    final winnerLeaves = <String>{};
+    final winnerFolders = <String>{};
+    _collectNodeIds(winnerNodes, winnerLeaves, winnerFolders);
+    final loserLeaves = <String>{};
+    final ignoredFolders = <String>{};
+    _collectNodeIds(
+        (loser['nodes'] as List?) ?? const [], loserLeaves, ignoredFolders);
+
+    final orphans = loserLeaves.difference(winnerLeaves).toList()..sort();
+    if (orphans.isEmpty) return;
+    merged['nodes'] = [
+      ...winnerNodes,
+      for (final id in orphans) {'type': 'leaf', 'refId': id},
+    ];
+  }
+
+  /// Union a canvas's structure: pageIds absent from the winner's rows are
+  /// appended as new single-page rows (stable, derived row ids so both devices
+  /// agree); bookmarks and attachments are unioned by id. A unioned-in page
+  /// whose page file is tombstoned is pruned by `loadPages`, so this never
+  /// resurrects a deleted page.
+  static void _foldCanvasMembership(
+    Map<String, dynamic> merged,
+    Map<String, dynamic> loser,
+  ) {
+    final winnerRows = (merged['rows'] as List?) ?? const [];
+    final winnerPages = <String>{};
+    for (final row in winnerRows) {
+      for (final pid in (row is Map ? row['pageIds'] as List? : null) ??
+          const []) {
+        if (pid is String) winnerPages.add(pid);
+      }
+    }
+    final loserPages = <String>{};
+    for (final row in (loser['rows'] as List?) ?? const []) {
+      for (final pid in (row is Map ? row['pageIds'] as List? : null) ??
+          const []) {
+        if (pid is String) loserPages.add(pid);
+      }
+    }
+    final orphanPages = loserPages.difference(winnerPages).toList()..sort();
+    if (orphanPages.isNotEmpty) {
+      merged['rows'] = [
+        ...winnerRows,
+        for (final pid in orphanPages)
+          {'id': 'r-$pid', 'pageIds': [pid]},
+      ];
+    }
+
+    final bmExtra = _extraById(merged['bookmarks'], loser['bookmarks']);
+    if (bmExtra.isNotEmpty) {
+      merged['bookmarks'] = [
+        ...((merged['bookmarks'] as List?) ?? const []),
+        ...bmExtra,
+      ];
+    }
+    final atExtra = _extraById(merged['attachments'], loser['attachments']);
+    if (atExtra.isNotEmpty) {
+      merged['attachments'] = [
+        ...((merged['attachments'] as List?) ?? const []),
+        ...atExtra,
+      ];
+    }
+  }
+
+  /// The elements of [loserList] (id-keyed maps) whose `id` is absent from
+  /// [winnerList]. Returns const-empty when there is nothing to add, so the
+  /// caller can leave the winner's field byte-identical (no spurious diff).
+  static List _extraById(dynamic winnerList, dynamic loserList) {
+    final w = (winnerList as List?) ?? const [];
+    final l = (loserList as List?) ?? const [];
+    if (l.isEmpty) return const [];
+    final ids = {for (final e in w) if (e is Map) e['id']};
+    return [for (final e in l) if (e is Map && !ids.contains(e['id'])) e];
+  }
+
+  /// Collects leaf refIds and folder ids from a nodes tree (JSON form),
+  /// depth-first, accepting the legacy `group`/`sectionId` tags.
+  static void _collectNodeIds(
+    List nodes,
+    Set<String> leaves,
+    Set<String> folders,
+  ) {
+    for (final n in nodes) {
+      if (n is! Map) continue;
+      final type = n['type'];
+      if (type == 'folder' || type == 'group') {
+        final id = n['id'];
+        if (id is String) folders.add(id);
+        final children = n['children'];
+        if (children is List) _collectNodeIds(children, leaves, folders);
+      } else {
+        final ref = n['refId'] ?? n['sectionId'] ?? n['id'];
+        if (ref is String && ref.isNotEmpty) leaves.add(ref);
+      }
+    }
+  }
+
+  /// Deep structural equality for JSON-decoded maps/lists/scalars — used to set
+  /// the changed/contributed flags without depending on key order.
+  static bool _jsonEquals(dynamic a, dynamic b) {
+    if (identical(a, b)) return true;
+    if (a is Map && b is Map) {
+      if (a.length != b.length) return false;
+      for (final k in a.keys) {
+        if (!b.containsKey(k) || !_jsonEquals(a[k], b[k])) return false;
+      }
+      return true;
+    }
+    if (a is List && b is List) {
+      if (a.length != b.length) return false;
+      for (var i = 0; i < a.length; i++) {
+        if (!_jsonEquals(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    return a == b;
   }
 
   // ── page files (set union) ───────────────────────────────────────────────
