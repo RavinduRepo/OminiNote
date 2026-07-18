@@ -1786,6 +1786,11 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
         if (shown('image'))
           iconMenuItem('image', Icons.image_outlined, 'Insert image'),
+        // Same gate as the mobile Add sheet — an Android/iOS device in the
+        // desktop *layout* has a camera; true desktop OSes (no image_picker
+        // camera support) don't show it.
+        if (Platform.isAndroid || Platform.isIOS)
+          iconMenuItem('camera', Icons.photo_camera_outlined, 'Take photo'),
         if (PageClipboard().hasPage.value)
           iconMenuItem(
             'pastePage',
