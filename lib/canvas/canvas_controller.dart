@@ -3805,7 +3805,17 @@ class CanvasController extends ChangeNotifier {
 
   double overscrollRight = 0;
   double overscrollBottom = 0;
-  static const double overscrollThreshold = 96; // screen px
+
+  /// How far (screen px) the user must keep pulling **past** a document edge
+  /// before a new page is added on release. Deliberately large so a normal
+  /// scroll that happens to reach the edge never adds a page by accident —
+  /// only a firm, intentional pull does (Samsung-Notes-style).
+  static const double overscrollThreshold = 200; // screen px
+
+  /// The "+" hint stays hidden until the pull passes this floor, so it never
+  /// flashes during ordinary edge-scrolling — it only appears once the user is
+  /// clearly reaching for a new page. From here it fills up to the threshold.
+  static const double overscrollHintFloor = 90; // screen px
 
   /// Feed the unconsumed pan from [panBy] during a touch pan gesture.
   void accumulateOverscroll(Offset unconsumed) {
@@ -3813,14 +3823,14 @@ class CanvasController extends ChangeNotifier {
     if (unconsumed.dx < 0) {
       overscrollRight = math.min(
         overscrollRight - unconsumed.dx,
-        overscrollThreshold * 1.4,
+        overscrollThreshold * 1.2,
       );
       changed = true;
     }
     if (unconsumed.dy < 0) {
       overscrollBottom = math.min(
         overscrollBottom - unconsumed.dy,
-        overscrollThreshold * 1.4,
+        overscrollThreshold * 1.2,
       );
       changed = true;
     }

@@ -626,11 +626,13 @@ class CanvasPainter extends CustomPainter {
 
   void _paintOverscrollHints(Canvas canvas, Size size) {
     void hint(Offset center, double progress) {
-      if (progress <= 0) return;
-      final t = (progress / CanvasController.overscrollThreshold).clamp(
-        0.0,
-        1.0,
-      );
+      // Stay hidden until the pull clearly passes the floor, so the "+" never
+      // flashes during ordinary edge-scrolling. From the floor it fades/fills
+      // up to the threshold (where releasing adds the page).
+      if (progress <= CanvasController.overscrollHintFloor) return;
+      const floor = CanvasController.overscrollHintFloor;
+      const span = CanvasController.overscrollThreshold - floor;
+      final t = ((progress - floor) / span).clamp(0.0, 1.0);
       final bg = Paint()
         ..color = accentColor.withValues(alpha: 0.25 + 0.6 * t);
       canvas.drawCircle(center, 22, bg);
