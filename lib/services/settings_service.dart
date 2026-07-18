@@ -183,44 +183,55 @@ class SettingsService {
 
   // ── Toolbar customization (device-local) ────────────────────────────────
 
-  /// Which "+" (Add) menu actions are promoted to show directly on the app
-  /// bar, in bar order — anything not listed here stays in the "+" menu.
-  /// Separate per layout (mobile's bar has far less room than desktop's).
-  /// Action ids reuse the exact strings already used as
-  /// `_runAddAction`/menu `onSelected` values ('blank', 'horizontal', 'pdf',
-  /// 'image', 'camera', 'paste', 'pastePage'). Desktop starts seeded to
-  /// today's hardcoded layout so existing users see no change until they
-  /// open "Customize toolbar…"; mobile starts empty (today's mobile bar
-  /// promotes nothing).
-  List<String> promotedAddActionsMobile = [];
-  List<String> promotedAddActionsDesktop = ['blank', 'image'];
+  /// A single ordered list of the toolbar buttons promoted onto the canvas
+  /// app bar, in left-to-right bar order — separate per layout (mobile's bar
+  /// has far less room than desktop's). Unlike the old two-list model (add
+  /// actions + overflow actions kept apart), this is ONE sequence so undo,
+  /// redo, the "+" Add control ('add') and every add/overflow action can be
+  /// freely interleaved and reordered relative to each other, giving the two
+  /// layouts a consistent structure. The only button that is never in this
+  /// list (always pinned last, never removable) is the "⋯" overflow menu.
+  /// Anything not listed here is reached through that menu instead. Action ids
+  /// reuse the exact strings used as `_runAddAction`/menu `onSelected` values
+  /// plus the three core ids 'undo'/'redo'/'add'.
+  List<String> promotedToolbarMobile = List.of(_defaultToolbarMobile);
+  List<String> promotedToolbarDesktop = List.of(_defaultToolbarDesktop);
 
-  /// Same idea for the "⋯" (overflow) menu ('fullscreen', 'toggle_toolbar',
-  /// 'rename', 'export', 'navigator', 'bookmarks', 'attachments',
-  /// 'page_settings', 'shape_snap', 'finger_draw').
-  List<String> promotedOverflowActionsMobile = [];
-  List<String> promotedOverflowActionsDesktop = ['fullscreen', 'toggle_toolbar'];
+  /// Mobile default mirrors today's fixed mobile bar (undo, redo, then the
+  /// "+" button); desktop default mirrors today's fixed desktop toolbar
+  /// (undo, redo, the two seeded add actions, the "+", then the two seeded
+  /// overflow actions).
+  static const List<String> _defaultToolbarMobile = ['undo', 'redo', 'add'];
+  static const List<String> _defaultToolbarDesktop = [
+    'undo',
+    'redo',
+    'blank',
+    'image',
+    'add',
+    'fullscreen',
+    'toggle_toolbar',
+  ];
 
-  Future<void> setPromotedActions({
+  Future<void> setPromotedToolbar({
     required bool mobile,
-    required String origin, // 'add' | 'overflow'
     required List<String> ids,
   }) async {
-    if (origin == 'add') {
-      if (mobile) {
-        promotedAddActionsMobile = ids;
-      } else {
-        promotedAddActionsDesktop = ids;
-      }
+    if (mobile) {
+      promotedToolbarMobile = ids;
     } else {
-      if (mobile) {
-        promotedOverflowActionsMobile = ids;
-      } else {
-        promotedOverflowActionsDesktop = ids;
-      }
+      promotedToolbarDesktop = ids;
     }
     await _persist();
   }
+
+  /// Builds a unified toolbar list from the legacy split (add + overflow)
+  /// lists, preserving the old visual order: undo, redo, promoted add
+  /// actions, the "+" control, then promoted overflow actions.
+  static List<String> _migrateLegacyToolbar(
+    List<String> add,
+    List<String> overflow,
+  ) =>
+      ['undo', 'redo', ...add, 'add', ...overflow];
 
   /// Per-tool-kind pin state for the pen/highlighter/shape/eraser options
   /// popover ('pen', 'highlighter', 'shape', 'eraser'): pinned stays open
@@ -394,21 +405,30 @@ class SettingsService {
         data['canvasViewports'] as Map,
       );
     }
-    if (data['promotedAddActionsMobile'] is List) {
-      promotedAddActionsMobile =
-          (data['promotedAddActionsMobile'] as List).cast<String>();
+    // Unified toolbar lists (current model). If absent, fall back to the
+    // legacy split (add + overflow) lists and migrate them into one sequence.
+    if (data['promotedToolbarMobile'] is List) {
+      promotedToolbarMobile =
+          (data['promotedToolbarMobile'] as List).cast<String>();
+    } else if (data['promotedAddActionsMobile'] is List ||
+        data['promotedOverflowActionsMobile'] is List) {
+      promotedToolbarMobile = _migrateLegacyToolbar(
+        (data['promotedAddActionsMobile'] as List?)?.cast<String>() ?? const [],
+        (data['promotedOverflowActionsMobile'] as List?)?.cast<String>() ??
+            const [],
+      );
     }
-    if (data['promotedAddActionsDesktop'] is List) {
-      promotedAddActionsDesktop =
-          (data['promotedAddActionsDesktop'] as List).cast<String>();
-    }
-    if (data['promotedOverflowActionsMobile'] is List) {
-      promotedOverflowActionsMobile =
-          (data['promotedOverflowActionsMobile'] as List).cast<String>();
-    }
-    if (data['promotedOverflowActionsDesktop'] is List) {
-      promotedOverflowActionsDesktop =
-          (data['promotedOverflowActionsDesktop'] as List).cast<String>();
+    if (data['promotedToolbarDesktop'] is List) {
+      promotedToolbarDesktop =
+          (data['promotedToolbarDesktop'] as List).cast<String>();
+    } else if (data['promotedAddActionsDesktop'] is List ||
+        data['promotedOverflowActionsDesktop'] is List) {
+      promotedToolbarDesktop = _migrateLegacyToolbar(
+        (data['promotedAddActionsDesktop'] as List?)?.cast<String>() ??
+            const ['blank', 'image'],
+        (data['promotedOverflowActionsDesktop'] as List?)?.cast<String>() ??
+            const ['fullscreen', 'toggle_toolbar'],
+      );
     }
     if (data['pinnedToolOptionPopovers'] is List) {
       pinnedToolOptionPopovers = Set<String>.from(
@@ -548,10 +568,8 @@ class SettingsService {
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'defaultNotebookId': defaultNotebookId,
         'canvasViewports': _canvasViewports,
-        'promotedAddActionsMobile': promotedAddActionsMobile,
-        'promotedAddActionsDesktop': promotedAddActionsDesktop,
-        'promotedOverflowActionsMobile': promotedOverflowActionsMobile,
-        'promotedOverflowActionsDesktop': promotedOverflowActionsDesktop,
+        'promotedToolbarMobile': promotedToolbarMobile,
+        'promotedToolbarDesktop': promotedToolbarDesktop,
         'pinnedToolOptionPopovers': pinnedToolOptionPopovers.toList(),
       }),
     );

@@ -12,6 +12,19 @@ class ToolbarActionSpec {
   const ToolbarActionSpec(this.id, this.icon, this.label);
 }
 
+/// The three always-present chrome buttons that used to be hardcoded into the
+/// toolbar (undo, redo, and the "+" Add control). They're now ordinary
+/// promotable/reorderable actions like everything else — the only button that
+/// can never be removed or reordered out is the "⋯" overflow menu itself.
+/// 'add' promotes the whole "+" control (a dropdown/sheet of the add actions);
+/// when it isn't on the bar the add actions are reached through the "⋯" menu's
+/// "Add…" entry instead.
+const List<ToolbarActionSpec> kCoreActionSpecs = [
+  ToolbarActionSpec('undo', Icons.undo, 'Undo'),
+  ToolbarActionSpec('redo', Icons.redo, 'Redo'),
+  ToolbarActionSpec('add', Icons.add, 'Add menu (＋)'),
+];
+
 /// Customizable actions that originate from the "+" (Add) menu. Conditional-
 /// existence items ('camera' — mobile-only; 'pastePage' — only when a page
 /// is on the clipboard) are deliberately excluded: promoting something that
@@ -45,6 +58,9 @@ const List<ToolbarActionSpec> kOverflowActionSpecs = [
 ];
 
 ToolbarActionSpec? findActionSpec(String id) {
+  for (final s in kCoreActionSpecs) {
+    if (s.id == id) return s;
+  }
   for (final s in kAddActionSpecs) {
     if (s.id == id) return s;
   }

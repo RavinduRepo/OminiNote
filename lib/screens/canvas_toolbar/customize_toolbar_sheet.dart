@@ -32,44 +32,43 @@ class _CustomizeToolbarSheetBody extends StatefulWidget {
 
 class _CustomizeToolbarSheetBodyState
     extends State<_CustomizeToolbarSheetBody> {
-  late List<String> _addPromoted;
-  late List<String> _overflowPromoted;
+  late List<String> _promoted;
 
   @override
   void initState() {
     super.initState();
     final s = SettingsService();
-    _addPromoted = List.of(
-      widget.mobile ? s.promotedAddActionsMobile : s.promotedAddActionsDesktop,
-    );
-    _overflowPromoted = List.of(
-      widget.mobile
-          ? s.promotedOverflowActionsMobile
-          : s.promotedOverflowActionsDesktop,
+    _promoted = List.of(
+      widget.mobile ? s.promotedToolbarMobile : s.promotedToolbarDesktop,
     );
   }
 
-  void _setAdd(List<String> ids) {
-    setState(() => _addPromoted = ids);
-    SettingsService().setPromotedActions(
-      mobile: widget.mobile,
-      origin: 'add',
-      ids: ids,
-    );
+  void _set(List<String> ids) {
+    setState(() => _promoted = ids);
+    SettingsService().setPromotedToolbar(mobile: widget.mobile, ids: ids);
   }
 
-  void _setOverflow(List<String> ids) {
-    setState(() => _overflowPromoted = ids);
-    SettingsService().setPromotedActions(
-      mobile: widget.mobile,
-      origin: 'overflow',
-      ids: ids,
-    );
+  void _remove(String id) => _set(List.of(_promoted)..remove(id));
+  void _add(String id) => _set(List.of(_promoted)..add(id));
+
+  void _reorder(int oldIndex, int newIndex) {
+    final ids = List.of(_promoted);
+    if (newIndex > oldIndex) newIndex -= 1;
+    ids.insert(newIndex, ids.removeAt(oldIndex));
+    _set(ids);
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
+    // The single ordered "on the bar" list, resolved to specs (unknown ids
+    // from a future build are silently skipped).
+    final onBar = [
+      for (final id in _promoted)
+        if (findActionSpec(id) != null) findActionSpec(id)!,
+    ];
+    bool promoted(String id) => _promoted.contains(id);
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -87,59 +86,17 @@ class _CustomizeToolbarSheetBodyState
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Text(
             'Long-press to reorder what\'s on the bar. Tap + or − to move '
-            'items between the bar and the menu.',
+            'items between the bar and the "⋯" menu. The "⋯" menu itself '
+            'always stays.',
             style: TextStyle(fontSize: 12, color: palette.textDim),
           ),
         ),
         const SizedBox(height: 12),
-        _CustomizeSection(
-          title: 'Add actions',
-          specs: kAddActionSpecs,
-          promoted: _addPromoted,
-          onChanged: _setAdd,
-        ),
-        const Divider(height: 24),
-        _CustomizeSection(
-          title: 'Tools & settings',
-          specs: kOverflowActionSpecs,
-          promoted: _overflowPromoted,
-          onChanged: _setOverflow,
-        ),
-        const SizedBox(height: 12),
-      ],
-    );
-  }
-}
-
-class _CustomizeSection extends StatelessWidget {
-  final String title;
-  final List<ToolbarActionSpec> specs;
-  final List<String> promoted;
-  final ValueChanged<List<String>> onChanged;
-
-  const _CustomizeSection({
-    required this.title,
-    required this.specs,
-    required this.promoted,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<AppPalette>()!;
-    final onBarSpecs = [
-      for (final id in promoted)
-        if (findActionSpec(id) != null) findActionSpec(id)!,
-    ];
-    final inMenuSpecs = specs.where((s) => !promoted.contains(s.id)).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
+        // ── On toolbar (one unified, reorderable sequence) ──
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Text(
-            title,
+            'On toolbar',
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
@@ -148,18 +105,11 @@ class _CustomizeSection extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 4),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text(
-            'On toolbar',
-            style: TextStyle(fontSize: 11, color: palette.textDim),
-          ),
-        ),
-        if (onBarSpecs.isEmpty)
+        if (onBar.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             child: Text(
-              'Nothing promoted — everything below stays in the menu',
+              'Nothing on the bar — only the "⋯" menu shows',
               style: TextStyle(fontSize: 12, color: palette.textDim),
             ),
           )
@@ -168,15 +118,9 @@ class _CustomizeSection extends StatelessWidget {
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             buildDefaultDragHandles: false,
-            onReorder: (oldIndex, newIndex) {
-              final ids = List.of(promoted);
-              if (newIndex > oldIndex) newIndex -= 1;
-              final id = ids.removeAt(oldIndex);
-              ids.insert(newIndex, id);
-              onChanged(ids);
-            },
+            onReorder: _reorder,
             children: [
-              for (final entry in onBarSpecs.asMap().entries)
+              for (final entry in onBar.asMap().entries)
                 ReorderableDelayedDragStartListener(
                   key: ValueKey('bar-${entry.value.id}'),
                   index: entry.key,
@@ -187,24 +131,69 @@ class _CustomizeSection extends StatelessWidget {
                     trailing: IconButton(
                       icon: const Icon(Icons.remove_circle_outline, size: 20),
                       tooltip: 'Remove from toolbar',
-                      onPressed: () {
-                        final ids = List.of(promoted)..remove(entry.value.id);
-                        onChanged(ids);
-                      },
+                      onPressed: () => _remove(entry.value.id),
                     ),
                   ),
                 ),
             ],
           ),
-        const SizedBox(height: 4),
+        const Divider(height: 24),
+        // ── In menu, grouped by origin so items stay easy to find ──
+        _AddGroup(
+          title: 'Buttons',
+          specs: kCoreActionSpecs,
+          promoted: promoted,
+          onAdd: _add,
+        ),
+        _AddGroup(
+          title: 'Add actions',
+          specs: kAddActionSpecs,
+          promoted: promoted,
+          onAdd: _add,
+        ),
+        _AddGroup(
+          title: 'Tools & settings',
+          specs: kOverflowActionSpecs,
+          promoted: promoted,
+          onAdd: _add,
+        ),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
+}
+
+/// One "In menu" category: its not-yet-promoted specs, each with a "+ add to
+/// bar" button. Renders nothing when every spec in it is already on the bar.
+class _AddGroup extends StatelessWidget {
+  final String title;
+  final List<ToolbarActionSpec> specs;
+  final bool Function(String id) promoted;
+  final ValueChanged<String> onAdd;
+
+  const _AddGroup({
+    required this.title,
+    required this.specs,
+    required this.promoted,
+    required this.onAdd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final inMenu = specs.where((s) => !promoted(s.id)).toList();
+    if (inMenu.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
           child: Text(
-            'In menu',
+            title,
             style: TextStyle(fontSize: 11, color: palette.textDim),
           ),
         ),
-        for (final spec in inMenuSpecs)
+        for (final spec in inMenu)
           ListTile(
             dense: true,
             leading: Icon(spec.icon, size: 20),
@@ -212,10 +201,7 @@ class _CustomizeSection extends StatelessWidget {
             trailing: IconButton(
               icon: const Icon(Icons.add_circle_outline, size: 20),
               tooltip: 'Add to toolbar',
-              onPressed: () {
-                final ids = List.of(promoted)..add(spec.id);
-                onChanged(ids);
-              },
+              onPressed: () => onAdd(spec.id),
             ),
           ),
       ],

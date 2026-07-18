@@ -1408,10 +1408,19 @@ class _CanvasScreenState extends State<CanvasScreen>
   Widget _buildOverflowMenu(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
     final mobile = _useMobileMenus(context);
+    final c = _controller;
     final promoted = mobile
-        ? SettingsService().promotedOverflowActionsMobile
-        : SettingsService().promotedOverflowActionsDesktop;
+        ? SettingsService().promotedToolbarMobile
+        : SettingsService().promotedToolbarDesktop;
     bool shown(String id) => !promoted.contains(id);
+    // Undo/redo/+ are now promotable buttons; when one isn't on the bar it
+    // falls back into this menu. Undo/redo only appear when there's actually
+    // something to undo/redo. The Add sub-actions belong to the "+" menu, not
+    // here — so when "+" itself isn't on the bar, "⋯" shows a single "Add…"
+    // entry that opens that add menu (rather than scattering its items here).
+    final showUndo = shown('undo') && (c?.canUndo ?? false);
+    final showRedo = shown('redo') && (c?.canRedo ?? false);
+    final showAdd = shown('add');
 
     if (mobile) {
       return IconButton(
@@ -1420,6 +1429,24 @@ class _CanvasScreenState extends State<CanvasScreen>
         onPressed: () => showActionSheet(
           context,
           items: [
+            if (showUndo)
+              ActionSheetItem(
+                icon: Icons.undo,
+                label: 'Undo',
+                onTap: () => c?.undo(),
+              ),
+            if (showRedo)
+              ActionSheetItem(
+                icon: Icons.redo,
+                label: 'Redo',
+                onTap: () => c?.redo(),
+              ),
+            if (showAdd)
+              ActionSheetItem(
+                icon: Icons.add,
+                label: 'Add…',
+                onTap: _showAddSheet,
+              ),
             if (widget.onSplitRequested != null && shown('split'))
               ActionSheetItem(
                 icon: Icons.vertical_split_outlined,
@@ -1521,6 +1548,12 @@ class _CanvasScreenState extends State<CanvasScreen>
     return PopupMenuButton<String>(
       onSelected: (action) {
         switch (action) {
+          case 'undo':
+            c?.undo();
+          case 'redo':
+            c?.redo();
+          case 'add':
+            _showAddSheet();
           case 'split':
             widget.onSplitRequested?.call();
           case 'fullscreen':
@@ -1557,6 +1590,9 @@ class _CanvasScreenState extends State<CanvasScreen>
         }
       },
       itemBuilder: (context) => [
+        if (showUndo) iconMenuItem('undo', Icons.undo, 'Undo'),
+        if (showRedo) iconMenuItem('redo', Icons.redo, 'Redo'),
+        if (showAdd) iconMenuItem('add', Icons.add, 'Add…'),
         if (widget.onSplitRequested != null && shown('split'))
           iconMenuItem('split', Icons.vertical_split_outlined,
               'Open canvas alongside'),
@@ -1614,7 +1650,13 @@ class _CanvasScreenState extends State<CanvasScreen>
   // ── Add / insert flows ───────────────────────────────────────────────
 
   Future<void> _showAddSheet() async {
-    final promoted = SettingsService().promotedAddActionsMobile;
+    // An add sub-action that's individually promoted to the bar is left out of
+    // this sheet — it lives in exactly one place. Uses the active layout's
+    // unified promoted list (this sheet is also the fallback the "⋯" menu's
+    // "Add…" opens on desktop when "+" itself isn't on the bar).
+    final promoted = _useMobileMenus(context)
+        ? SettingsService().promotedToolbarMobile
+        : SettingsService().promotedToolbarDesktop;
     bool shown(String id) => !promoted.contains(id);
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -1725,7 +1767,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         onPressed: _showAddSheet,
       );
     }
-    final promoted = SettingsService().promotedAddActionsDesktop;
+    final promoted = SettingsService().promotedToolbarDesktop;
     bool shown(String id) => !promoted.contains(id);
     return PopupMenuButton<String>(
       icon: const Icon(Icons.add),
@@ -2600,6 +2642,27 @@ class _CanvasScreenState extends State<CanvasScreen>
   /// already cover that, so no extra listening is needed here.
   Widget _buildPromotedButton(String id) {
     switch (id) {
+      case 'undo':
+        final c = _controller;
+        if (c == null) return const SizedBox.shrink();
+        // Own narrow listener — canUndo flips on every op without a screen
+        // setState. Keeping it per-button (not one wrapper around the whole
+        // row) is the load-bearing perf rule for the desktop toolbar.
+        return ListenableBuilder(
+          listenable: c,
+          builder: (context, _) =>
+              tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
+        );
+      case 'redo':
+        final c = _controller;
+        if (c == null) return const SizedBox.shrink();
+        return ListenableBuilder(
+          listenable: c,
+          builder: (context, _) =>
+              tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
+        );
+      case 'add':
+        return _buildAddButton(context);
       case 'blank':
         return tbBtn(
           Icons.note_add_outlined,
@@ -2722,32 +2785,12 @@ class _CanvasScreenState extends State<CanvasScreen>
         Expanded(
           child: AdaptiveToolbarRow(
             children: [
+              // One unified promoted list (undo/redo/+/add/overflow actions in
+              // the user's chosen order), then the fixed sync icon + "⋯" — the
+              // same structure as desktop, so the two layouts read the same.
+              for (final id in s.promotedToolbarMobile)
+                _buildPromotedButton(id),
               const SyncStatusIcon(),
-              ListenableBuilder(
-                listenable: c,
-                builder: (context, _) => Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.undo),
-                      tooltip: 'Undo',
-                      visualDensity: VisualDensity.compact,
-                      onPressed: c.canUndo ? c.undo : null,
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.redo),
-                      tooltip: 'Redo',
-                      visualDensity: VisualDensity.compact,
-                      onPressed: c.canRedo ? c.redo : null,
-                    ),
-                  ],
-                ),
-              ),
-              for (final id in s.promotedAddActionsMobile)
-                _buildPromotedButton(id),
-              for (final id in s.promotedOverflowActionsMobile)
-                _buildPromotedButton(id),
-              _buildAddButton(context),
               _buildOverflowMenu(context),
             ],
           ),
@@ -2762,8 +2805,6 @@ class _CanvasScreenState extends State<CanvasScreen>
     AppPalette palette,
   ) {
     final s = SettingsService();
-    final promotedAdd = s.promotedAddActionsDesktop;
-    final promotedOverflow = s.promotedOverflowActionsDesktop;
     // Rendered in the AppBar's flexibleSpace (not `title`) so it spans the
     // full pane width — the `title` slot is narrower, which left-clustered
     // the tools with dead space on the right. The name is a fixed-max-width
@@ -2781,33 +2822,22 @@ class _CanvasScreenState extends State<CanvasScreen>
           ),
         ),
         const SizedBox(width: 12),
-        // The whole tool cluster is STATIC except for two independently-
-        // scoped listeners (undo/redo on the controller, paste-page on the
-        // clipboard notifier) — wrapping the whole row in one
-        // ListenableBuilder on the controller rebuilt ~25 widgets (buttons +
-        // tooltips + scroll view) on every pen move, the desktop-view
-        // fast-writing jank this was fixed for. Keep new controller-dependent
-        // controls inside their own smallest-possible listener, never around
-        // the row.
+        // The tool cluster is STATIC except for each button's own scoped
+        // listener (undo/redo wrap themselves in a ListenableBuilder inside
+        // _buildPromotedButton) — wrapping the whole row in one
+        // ListenableBuilder on the controller rebuilt ~25 widgets on every pen
+        // move, the desktop-view fast-writing jank this was fixed for. Keep new
+        // controller-dependent controls inside their own smallest-possible
+        // listener, never around the row.
         Expanded(
           child: AdaptiveToolbarRow(
             children: [
-              ListenableBuilder(
-                listenable: c,
-                builder: (context, _) => Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    tbBtn(Icons.undo, 'Undo', c.canUndo ? c.undo : null),
-                    tbBtn(Icons.redo, 'Redo', c.canRedo ? c.redo : null),
-                  ],
-                ),
-              ),
+              // One unified promoted list (undo/redo/+/add/overflow actions in
+              // the user's chosen order), then the fixed sync icon + "⋯" — the
+              // same structure as mobile.
+              for (final id in s.promotedToolbarDesktop)
+                _buildPromotedButton(id),
               tbDivider(palette),
-              for (final id in promotedAdd) _buildPromotedButton(id),
-              if (promotedAdd.isNotEmpty) tbDivider(palette),
-              _buildAddButton(context),
-              for (final id in promotedOverflow) _buildPromotedButton(id),
-              if (promotedOverflow.isNotEmpty) tbDivider(palette),
               const SyncStatusIcon(),
               _buildOverflowMenu(context),
             ],
