@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/canvas_page.dart';
 import '../services/auth_service.dart';
 import '../services/notebook_service.dart';
+import '../services/multi_window_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
@@ -60,6 +61,53 @@ class _LayoutSection extends StatelessWidget {
   }
 }
 
+/// Android multi-window entry: renders a "Multi-window" section with an "Open
+/// new window" tile, but only where the OS supports it (Android N+). Renders
+/// nothing otherwise, so it never appears on unsupported platforms.
+class _MultiWindowSection extends StatelessWidget {
+  const _MultiWindowSection();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<bool>(
+      future: MultiWindowService.isSupported(),
+      builder: (context, snap) {
+        if (snap.data != true) return const SizedBox.shrink();
+        final palette = Theme.of(context).extension<AppPalette>()!;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 24),
+            const _SectionLabel('Multi-window'),
+            _Card(
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: Icon(Icons.open_in_new, color: palette.accent),
+                    title: const Text('Open new window'),
+                    subtitle: const Text(
+                        'Run another copy side by side (large screens / DeX)'),
+                    onTap: MultiWindowService.openNewWindow,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                    child: Text(
+                      'Each window is independent. Editing the same canvas in '
+                      'two windows can lose changes — open different ones.',
+                      style: TextStyle(
+                          fontSize: 12, color: palette.textDim, height: 1.35),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
@@ -105,6 +153,7 @@ class SettingsScreen extends StatelessWidget {
               ),
             ),
           ),
+          const _MultiWindowSection(),
           const SizedBox(height: 24),
           const _SectionLabel('Default page'),
           _Card(
