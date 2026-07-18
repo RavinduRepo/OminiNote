@@ -1,8 +1,10 @@
 package io.github.ravinduRepo.omininote
 
+import android.app.ActivityOptions
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
 import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -65,7 +67,23 @@ class MainActivity : FlutterActivity() {
                     Intent.FLAG_ACTIVITY_MULTIPLE_TASK,
             )
         }
-        startActivity(intent)
+        // Request a floating window sized ~70% of the screen. This is honored on
+        // devices in freeform / DeX / One UI pop-up mode (where you actually see
+        // a second window); it's ignored on a plain full-screen phone, where the
+        // new task simply launches full-screen (Android won't force a floating
+        // window there — the user must be in split-screen/DeX to SEE two).
+        val options = ActivityOptions.makeBasic()
+        try {
+            val m = resources.displayMetrics
+            val bw = (m.widthPixels * 0.7).toInt()
+            val bh = (m.heightPixels * 0.7).toInt()
+            val left = (m.widthPixels - bw) / 2
+            val top = (m.heightPixels - bh) / 2
+            options.setLaunchBounds(Rect(left, top, left + bw, top + bh))
+        } catch (e: Exception) {
+            // Fall back to default (full-screen) launch bounds.
+        }
+        startActivity(intent, options.toBundle())
     }
 
     /**
