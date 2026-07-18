@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Build
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -67,23 +68,35 @@ class MainActivity : FlutterActivity() {
                     Intent.FLAG_ACTIVITY_MULTIPLE_TASK,
             )
         }
-        // Request a floating window sized ~70% of the screen. This is honored on
-        // devices in freeform / DeX / One UI pop-up mode (where you actually see
-        // a second window); it's ignored on a plain full-screen phone, where the
-        // new task simply launches full-screen (Android won't force a floating
-        // window there — the user must be in split-screen/DeX to SEE two).
+        // Request a floating window ~60% of the screen, cascaded so each new
+        // window is visibly offset instead of stacked exactly on top of the
+        // parent. Honored on freeform / DeX / One UI pop-up mode; ignored on a
+        // plain full-screen phone (the new task just launches full-screen —
+        // Android won't force a floating window there).
         val options = ActivityOptions.makeBasic()
         try {
             val m = resources.displayMetrics
-            val bw = (m.widthPixels * 0.7).toInt()
-            val bh = (m.heightPixels * 0.7).toInt()
-            val left = (m.widthPixels - bw) / 2
-            val top = (m.heightPixels - bh) / 2
+            val bw = (m.widthPixels * 0.6).toInt()
+            val bh = (m.heightPixels * 0.6).toInt()
+            val step = (36 * m.density).toInt()
+            val n = (windowCascade++ % 6) + 1
+            val left = (m.widthPixels - bw) / 2 + n * step
+            val top = (m.heightPixels - bh) / 2 + n * step
             options.setLaunchBounds(Rect(left, top, left + bw, top + bh))
         } catch (e: Exception) {
             // Fall back to default (full-screen) launch bounds.
         }
-        startActivity(intent, options.toBundle())
+        // Defer the launch to the NEXT main-loop frame. A startActivity fired
+        // synchronously inside the button-tap dispatch was being dropped in a
+        // floating (freeform) window — the reason a plain tap did nothing while
+        // an awkward multi-touch release (which shifted the timing) worked.
+        window.decorView.post {
+            try {
+                startActivity(intent, options.toBundle())
+            } catch (e: Exception) {
+                Log.e("OmniNote", "openNewWindow failed", e)
+            }
+        }
     }
 
     /**
@@ -132,5 +145,8 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val CLIPBOARD_CHANNEL = "omninote/clipboard_guard"
         private const val MULTIWINDOW_CHANNEL = "omninote/multiwindow"
+
+        // Cascades successive new-window positions so they don't overlap.
+        private var windowCascade = 0
     }
 }
