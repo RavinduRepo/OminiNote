@@ -82,6 +82,56 @@
                 <data android:scheme="omninote"/>
             </intent-filter>
         </activity>
+        <!-- Multi-window aux activities: each runs in its OWN process
+             (android:process) so native libraries (pdfrx/pdfium FFI callbacks,
+             which abort when invoked across isolates) don't clash between two
+             Flutter engines in one process. Launched explicitly by
+             MainActivity.openNewWindow; not exported, no intent-filters. -->
+        <activity
+            android:name=".MainActivityW1"
+            android:process=":w1"
+            android:exported="false"
+            android:launchMode="standard"
+            android:taskAffinity=""
+            android:resizeableActivity="true"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+        </activity>
+        <activity
+            android:name=".MainActivityW2"
+            android:process=":w2"
+            android:exported="false"
+            android:launchMode="standard"
+            android:taskAffinity=""
+            android:resizeableActivity="true"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+        </activity>
+        <activity
+            android:name=".MainActivityW3"
+            android:process=":w3"
+            android:exported="false"
+            android:launchMode="standard"
+            android:taskAffinity=""
+            android:resizeableActivity="true"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+        </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

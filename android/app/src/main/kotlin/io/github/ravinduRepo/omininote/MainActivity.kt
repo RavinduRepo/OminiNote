@@ -1,5 +1,6 @@
 package io.github.ravinduRepo.omininote
 
+import android.app.ActivityManager
 import android.app.ActivityOptions
 import android.content.ClipboardManager
 import android.content.Context
@@ -11,7 +12,19 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity() {
+// Extra windows run in their OWN process (declared with android:process=":wN"
+// in the manifest) so each gets an isolated copy of native libraries. This is
+// required because pdfrx/pdfium's FFI callbacks are bound to a single isolate —
+// two Flutter engines in ONE process sharing it aborts the process with
+// "Cannot invoke native callback from a different isolate." Separate processes
+// = separate native state = no clash.
+class MainActivityW1 : MainActivity()
+
+class MainActivityW2 : MainActivity()
+
+class MainActivityW3 : MainActivity()
+
+open class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
@@ -46,6 +59,33 @@ class MainActivity : FlutterActivity() {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
 
     /**
+     * Picks a new-window Activity whose dedicated process (`:w1`/`:w2`/`:w3`)
+     * isn't already running, so each visible window lands in its own process
+     * (isolated native libraries — see the note on [MainActivityW1]). The
+     * primary window is [MainActivity] itself (main process); new windows use
+     * the aux slots. Caps at 3 extra windows; if all are busy it best-effort
+     * reuses one (rare, and only a risk if both windows open a PDF).
+     */
+    private fun pickFreeWindowActivity(): Class<*> {
+        val slots = listOf(
+            ":w1" to MainActivityW1::class.java,
+            ":w2" to MainActivityW2::class.java,
+            ":w3" to MainActivityW3::class.java,
+        )
+        val running = try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            am.runningAppProcesses?.mapNotNull { it.processName }?.toSet()
+                ?: emptySet()
+        } catch (e: Exception) {
+            emptySet<String>()
+        }
+        for ((suffix, cls) in slots) {
+            if (!running.contains("$packageName$suffix")) return cls
+        }
+        return slots[windowCascade % slots.size].second
+    }
+
+    /**
      * Launches another instance of the app in a **separate task/window** (its
      * own Recents entry; side-by-side on large screens / DeX / freeform). Each
      * such Activity gets its own FlutterEngine → its own Dart isolate, so the
@@ -60,7 +100,7 @@ class MainActivity : FlutterActivity() {
         // instead of making a new one ("opens once, then never again"). A fresh
         // unique action string further guarantees the system can't fold this
         // launch into an existing task.
-        val intent = Intent(this, MainActivity::class.java).apply {
+        val intent = Intent(this, pickFreeWindowActivity()).apply {
             action = "io.github.ravinduRepo.omininote.NEW_WINDOW." +
                 System.nanoTime().toString()
             addFlags(
