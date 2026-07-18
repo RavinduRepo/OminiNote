@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
@@ -268,10 +269,53 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
           themeMode: s.themeMode.value,
           navigatorObservers: [searchRouteObserver],
           home: const _RootRouter(),
+          // Mobile-only: clear a stylus's stuck hover on pen-lift (see
+          // _clearStuckStylusHover). Wraps every route incl. the canvas.
+          builder: (context, child) {
+            if (child == null) return const SizedBox.shrink();
+            if (!(Platform.isAndroid || Platform.isIOS)) return child;
+            return Listener(
+              onPointerUp: _clearStuckStylusHover,
+              onPointerCancel: _clearStuckStylusHover,
+              child: child,
+            );
+          },
         );
       },
     );
   }
+}
+
+/// Clears a **stuck stylus hover** on mobile. A pen/S-Pen hovering a button
+/// shows the same hover shadow + tooltip as a desktop mouse — but when it lifts
+/// off the digitizer it emits no `PointerExitEvent`, so `MouseTracker` keeps
+/// the last-hovered widget hovered forever (the shadow/tooltip then linger, and
+/// re-appear whenever anything lands where the pen was last lifted). On
+/// pen-lift we (1) dismiss any open tooltip and (2) nudge the tracked hover
+/// position off-screen, which fires the missing exit on the previously-hovered
+/// widget. Best-effort and mobile-only; desktop hover (a real mouse, which
+/// exits correctly) is left untouched.
+void _clearStuckStylusHover(PointerEvent e) {
+  if (e.kind != PointerDeviceKind.stylus &&
+      e.kind != PointerDeviceKind.invertedStylus) {
+    return;
+  }
+  Tooltip.dismissAllToolTips();
+  // Dispatch after this event unwinds (never re-enter the pointer pipeline).
+  scheduleMicrotask(() {
+    try {
+      GestureBinding.instance.handlePointerEvent(
+        PointerHoverEvent(
+          kind: e.kind,
+          device: e.device,
+          position: const Offset(-1, -1),
+        ),
+      );
+    } catch (_) {
+      // A framework hiccup here must never break input — the tooltip dismiss
+      // above already handled the most visible symptom.
+    }
+  });
 }
 
 /// Picks the mobile (single-pane, pushed navigation) or desktop (split-view

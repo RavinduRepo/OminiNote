@@ -40,6 +40,7 @@ Tracks issues and cross-platform gaps found during codebase audits. Keep this in
 
 ### Robustness
 
+- **Stuck stylus-hover fix is best-effort, not device-verified (07/19/26).** A pen hovering a button on mobile shows a hover shadow/tooltip but emits no `PointerExitEvent` on lift, so the last-hovered widget stayed hovered. `main.dart`'s `_clearStuckStylusHover` (a mobile-only root `Listener` on pointer up/cancel) dismisses tooltips + dispatches a synthetic off-screen `PointerHoverEvent` to fire the missing exit. Logic is sound and analyzer-clean but **not yet confirmed on a real pen device**; if the synthetic dispatch misbehaves it's caught and the tooltip-dismiss still fires. Verify on-device.
 - **IDs are timestamp-based** (`millis + 3-digit sequence` / `micros + sequence`) — fine in practice, but not UUIDs.
 - **Syncfusion licensing**: export builds on `syncfusion_flutter_pdf` under the Community License (user-approved 07/06/26). If the project outgrows eligibility, swap via the `PdfExporter` interface.
 
