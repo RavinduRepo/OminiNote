@@ -1427,6 +1427,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Attachments',
                 onTap: _showAttachments,
               ),
+            if (!(_controller?.isRecordingAudio ?? false))
+              ActionSheetItem(
+                icon: Icons.mic_none,
+                label: 'Record audio',
+                onTap: _startAudioRecording,
+              ),
             if (shown('page_settings'))
               ActionSheetItem(
                 icon: Icons.description_outlined,
@@ -1481,6 +1487,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showBookmarks();
           case 'attachments':
             _showAttachments();
+          case 'record_audio':
+            _startAudioRecording();
           case 'page_settings':
             _showPageSettings();
           case 'finger_draw':
@@ -1515,6 +1523,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
+        if (!(_controller?.isRecordingAudio ?? false))
+          iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
         if (shown('page_settings'))
           iconMenuItem(
             'page_settings',
@@ -2415,6 +2425,20 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
+  // ── Voice recording ────────────────────────────────────────────────────
+
+  Future<void> _startAudioRecording() async {
+    final c = _controller;
+    if (c == null || c.isRecordingAudio) return;
+    final ok = await c.startAudioRecording();
+    if (!ok) _toast('Microphone permission is needed to record');
+  }
+
+  Future<void> _stopAudioRecording(CanvasController c) async {
+    final rec = await c.stopAudioRecording();
+    if (rec != null) _toast('Recording saved');
+  }
+
   // ── Build ────────────────────────────────────────────────────────────
 
   void _toggleFullScreen() {
@@ -2879,6 +2903,27 @@ class _CanvasScreenState extends State<CanvasScreen>
                       ),
                     ),
                     if (_textEdit != null) _buildTextEditOverlay(c),
+                    // Floating voice-recording bar (both normal + full screen,
+                    // since this area is shared). Overlaid, so recording never
+                    // shifts the canvas; the user keeps drawing while it runs.
+                    Positioned(
+                      top: 8,
+                      left: 0,
+                      right: 0,
+                      child: ValueListenableBuilder<bool>(
+                        valueListenable: c.isRecordingAudioNotifier,
+                        builder: (context, recording, _) => recording
+                            ? Align(
+                                alignment: Alignment.topCenter,
+                                child: _RecordingBar(
+                                  startedAt: c.audioRecordingStartedAt,
+                                  onStop: () => _stopAudioRecording(c),
+                                  onCancel: () => c.cancelAudioRecording(),
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -3320,6 +3365,122 @@ class _ToolOptionsPanel extends StatelessWidget {
 
 // _HintRow, _SelAction, _ToggleChip, _ColorDot, _WheelDot now live in
 // canvas_toolbar/tool_option_rows.dart (private to that file).
+
+/// Floating pill shown while a voice recording runs: a pulsing red dot, a live
+/// elapsed timer, and Stop / discard controls. Overlaid on the canvas so the
+/// user keeps drawing (audio-sync uses each stroke's createdAt).
+class _RecordingBar extends StatefulWidget {
+  final DateTime? startedAt;
+  final VoidCallback onStop;
+  final VoidCallback onCancel;
+
+  const _RecordingBar({
+    required this.startedAt,
+    required this.onStop,
+    required this.onCancel,
+  });
+
+  @override
+  State<_RecordingBar> createState() => _RecordingBarState();
+}
+
+class _RecordingBarState extends State<_RecordingBar>
+    with SingleTickerProviderStateMixin {
+  Timer? _tick;
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat(reverse: true);
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  String _elapsed() {
+    final started = widget.startedAt;
+    if (started == null) return '0:00';
+    final s = DateTime.now().difference(started).inSeconds;
+    final m = s ~/ 60;
+    return '$m:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+        decoration: BoxDecoration(
+          color: palette.surface2,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: palette.border),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x33000000),
+              blurRadius: 12,
+              offset: Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FadeTransition(
+              opacity: _pulse,
+              child: Container(
+                width: 10,
+                height: 10,
+                decoration: const BoxDecoration(
+                  color: Color(0xFFE5484D),
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              _elapsed(),
+              style: TextStyle(
+                fontFeatures: const [ui.FontFeature.tabularFigures()],
+                fontWeight: FontWeight.w600,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(width: 4),
+            IconButton(
+              tooltip: 'Discard',
+              visualDensity: VisualDensity.compact,
+              icon: Icon(Icons.close, size: 20, color: palette.textDim),
+              onPressed: widget.onCancel,
+            ),
+            FilledButton.icon(
+              onPressed: widget.onStop,
+              style: FilledButton.styleFrom(
+                backgroundColor: palette.accent,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                visualDensity: VisualDensity.compact,
+              ),
+              icon: const Icon(Icons.stop, size: 18),
+              label: const Text('Stop'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _SheetLabel extends StatelessWidget {
   final String text;
