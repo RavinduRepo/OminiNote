@@ -7,6 +7,7 @@ import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
 import '../widgets/action_sheet.dart';
 import '../widgets/color_swatch_picker.dart';
+import '../widgets/notebook_account_badge.dart';
 import '../widgets/refreshable_empty.dart';
 import '../widgets/sync_status_icon.dart';
 import '../utils/pdf_export_ui.dart';
@@ -242,7 +243,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: removing
                                 ? const SizedBox(width: double.infinity)
                                 : Padding(
-                                    padding: const EdgeInsets.only(bottom: 8),
+                                    padding: const EdgeInsets.only(bottom: 6),
                                     // Long-press anywhere on the card to
                                     // reorder — no visible drag handle.
                                     child: ReorderableDelayedDragStartListener(
@@ -331,20 +332,21 @@ class _NotebookRow extends StatelessWidget {
             borderRadius: BorderRadius.circular(kRadius),
             border: Border.all(color: palette.border),
           ),
-          padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
+          padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
           child: Row(
             children: [
               // The nav-rail/desktop book glyph in the notebook's identity
               // color (matches the desktop sidebar rows; no expanded state on
               // mobile, so always outlined).
               SizedBox(
-                width: 38,
-                height: 38,
-                child: Icon(Icons.book_outlined, size: 26, color: identity),
+                width: 30,
+                height: 30,
+                child: Icon(Icons.book_outlined, size: 21, color: identity),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 11),
               Expanded(
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
@@ -355,29 +357,35 @@ class _NotebookRow extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 15,
+                              fontSize: 14.5,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
                         ),
                         if (isDefault) ...[
-                          const SizedBox(width: 6),
+                          const SizedBox(width: 5),
                           Icon(Icons.star_rounded,
-                              size: 16, color: palette.accent),
+                              size: 15, color: palette.accent),
                         ],
                       ],
                     ),
-                    const SizedBox(height: 3),
+                    const SizedBox(height: 1),
                     Text(
                       '${formatCount(count)} ${count == 1 ? 'section' : 'sections'} · ${formatShortDate(notebook.createdAt)}',
                       style: TextStyle(
                         fontFamily: 'monospace',
-                        fontSize: 11.5,
+                        fontSize: 11,
                         color: palette.textDim,
                       ),
                     ),
                   ],
                 ),
+              ),
+              // Tasteful, tiny account indicator (avatar initial for a synced
+              // account, cloud-off for local-only, nothing when signed out).
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: NotebookAccountBadge(notebook: notebook),
               ),
               _RowMenu(
                 onRename: onRename,
@@ -425,6 +433,9 @@ class _RowMenu extends StatelessWidget {
     final palette = Theme.of(context).extension<AppPalette>()!;
     return IconButton(
       icon: Icon(Icons.more_vert, color: palette.textDim, size: 20),
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
       onPressed: () => showActionSheet(context, items: [
         ActionSheetItem(
             icon: Icons.edit_outlined, label: 'Rename', onTap: onRename),
