@@ -5,19 +5,22 @@ import '../services/auth_service.dart';
 import '../services/settings_service.dart';
 import '../theme/app_theme.dart';
 
-/// A very small, tasteful badge for a notebook card showing which Google
-/// account it syncs to: a colored initial avatar for a synced account, or a
-/// muted cloud-off glyph for a local-only notebook. Renders **nothing** when no
-/// accounts are connected (sync isn't in use, so the badge would just be
-/// noise). Long-press shows the full account email.
+/// A tiny, non-distracting badge showing which Google account a notebook syncs
+/// to: the account's **profile photo** ringed in that account's identity color
+/// (so two accounts are told apart at a glance — by picture and by color, not
+/// just an initial). Falls back to a solid color dot when there's no photo, a
+/// muted cloud-off glyph for local-only, and renders **nothing** when no
+/// accounts are connected. Long-press shows the full account email.
 class NotebookAccountBadge extends StatelessWidget {
   final Notebook notebook;
+
+  /// Outer diameter. Deliberately small — this is an ambient indicator.
   final double size;
 
   const NotebookAccountBadge({
     super.key,
     required this.notebook,
-    this.size = 18,
+    this.size = 15,
   });
 
   @override
@@ -33,7 +36,7 @@ class NotebookAccountBadge extends StatelessWidget {
           return Tooltip(
             message: 'Local only · this device',
             child: Icon(Icons.cloud_off_outlined,
-                size: size - 2, color: palette.textDim),
+                size: size, color: palette.textDim),
           );
         }
 
@@ -46,44 +49,40 @@ class NotebookAccountBadge extends StatelessWidget {
           }
         }
         if (account == null) {
-          // Assigned to an account not signed in on this device.
           return Tooltip(
             message: 'Synced to another account',
-            child: Icon(Icons.cloud_outlined,
-                size: size - 2, color: palette.textDim),
+            child:
+                Icon(Icons.cloud_outlined, size: size, color: palette.textDim),
           );
         }
 
         final label = account.email ?? account.displayName ?? account.id;
         final color = AppPalette.identityColor(account.id);
+        final photo = account.photoUrl;
+
+        // Colored ring (identity color) around the round profile photo — the
+        // color is the quick identifier, the photo the precise one.
         return Tooltip(
           message: label,
           child: Container(
             width: size,
             height: size,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.16),
-              shape: BoxShape.circle,
-              border: Border.all(color: color.withValues(alpha: 0.55)),
-            ),
-            child: Text(
-              _initial(label),
-              style: TextStyle(
-                fontSize: size * 0.5,
-                fontWeight: FontWeight.w700,
-                color: color,
-                height: 1,
-              ),
+            padding: const EdgeInsets.all(1.4),
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            child: ClipOval(
+              child: (photo == null || photo.isEmpty)
+                  ? Container(color: color.withValues(alpha: 0.35))
+                  : Image.network(
+                      photo,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, _, _) =>
+                          Container(color: color.withValues(alpha: 0.35)),
+                    ),
             ),
           ),
         );
       },
     );
-  }
-
-  static String _initial(String s) {
-    final t = s.trim();
-    return t.isEmpty ? '?' : t.substring(0, 1).toUpperCase();
   }
 }

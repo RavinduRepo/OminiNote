@@ -14,6 +14,7 @@ import '../widgets/sync_status_icon.dart';
 import '../widgets/color_swatch_picker.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
+import '../widgets/notebook_account_badge.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
@@ -1364,6 +1365,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                           child: Icon(Icons.star_rounded,
                               size: 14, color: palette.accent),
                         ),
+                      // Tiny account indicator (profile photo + color ring),
+                      // matching the mobile home cards.
+                      Padding(
+                        padding: const EdgeInsets.only(right: 2),
+                        child: NotebookAccountBadge(notebook: notebook),
+                      ),
                       PopupMenuButton<String>(
                         icon: Icon(Icons.add, size: 18, color: palette.textDim),
                         tooltip: 'Add',
