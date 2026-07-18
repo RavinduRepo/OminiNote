@@ -8,6 +8,7 @@ import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
 import '../models/shape_template.dart';
+import '../services/audio_recorder_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/render_cache.dart';
@@ -431,6 +432,9 @@ class CanvasController extends ChangeNotifier {
       ValueNotifier(false);
   final ValueNotifier<bool> isEditingTextNotifier = ValueNotifier(false);
   final ValueNotifier<bool> clipboardNotifier = ValueNotifier(false);
+
+  /// True while a voice recording is in progress (drives the recording bar).
+  final ValueNotifier<bool> isRecordingAudioNotifier = ValueNotifier(false);
 
   /// Bumped whenever an open popover's own content may have changed (a
   /// color/size pick, a completed op) — a content-only refresh signal,
@@ -3663,6 +3667,86 @@ class CanvasController extends ChangeNotifier {
     SyncService().notifyDataChanged();
   }
 
+  // ── Voice recordings (audio asset + Canvas.recordings → synced) ────────
+
+  AudioRecorderService? _recorder;
+  AudioRecorderService get _audio => _recorder ??= AudioRecorderService();
+
+  bool get isRecordingAudio => _recorder?.isRecording ?? false;
+
+  /// Wall-clock start of the in-progress recording (for the UI elapsed timer),
+  /// or null when not recording.
+  DateTime? get audioRecordingStartedAt => _recorder?.startedAt;
+
+  /// Begins a voice recording over the canvas. Returns false if the mic
+  /// permission was denied (the caller surfaces a message).
+  Future<bool> startAudioRecording() async {
+    if (isRecordingAudio) return true;
+    final ok = await _audio.start();
+    isRecordingAudioNotifier.value = isRecordingAudio;
+    notifyListeners();
+    return ok;
+  }
+
+  /// Stops the recording, stores the audio as a content-addressed asset, and
+  /// appends an [AudioRecording] to the canvas (synced via canvas.json). Returns
+  /// the new recording, or null if nothing was captured.
+  Future<AudioRecording?> stopAudioRecording() async {
+    final result = await _audio.stop();
+    isRecordingAudioNotifier.value = false;
+    if (result == null) {
+      notifyListeners();
+      return null;
+    }
+    final file = File(result.path);
+    AudioRecording? rec;
+    try {
+      final bytes = await file.readAsBytes();
+      final assetId = await _service.putAsset(canvas, bytes, 'm4a');
+      rec = AudioRecording(
+        id: newModelId('rec'),
+        name: 'Recording ${canvas.recordings.length + 1}',
+        assetId: assetId,
+        startedAt: result.startedAt,
+        durationMs: result.duration.inMilliseconds,
+        createdAt: DateTime.now(),
+      );
+      canvas.recordings.add(rec);
+      _markDirty(const {}, structural: true);
+      unawaited(_flushThenReindex());
+    } finally {
+      try {
+        await file.delete();
+      } catch (_) {}
+    }
+    notifyListeners();
+    return rec;
+  }
+
+  /// Aborts an in-progress recording without saving anything.
+  Future<void> cancelAudioRecording() async {
+    await _audio.cancel();
+    isRecordingAudioNotifier.value = false;
+    notifyListeners();
+  }
+
+  void renameRecording(AudioRecording rec, String name) {
+    rec.name = name;
+    _markDirty(const {}, structural: true);
+    notifyListeners();
+    unawaited(_flushThenReindex());
+  }
+
+  /// Removes a recording from the canvas. The audio asset is left on disk
+  /// (content-addressed, may be shared; harmless — matches how deleted images'
+  /// assets are handled).
+  void deleteRecording(AudioRecording rec) {
+    canvas.recordings.removeWhere((r) => r.id == rec.id);
+    _markDirty(const {}, structural: true);
+    notifyListeners();
+    unawaited(_flushThenReindex());
+  }
+
   /// Jumps to a bookmark's page (no-op if that page is gone).
   void jumpToBookmark(Bookmark bm) {
     if (layout.layoutOf(bm.pageId) == null) return;
@@ -3894,6 +3978,7 @@ class CanvasController extends ChangeNotifier {
     _scrollTicker?.dispose();
     _holdTimer?.cancel();
     _saveTimer?.cancel();
+    unawaited(_recorder?.dispose());
     flushSaves();
     renderCache.dispose();
     pictureCache.dispose();
@@ -3903,6 +3988,7 @@ class CanvasController extends ChangeNotifier {
     isDraggingSelectionNotifier.dispose();
     isEditingTextNotifier.dispose();
     clipboardNotifier.dispose();
+    isRecordingAudioNotifier.dispose();
     chromeContentTick.dispose();
     super.dispose();
   }
