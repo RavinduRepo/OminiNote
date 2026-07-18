@@ -115,6 +115,11 @@ class _CanvasScreenState extends State<CanvasScreen>
   bool _isFullScreen = false;
   bool _fullScreenPickerOpen = false;
 
+  // Whether the small floating audio player is showing (opened via the
+  // "Recordings" action, or kept up while a take plays). Replaces the old
+  // Recordings bottom sheet.
+  bool _audioPlayerOpen = false;
+
   // Tap tracking for the text tool (placement happens on tap-up).
   Offset? _downPosition;
   bool _toolGestureActive = false;
@@ -1495,19 +1500,6 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Attachments',
                 onTap: _showAttachments,
               ),
-            if (shown('record_audio') &&
-                !(_controller?.isRecordingAudio ?? false))
-              ActionSheetItem(
-                icon: Icons.mic_none,
-                label: 'Record audio',
-                onTap: _startAudioRecording,
-              ),
-            if (shown('recordings'))
-              ActionSheetItem(
-                icon: Icons.graphic_eq,
-                label: 'Recordings',
-                onTap: _showRecordings,
-              ),
             if (shown('page_settings'))
               ActionSheetItem(
                 icon: Icons.description_outlined,
@@ -1570,10 +1562,6 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showBookmarks();
           case 'attachments':
             _showAttachments();
-          case 'record_audio':
-            _startAudioRecording();
-          case 'recordings':
-            _showRecordings();
           case 'page_settings':
             _showPageSettings();
           case 'finger_draw':
@@ -1614,11 +1602,6 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
-        if (shown('record_audio') &&
-            !(_controller?.isRecordingAudio ?? false))
-          iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
-        if (shown('recordings'))
-          iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
         if (shown('page_settings'))
           iconMenuItem(
             'page_settings',
@@ -1720,6 +1703,23 @@ class _CanvasScreenState extends State<CanvasScreen>
                 title: const Text('Paste'),
                 onTap: () => Navigator.pop(context, 'paste'),
               ),
+            const Divider(),
+            const _SheetLabel('Audio'),
+            if (shown('record_audio') &&
+                !(_controller?.isRecordingAudio ?? false))
+              ListTile(
+                leading: const Icon(Icons.mic_none),
+                title: const Text('Record audio'),
+                subtitle: const Text('Capture voice over this canvas'),
+                onTap: () => Navigator.pop(context, 'record_audio'),
+              ),
+            if (shown('recordings'))
+              ListTile(
+                leading: const Icon(Icons.graphic_eq),
+                title: const Text('Recordings'),
+                subtitle: const Text('Play back voice recordings'),
+                onTap: () => Navigator.pop(context, 'recordings'),
+              ),
             const SizedBox(height: 8),
           ],
         ),
@@ -1752,6 +1752,10 @@ class _CanvasScreenState extends State<CanvasScreen>
       case 'pastePage':
         await c.pastePageFromClipboard();
         _toast('Page pasted at the end');
+      case 'record_audio':
+        await _startAudioRecording();
+      case 'recordings':
+        _openAudioPlayer();
     }
   }
 
@@ -1789,6 +1793,11 @@ class _CanvasScreenState extends State<CanvasScreen>
             'Paste page',
           ),
         if (shown('paste')) iconMenuItem('paste', Icons.content_paste, 'Paste'),
+        if (shown('record_audio') &&
+            !(_controller?.isRecordingAudio ?? false))
+          iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
+        if (shown('recordings'))
+          iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
       ],
     );
   }
@@ -2433,67 +2442,23 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
-  Future<void> _showRecordings() async {
-    final c = _controller!;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) => cappedSheetBody(
-        context,
-        child: ListenableBuilder(
-          listenable: c,
-          builder: (context, _) {
-            final items = c.canvas.recordings;
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(height: 8),
-                const _SheetLabel('Recordings'),
-                if (!c.isRecordingAudio)
-                  ListTile(
-                    leading: const Icon(Icons.mic_none),
-                    title: const Text('Record audio'),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _startAudioRecording();
-                    },
-                  ),
-                const Divider(height: 1),
-                if (items.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text('No recordings yet'),
-                  )
-                else
-                  Flexible(
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: items.length,
-                      itemBuilder: (context, i) => _RecordingTile(
-                        controller: c,
-                        recording: items[i],
-                        onPlay: () => _playRecording(c, items[i]),
-                        onRename: () async {
-                          final name = await _promptText(
-                            title: 'Rename recording',
-                            initial: items[i].name,
-                            cta: 'Rename',
-                          );
-                          if (name != null && name.isNotEmpty) {
-                            c.renameRecording(items[i], name);
-                          }
-                        },
-                        onDelete: () => c.deleteRecording(items[i]),
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: 8),
-              ],
-            );
-          },
-        ),
-      ),
-    );
+  /// Opens the small floating audio player (the replacement for the old
+  /// Recordings bottom sheet). If there are no recordings yet, just hints —
+  /// there'd be nothing to show.
+  void _openAudioPlayer() {
+    final c = _controller;
+    if (c == null) return;
+    if (c.canvas.recordings.isEmpty) {
+      _toast('No recordings yet');
+      return;
+    }
+    setState(() => _audioPlayerOpen = true);
+  }
+
+  /// Closes the floating player and stops any playback.
+  void _closeAudioPlayer() {
+    _controller?.audioPlayback.stop();
+    if (mounted) setState(() => _audioPlayerOpen = false);
   }
 
   /// Starts (or resumes) playback of [rec], guarding against a not-yet-synced
@@ -2509,6 +2474,22 @@ class _CanvasScreenState extends State<CanvasScreen>
       file.path,
       total: Duration(milliseconds: rec.durationMs),
     );
+  }
+
+  Future<void> _renameRecording(CanvasController c, AudioRecording rec) async {
+    final name = await _promptText(
+      title: 'Rename recording',
+      initial: rec.name,
+      cta: 'Rename',
+    );
+    if (name != null && name.isNotEmpty) c.renameRecording(rec, name);
+  }
+
+  void _deleteRecording(CanvasController c, AudioRecording rec) {
+    if (c.audioPlayback.isCurrent(rec.id)) c.audioPlayback.stop();
+    c.deleteRecording(rec);
+    // Nothing left to show — close the player.
+    if (c.canvas.recordings.isEmpty) _closeAudioPlayer();
   }
 
   // ── Export ───────────────────────────────────────────────────────────
@@ -2749,7 +2730,7 @@ class _CanvasScreenState extends State<CanvasScreen>
           ),
         );
       case 'recordings':
-        return tbBtn(Icons.graphic_eq, 'Recordings', _showRecordings);
+        return tbBtn(Icons.graphic_eq, 'Recordings', _openAudioPlayer);
       case 'split':
         // Only meaningful inside a workspace (split host); empty elsewhere.
         if (widget.onSplitRequested == null) return const SizedBox.shrink();
@@ -3118,6 +3099,25 @@ class _CanvasScreenState extends State<CanvasScreen>
                             : const SizedBox.shrink(),
                       ),
                     ),
+                    // Floating audio player (replaces the Recordings sheet).
+                    // Bottom-center so it clears the top recording bar and the
+                    // full-screen tool control at bottom-left.
+                    if (_audioPlayerOpen)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 12,
+                        child: Align(
+                          alignment: Alignment.bottomCenter,
+                          child: _AudioPlayerBar(
+                            controller: c,
+                            onPlay: (rec) => _playRecording(c, rec),
+                            onRename: (rec) => _renameRecording(c, rec),
+                            onDelete: (rec) => _deleteRecording(c, rec),
+                            onClose: _closeAudioPlayer,
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -3682,108 +3682,294 @@ String _fmtDuration(Duration d) {
   return '$m:${s.toString().padLeft(2, '0')}';
 }
 
-/// A recording row in the Recordings sheet: play/pause, a live scrubber while
-/// it's the active recording, and a rename/delete menu.
-class _RecordingTile extends StatelessWidget {
+/// The small, non-distracting floating audio player (replaces the old
+/// Recordings bottom sheet). A compact panel over the canvas: a recording
+/// picker (also holding rename/delete), a scrubber with quick ±10s skips,
+/// play/pause, a cycling speed chip, and a close button. All controls read the
+/// controller's [AudioPlaybackService] notifiers, so it stays in sync whether
+/// playback was started here or elsewhere.
+class _AudioPlayerBar extends StatelessWidget {
   final CanvasController controller;
-  final AudioRecording recording;
-  final VoidCallback onPlay;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
 
-  const _RecordingTile({
+  /// Starts (or resumes) playback of a recording — guards the not-yet-synced
+  /// asset case, so it lives on the screen (owns the toast).
+  final void Function(AudioRecording rec) onPlay;
+  final void Function(AudioRecording rec) onRename;
+  final void Function(AudioRecording rec) onDelete;
+  final VoidCallback onClose;
+
+  const _AudioPlayerBar({
     required this.controller,
-    required this.recording,
     required this.onPlay,
     required this.onRename,
     required this.onDelete,
+    required this.onClose,
   });
+
+  static const List<double> _speeds = [0.75, 1.0, 1.25, 1.5, 2.0];
 
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
     final playback = controller.audioPlayback;
-    return ValueListenableBuilder<String?>(
-      valueListenable: playback.currentId,
-      builder: (context, currentId, _) {
-        final active = currentId == recording.id;
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: ValueListenableBuilder<bool>(
-                valueListenable: playback.playing,
-                builder: (context, playing, _) => IconButton(
-                  icon: Icon(
-                    active && playing
-                        ? Icons.pause_circle_filled
-                        : Icons.play_circle_fill,
-                    size: 36,
-                    color: palette.accent,
-                  ),
-                  onPressed: () {
-                    if (active && playing) {
-                      playback.pause();
-                    } else {
-                      onPlay();
-                    }
-                  },
-                ),
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 340),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 8),
+          decoration: BoxDecoration(
+            color: palette.surface2,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: palette.border),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 12,
+                offset: Offset(0, 4),
               ),
-              title: Text(recording.name),
-              subtitle: Text(_fmtDuration(
-                  Duration(milliseconds: recording.durationMs))),
-              trailing: PopupMenuButton<String>(
-                onSelected: (a) {
-                  if (a == 'rename') onRename();
-                  if (a == 'delete') onDelete();
+            ],
+          ),
+          // Rebuild the whole panel on any recording change (rename/delete) and
+          // on the current-take change (name + which one is active).
+          child: ListenableBuilder(
+            listenable: controller,
+            builder: (context, _) {
+              final recs = controller.canvas.recordings;
+              return ValueListenableBuilder<String?>(
+                valueListenable: playback.currentId,
+                builder: (context, currentId, _) {
+                  AudioRecording? current;
+                  for (final r in recs) {
+                    if (r.id == currentId) {
+                      current = r;
+                      break;
+                    }
+                  }
+                  return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _topRow(context, palette, recs, current),
+                      _scrubberRow(context, palette, current, recs),
+                    ],
+                  );
                 },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'rename', child: Text('Rename')),
-                  PopupMenuItem(value: 'delete', child: Text('Delete')),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Recording picker (name + dropdown of takes with rename/delete) + close.
+  Widget _topRow(
+    BuildContext context,
+    AppPalette palette,
+    List<AudioRecording> recs,
+    AudioRecording? current,
+  ) {
+    return Row(
+      children: [
+        Expanded(
+          child: PopupMenuButton<({String op, AudioRecording rec})>(
+            tooltip: 'Choose recording',
+            onSelected: (sel) {
+              switch (sel.op) {
+                case 'play':
+                  onPlay(sel.rec);
+                case 'rename':
+                  onRename(sel.rec);
+                case 'delete':
+                  onDelete(sel.rec);
+              }
+            },
+            itemBuilder: (context) => [
+              for (final r in recs)
+                PopupMenuItem<({String op, AudioRecording rec})>(
+                  value: (op: 'play', rec: r),
+                  child: Row(
+                    children: [
+                      Icon(
+                        r.id == current?.id
+                            ? Icons.graphic_eq
+                            : Icons.play_arrow,
+                        size: 18,
+                        color: palette.textDim,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(r.name, overflow: TextOverflow.ellipsis),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        tooltip: 'Rename',
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () =>
+                            Navigator.pop(context, (op: 'rename', rec: r)),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 18),
+                        tooltip: 'Delete',
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () =>
+                            Navigator.pop(context, (op: 'delete', rec: r)),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              child: Row(
+                children: [
+                  Icon(Icons.graphic_eq, size: 18, color: palette.accent),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      current?.name ?? 'Choose recording',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Icon(Icons.arrow_drop_down, color: palette.textDim),
                 ],
               ),
             ),
-            // Live scrubber only for the recording being played.
-            if (active)
-              ValueListenableBuilder<Duration>(
-                valueListenable: playback.duration,
-                builder: (context, total, _) => ValueListenableBuilder<Duration>(
-                  valueListenable: playback.position,
-                  builder: (context, pos, _) {
-                    final maxMs = total.inMilliseconds > 0
-                        ? total.inMilliseconds
-                        : recording.durationMs;
-                    final value =
-                        pos.inMilliseconds.clamp(0, maxMs).toDouble();
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          Text(_fmtDuration(pos),
-                              style: TextStyle(
-                                  fontSize: 12, color: palette.textDim)),
-                          Expanded(
-                            child: Slider(
-                              value: value,
-                              max: maxMs.toDouble().clamp(1, double.infinity),
-                              onChanged: (v) => playback
-                                  .seek(Duration(milliseconds: v.round())),
-                            ),
-                          ),
-                          Text(_fmtDuration(Duration(milliseconds: maxMs)),
-                              style: TextStyle(
-                                  fontSize: 12, color: palette.textDim)),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-          ],
-        );
-      },
+          ),
+        ),
+        IconButton(
+          icon: Icon(Icons.close, size: 20, color: palette.textDim),
+          tooltip: 'Close player',
+          visualDensity: VisualDensity.compact,
+          onPressed: onClose,
+        ),
+      ],
     );
+  }
+
+  // Time + slider + skip / play / speed controls.
+  Widget _scrubberRow(
+    BuildContext context,
+    AppPalette palette,
+    AudioRecording? current,
+    List<AudioRecording> recs,
+  ) {
+    final playback = controller.audioPlayback;
+    // Play/pause acts on the current take, or starts the first one.
+    void togglePlay(bool playing) {
+      if (current == null) {
+        if (recs.isNotEmpty) onPlay(recs.first);
+        return;
+      }
+      if (playing) {
+        playback.pause();
+      } else {
+        onPlay(current);
+      }
+    }
+
+    return ValueListenableBuilder<Duration>(
+      valueListenable: playback.duration,
+      builder: (context, total, _) => ValueListenableBuilder<Duration>(
+        valueListenable: playback.position,
+        builder: (context, pos, _) {
+          final maxMs = total.inMilliseconds > 0
+              ? total.inMilliseconds
+              : (current?.durationMs ?? 1);
+          final value = pos.inMilliseconds.clamp(0, maxMs).toDouble();
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Text(_fmtDuration(pos),
+                      style: TextStyle(fontSize: 11, color: palette.textDim)),
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 2,
+                        thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 6),
+                        overlayShape: const RoundSliderOverlayShape(
+                            overlayRadius: 12),
+                      ),
+                      child: Slider(
+                        value: value,
+                        max: maxMs.toDouble().clamp(1, double.infinity),
+                        onChanged: (v) =>
+                            playback.seek(Duration(milliseconds: v.round())),
+                      ),
+                    ),
+                  ),
+                  Text(_fmtDuration(Duration(milliseconds: maxMs)),
+                      style: TextStyle(fontSize: 11, color: palette.textDim)),
+                ],
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.replay_10),
+                    tooltip: 'Back 10s',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () =>
+                        playback.skip(const Duration(seconds: -10)),
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: playback.playing,
+                    builder: (context, playing, _) => IconButton(
+                      icon: Icon(
+                        playing
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_fill,
+                        size: 40,
+                        color: palette.accent,
+                      ),
+                      onPressed: () => togglePlay(playing),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.forward_10),
+                    tooltip: 'Forward 10s',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () =>
+                        playback.skip(const Duration(seconds: 10)),
+                  ),
+                  const SizedBox(width: 4),
+                  ValueListenableBuilder<double>(
+                    valueListenable: playback.speed,
+                    builder: (context, speed, _) => TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(44, 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        foregroundColor: palette.textDim,
+                      ),
+                      onPressed: () {
+                        final i = _speeds.indexOf(speed);
+                        final next = _speeds[(i + 1) % _speeds.length];
+                        playback.setSpeed(next);
+                      },
+                      child: Text(
+                        '${_trimSpeed(speed)}×',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  static String _trimSpeed(double s) {
+    final str = s.toStringAsFixed(2);
+    return str.replaceAll(RegExp(r'\.?0+$'), '');
   }
 }
 

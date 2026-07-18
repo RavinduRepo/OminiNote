@@ -36,6 +36,10 @@ const List<ToolbarActionSpec> kAddActionSpecs = [
   ToolbarActionSpec('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
   ToolbarActionSpec('image', Icons.image_outlined, 'Insert image'),
   ToolbarActionSpec('paste', Icons.content_paste, 'Paste'),
+  // Audio capture/playback are content additions, so they live in the "+"
+  // menu alongside the other insert actions.
+  ToolbarActionSpec('record_audio', Icons.mic_none, 'Record audio'),
+  ToolbarActionSpec('recordings', Icons.graphic_eq, 'Recordings'),
 ];
 
 /// Customizable actions that originate from the "⋯" (overflow) menu.
@@ -51,8 +55,6 @@ const List<ToolbarActionSpec> kOverflowActionSpecs = [
       'page_settings', Icons.description_outlined, 'Page settings'),
   ToolbarActionSpec('shape_snap', Icons.check_box_outlined, 'Snap drawn shapes'),
   ToolbarActionSpec('finger_draw', Icons.check_box_outlined, 'Draw with finger'),
-  ToolbarActionSpec('record_audio', Icons.mic_none, 'Record audio'),
-  ToolbarActionSpec('recordings', Icons.graphic_eq, 'Recordings'),
   ToolbarActionSpec(
       'split', Icons.vertical_split_outlined, 'Open canvas alongside'),
 ];

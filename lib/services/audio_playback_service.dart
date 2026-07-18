@@ -14,6 +14,10 @@ class AudioPlaybackService {
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
   final ValueNotifier<Duration> duration = ValueNotifier(Duration.zero);
 
+  /// Playback speed multiplier (1.0 = normal). Persisted for the session on
+  /// this player and re-applied to every take that starts.
+  final ValueNotifier<double> speed = ValueNotifier(1.0);
+
   /// True while paused mid-take (so [play] resumes); false after a stop or a
   /// natural finish (so [play] restarts from the top instead of no-op resuming
   /// an ended player — the "can't replay after it finishes" bug).
@@ -57,6 +61,8 @@ class AudioPlaybackService {
       if (total != null) duration.value = total;
       await _player.stop();
       await _player.play(DeviceFileSource(filePath));
+      // Re-apply the chosen speed — a fresh play() resets the rate to 1.0.
+      if (speed.value != 1.0) await _player.setPlaybackRate(speed.value);
       if (from != null && from > Duration.zero) {
         await _player.seek(from);
         position.value = from;
@@ -74,10 +80,26 @@ class AudioPlaybackService {
   }
 
   Future<void> seek(Duration to) async {
-    await _player.seek(to);
-    position.value = to;
+    final clamped = to < Duration.zero ? Duration.zero : to;
+    await _player.seek(clamped);
+    position.value = clamped;
     // Scrubbed while stopped/finished → remember it as the replay start point.
-    if (!playing.value) _resumeFrom = to;
+    if (!playing.value) _resumeFrom = clamped;
+  }
+
+  /// Jumps [delta] from the current position (negative = back), clamped to the
+  /// known duration. The quick ±seconds controls in the floating player.
+  Future<void> skip(Duration delta) async {
+    var target = position.value + delta;
+    final total = duration.value;
+    if (total > Duration.zero && target > total) target = total;
+    await seek(target);
+  }
+
+  /// Sets the playback speed and applies it live if a take is loaded.
+  Future<void> setSpeed(double rate) async {
+    speed.value = rate;
+    if (currentId.value != null) await _player.setPlaybackRate(rate);
   }
 
   Future<void> stop() async {
@@ -95,5 +117,6 @@ class AudioPlaybackService {
     playing.dispose();
     position.dispose();
     duration.dispose();
+    speed.dispose();
   }
 }
