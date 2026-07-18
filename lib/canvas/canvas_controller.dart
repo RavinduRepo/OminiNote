@@ -127,17 +127,13 @@ class CanvasController extends ChangeNotifier {
   static const double minZoom = 0.25;
   static const double maxZoom = 8.0;
 
-  /// Pan slack on the **far** edges (bottom/right) when the content exceeds the
-  /// viewport — the rubber-band room the over-scroll-to-add-a-page gesture
-  /// lives in. Kept generous.
-  static const double _panMargin = 60;
-
-  /// Pan slack on the **near** edges (top/left) when zoomed in enough that the
-  /// content fills/exceeds the viewport — only a sliver, so a fast scroll can't
-  /// fling the page off to the left/top past a big empty gutter. (When the
-  /// content is *smaller* than the viewport it's centered instead — that give
-  /// is what makes zooming out work, and is unaffected.)
-  static const double _nearEdgeGive = 6;
+  /// Pan slack (px) past every edge when the content exceeds the viewport — the
+  /// rubber-band "give" you can push the page past its edges while zoomed in.
+  /// Kept small so a fast scroll can't fling the page off past a big empty
+  /// gutter; the far edges still over-scroll-to-add a page (that accumulates
+  /// beyond this margin regardless). When the content is *smaller* than the
+  /// viewport it's centered instead — unaffected, so zooming out is unchanged.
+  static const double _panMargin = 12;
 
   Matrix4 get viewportMatrix => Matrix4.identity()
     ..translateByDouble(pan.dx, pan.dy, 0, 1)
@@ -315,10 +311,7 @@ class CanvasController extends ChangeNotifier {
 
     double axis(double v, double content, double screen) {
       if (content <= screen) return (screen - content) / 2;
-      // Content exceeds the viewport: only a sliver of give on the near edge
-      // (top/left), but keep the full margin on the far edge (bottom/right)
-      // where over-scroll-to-add-a-page lives.
-      return v.clamp(screen - content - _panMargin, _nearEdgeGive);
+      return v.clamp(screen - content - _panMargin, _panMargin);
     }
 
     return Offset(
