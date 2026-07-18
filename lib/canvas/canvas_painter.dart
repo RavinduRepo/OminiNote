@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:perfect_freehand/perfect_freehand.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
+import '../utils/audio_sync.dart';
 import 'canvas_controller.dart';
 import 'canvas_layout.dart';
 import 'text_measure.dart';
@@ -30,7 +31,12 @@ class CanvasPainter extends CustomPainter {
     required this.pageBorderColor,
     required this.accentColor,
     required this.canvasTextColor,
-  }) : super(repaint: controller);
+  }) : super(
+          // Also repaint when the audio-sync playhead advances, so the ink glow
+          // tracks playback without notifying the rest of the widget tree.
+          repaint:
+              Listenable.merge([controller, controller.audioPlayheadNotifier]),
+        );
 
   /// Set false during a picture recording when an image raster wasn't decoded
   /// yet — keeps that page's cache entry provisional so it re-records once
@@ -143,6 +149,19 @@ class CanvasPainter extends CustomPainter {
           return _recordComplete;
         },
       );
+    }
+
+    // Audio-sync: while a recording plays, glow the strokes drawn around the
+    // playhead. Drawn outside the picture cache (dynamic each frame), and only
+    // for strokes whose outline is already cached, so it stays cheap.
+    final playhead = controller.audioPlayheadNotifier.value;
+    if (playhead != null) {
+      for (final s in page.strokes) {
+        if (s.id == skipped) continue;
+        if (strokeActiveAt(s.createdAt, playhead)) {
+          _paintAudioGlow(canvas, s);
+        }
+      }
     }
 
     // In-progress stroke on this page (predefined shape / freehand), or a
@@ -284,6 +303,24 @@ class CanvasPainter extends CustomPainter {
       tp.paint(canvas, Offset(textLeft, r.center.dy - tp.height / 2));
     }
     canvas.restore();
+  }
+
+  /// A soft accent halo under a stroke being "written" at the playback
+  /// playhead. Reuses the stroke's already-built outline (skips if not cached
+  /// yet — the picture-cache pass builds it, so it's present in practice) and
+  /// blurs it, so audio-sync costs a few extra draws only during playback.
+  void _paintAudioGlow(Canvas canvas, StrokeElement stroke) {
+    final outline = stroke.cachedOutline;
+    if (outline == null) return;
+    final zoom = controller.zoom;
+    canvas.drawPath(
+      outline,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 7 / zoom
+        ..color = accentColor.withValues(alpha: 0.55)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 4 / zoom),
+    );
   }
 
   void _paintStroke(Canvas canvas, StrokeElement stroke) {

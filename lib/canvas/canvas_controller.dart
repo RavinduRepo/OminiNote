@@ -3675,11 +3675,42 @@ class CanvasController extends ChangeNotifier {
 
   AudioPlaybackService? _playback;
 
+  /// The wall-clock instant under the playback playhead while a recording is
+  /// actively playing, else null. Drives the audio-sync ink glow in the
+  /// painter (the painter merges this into its repaint listenable), so it
+  /// updates only the canvas, not the whole widget tree.
+  final ValueNotifier<DateTime?> audioPlayheadNotifier = ValueNotifier(null);
+
   /// Lazily-created playback service (one AudioPlayer per open canvas) for the
   /// Recordings sheet and audio-sync. Created on first use so canvases with no
   /// recordings never touch the plugin.
-  AudioPlaybackService get audioPlayback =>
-      _playback ??= AudioPlaybackService();
+  AudioPlaybackService get audioPlayback {
+    if (_playback == null) {
+      final p = AudioPlaybackService();
+      p.position.addListener(_updateAudioPlayhead);
+      p.currentId.addListener(_updateAudioPlayhead);
+      p.playing.addListener(_updateAudioPlayhead);
+      _playback = p;
+    }
+    return _playback!;
+  }
+
+  void _updateAudioPlayhead() {
+    final p = _playback;
+    if (p == null || !p.playing.value) {
+      audioPlayheadNotifier.value = null;
+      return;
+    }
+    final id = p.currentId.value;
+    AudioRecording? rec;
+    for (final r in canvas.recordings) {
+      if (r.id == id) {
+        rec = r;
+        break;
+      }
+    }
+    audioPlayheadNotifier.value = rec?.startedAt.add(p.position.value);
+  }
 
   bool get isRecordingAudio => _recorder?.isRecording ?? false;
 
@@ -3999,6 +4030,7 @@ class CanvasController extends ChangeNotifier {
     isEditingTextNotifier.dispose();
     clipboardNotifier.dispose();
     isRecordingAudioNotifier.dispose();
+    audioPlayheadNotifier.dispose();
     chromeContentTick.dispose();
     super.dispose();
   }
