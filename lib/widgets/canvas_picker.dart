@@ -11,23 +11,39 @@ import 'action_sheet.dart';
 /// chosen [Canvas] (or null if dismissed). Canvases already open in the split
 /// ([excludeIds]) are shown disabled. Used by the in-app split view to fill a
 /// new pane.
+///
+/// When [startSectionId] (+[startNotebookId]) is given, it **opens directly at
+/// that section's canvas list** — the common case is "another canvas from the
+/// section I'm in" — and Back still walks up to sections → notebooks.
 Future<Canvas?> pickCanvasForPane(
   BuildContext context, {
   Set<String> excludeIds = const {},
+  String? startNotebookId,
+  String? startSectionId,
 }) {
   return showModalBottomSheet<Canvas>(
     context: context,
     isScrollControlled: true,
     builder: (context) => scrollableSheetBody(
       context,
-      child: _CanvasPickerBody(excludeIds: excludeIds),
+      child: _CanvasPickerBody(
+        excludeIds: excludeIds,
+        startNotebookId: startNotebookId,
+        startSectionId: startSectionId,
+      ),
     ),
   );
 }
 
 class _CanvasPickerBody extends StatefulWidget {
   final Set<String> excludeIds;
-  const _CanvasPickerBody({required this.excludeIds});
+  final String? startNotebookId;
+  final String? startSectionId;
+  const _CanvasPickerBody({
+    required this.excludeIds,
+    this.startNotebookId,
+    this.startSectionId,
+  });
 
   @override
   State<_CanvasPickerBody> createState() => _CanvasPickerBodyState();
@@ -46,6 +62,27 @@ class _CanvasPickerBodyState extends State<_CanvasPickerBody> {
   void initState() {
     super.initState();
     _loadNotebooks();
+    if (widget.startNotebookId != null && widget.startSectionId != null) {
+      _deepLinkToSection(widget.startNotebookId!, widget.startSectionId!);
+    }
+  }
+
+  /// Jumps straight to a section's canvas list, pre-loading its notebook's
+  /// section map so Back still works up the chain.
+  Future<void> _deepLinkToSection(String nbId, String secId) async {
+    final nb = await _svc.getNotebook(nbId);
+    if (nb == null) return;
+    final sections = await _svc.getSectionMap(nbId, notebook: nb);
+    final section = sections[secId];
+    if (section == null || !mounted) return;
+    final canvases = await _svc.getCanvasMap(section);
+    if (!mounted) return;
+    setState(() {
+      _notebook = nb;
+      _sections = sections;
+      _section = section;
+      _canvases = canvases;
+    });
   }
 
   Future<void> _loadNotebooks() async {

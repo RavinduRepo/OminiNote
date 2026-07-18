@@ -1420,7 +1420,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         onPressed: () => showActionSheet(
           context,
           items: [
-            if (widget.onSplitRequested != null)
+            if (widget.onSplitRequested != null && shown('split'))
               ActionSheetItem(
                 icon: Icons.vertical_split_outlined,
                 label: 'Open canvas alongside',
@@ -1557,7 +1557,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         }
       },
       itemBuilder: (context) => [
-        if (widget.onSplitRequested != null)
+        if (widget.onSplitRequested != null && shown('split'))
           iconMenuItem('split', Icons.vertical_split_outlined,
               'Open canvas alongside'),
         if (shown('fullscreen'))
@@ -2687,6 +2687,11 @@ class _CanvasScreenState extends State<CanvasScreen>
         );
       case 'recordings':
         return tbBtn(Icons.graphic_eq, 'Recordings', _showRecordings);
+      case 'split':
+        // Only meaningful inside a workspace (split host); empty elsewhere.
+        if (widget.onSplitRequested == null) return const SizedBox.shrink();
+        return tbBtn(Icons.vertical_split_outlined, 'Open canvas alongside',
+            widget.onSplitRequested);
       default:
         return const SizedBox.shrink();
     }

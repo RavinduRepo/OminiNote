@@ -40,6 +40,8 @@ const List<ToolbarActionSpec> kOverflowActionSpecs = [
   ToolbarActionSpec('finger_draw', Icons.check_box_outlined, 'Draw with finger'),
   ToolbarActionSpec('record_audio', Icons.mic_none, 'Record audio'),
   ToolbarActionSpec('recordings', Icons.graphic_eq, 'Recordings'),
+  ToolbarActionSpec(
+      'split', Icons.vertical_split_outlined, 'Open canvas alongside'),
 ];
 
 ToolbarActionSpec? findActionSpec(String id) {

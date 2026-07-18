@@ -19,7 +19,7 @@ import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
 import '../utils/new_canvas_ui.dart';
-import 'canvas_screen.dart';
+import 'canvas_workspace_screen.dart';
 import 'note_search.dart';
 import '../widgets/action_sheet.dart';
 import 'bin_screen.dart';
@@ -988,13 +988,15 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     final canvas = _selectedCanvas;
     if (canvas != null) {
       // The canvas list stays visible in its own column (OneNote-style), so
-      // the canvas embeds directly — no breadcrumb / back bar needed.
-      return CanvasScreen(
+      // the canvas embeds directly — no breadcrumb / back bar needed. Hosted in
+      // a CanvasWorkspace so "Open canvas alongside" can split the main pane
+      // into 2+ canvases here too (a new canvas from the list resets the split,
+      // since the key is the selected canvas id).
+      return CanvasWorkspace(
         key: ValueKey(canvas.id),
-        canvas: canvas,
-        embedded: true,
-        onCanvasRenamed: _reloadSelectedSection,
+        initialCanvas: canvas,
         initialPageId: _pendingJumpPageId,
+        onCanvasRenamed: _reloadSelectedSection,
         // Desktop full screen: the canvas hides its own app bar/toolbar (its
         // internal full-screen) AND the shell collapses the side panes so the
         // canvas fills the window. This callback syncs the collapse.
