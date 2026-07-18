@@ -39,6 +39,24 @@ Future<void> openNoteSearch(
 // Intents for keyboard navigation of the results list while the search field
 // keeps focus. Mapped in a Shortcuts wrapper around the field, so they win over
 // the text field's default arrow/enter behaviour (nearest Shortcuts wins).
+/// The user-facing result categories the search screen can filter to. Each maps
+/// to one or more [SearchKind]s (super-sections travel with sections).
+enum _ResultFilter { notebooks, sections, canvases, bookmarks }
+
+Set<SearchKind> _kindsFor(_ResultFilter f) => switch (f) {
+      _ResultFilter.notebooks => {SearchKind.notebook},
+      _ResultFilter.sections => {SearchKind.section, SearchKind.superSection},
+      _ResultFilter.canvases => {SearchKind.canvas},
+      _ResultFilter.bookmarks => {SearchKind.bookmark},
+    };
+
+String _filterLabel(_ResultFilter f) => switch (f) {
+      _ResultFilter.notebooks => 'Notebooks',
+      _ResultFilter.sections => 'Sections',
+      _ResultFilter.canvases => 'Canvases',
+      _ResultFilter.bookmarks => 'Bookmarks',
+    };
+
 class _NextIntent extends Intent {
   const _NextIntent();
 }
@@ -90,6 +108,9 @@ class _SearchScreenState extends State<_SearchScreen> {
   bool _navigated = false; // guards against Enter firing open twice
   Timer? _filterDebounce;
 
+  /// Selected type filters. All selected (the default) means "no restriction".
+  final Set<_ResultFilter> _filters = {..._ResultFilter.values};
+
   @override
   void initState() {
     super.initState();
@@ -128,14 +149,38 @@ class _SearchScreenState extends State<_SearchScreen> {
     }
   }
 
+  /// The [SearchKind] restriction from the current chip selection, or null when
+  /// everything is selected (no restriction — the cheap default).
+  Set<SearchKind>? _selectedKinds() {
+    if (_filters.length == _ResultFilter.values.length) return null;
+    return {for (final f in _filters) ..._kindsFor(f)};
+  }
+
   void _applyFilter(String q) {
     if (!mounted) return;
     final query = q.trim();
     setState(() {
-      _results = query.isEmpty ? const [] : _svc.filter(widget.index, query);
+      _results = query.isEmpty
+          ? const []
+          : _svc.filter(widget.index, query, kinds: _selectedKinds());
       _highlighted = 0;
     });
     if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
+
+  void _toggleFilter(_ResultFilter f) {
+    setState(() {
+      // Never allow an empty selection — re-selecting the last one is a no-op
+      // that would show nothing; instead toggling it off with others off just
+      // leaves it on.
+      if (_filters.contains(f)) {
+        if (_filters.length > 1) _filters.remove(f);
+      } else {
+        _filters.add(f);
+      }
+    });
+    _filterDebounce?.cancel();
+    _applyFilter(_controller.text);
   }
 
   void _move(int delta) {
@@ -283,7 +328,11 @@ class _SearchScreenState extends State<_SearchScreen> {
           ),
         ),
       ),
-      body: _results.isEmpty
+      body: Column(
+        children: [
+          _buildFilterBar(palette),
+          Expanded(
+            child: _results.isEmpty
           ? Center(
               child: Text(
                 _controller.text.trim().isEmpty
@@ -334,6 +383,35 @@ class _SearchScreenState extends State<_SearchScreen> {
                 );
               },
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A horizontally-scrollable row of type-filter chips (Notebooks / Sections /
+  /// Canvases / Bookmarks). All selected = no restriction.
+  Widget _buildFilterBar(AppPalette palette) {
+    return SizedBox(
+      height: 48,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        children: [
+          for (final f in _ResultFilter.values)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                label: Text(_filterLabel(f)),
+                selected: _filters.contains(f),
+                onSelected: (_) => _toggleFilter(f),
+                visualDensity: VisualDensity.compact,
+                showCheckmark: false,
+                selectedColor: palette.accentSoft,
+              ),
+            ),
+        ],
+      ),
     );
   }
 

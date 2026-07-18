@@ -29,6 +29,13 @@ class SearchResult {
   /// can expand + glow the exact folder.
   final String? folderId;
 
+  /// Precomputed lowercased match keys (built once at index time so the
+  /// per-keystroke filter never re-lowercases). [pathKeyLower] is the full
+  /// breadcrumb + title concatenated, so a query typed as a run-together path
+  /// ("noteseccanv") fuzzily matches Notebook › Section › Canvas.
+  final String titleLower;
+  final String pathKeyLower;
+
   SearchResult({
     required this.kind,
     required this.title,
@@ -38,7 +45,9 @@ class SearchResult {
     this.canvas,
     this.pageId,
     this.folderId,
-  });
+  })  : titleLower = title.toLowerCase(),
+        pathKeyLower =
+            (path.isEmpty ? title : '$path $title').toLowerCase();
 }
 
 /// Builds a flat, in-memory index of every notebook/section/canvas name plus
@@ -176,14 +185,38 @@ class SearchService {
     }
   }
 
-  /// Fuzzy-filters [index] by [query], best matches first. An empty query
-  /// returns everything (so the search page can show the whole tree to browse).
-  List<SearchResult> filter(List<SearchResult> index, String query) {
+  /// How much worse a path-only match ranks than any title match — large
+  /// enough that every title hit sorts above every path-only hit.
+  static const int _kPathMatchPenalty = 1000;
+
+  /// Fuzzy-filters [index] by [query], best matches first. Optionally restricts
+  /// to a set of [kinds] (the search screen's type filters). An empty query
+  /// returns everything of the allowed kinds (so a host can show the whole tree
+  /// to browse).
+  ///
+  /// Matching is against the item's title first; for queries of 3+ chars it
+  /// *also* tries the full breadcrumb path ([SearchResult.pathKeyLower]), so
+  /// typing a run-together path like "noteseccanv" surfaces the canvas — but
+  /// those path-only hits always rank below real title hits.
+  List<SearchResult> filter(
+    List<SearchResult> index,
+    String query, {
+    Set<SearchKind>? kinds,
+  }) {
     final q = query.trim().toLowerCase();
-    if (q.isEmpty) return index;
+    bool allowed(SearchResult r) => kinds == null || kinds.contains(r.kind);
+    if (q.isEmpty) {
+      return kinds == null ? index : [for (final r in index) if (allowed(r)) r];
+    }
+    final matchPath = q.length >= 3;
     final scored = <(int, SearchResult)>[];
     for (final r in index) {
-      final score = _score(r.title.toLowerCase(), q);
+      if (!allowed(r)) continue;
+      var score = _score(r.titleLower, q);
+      if (score == null && matchPath) {
+        final ps = _score(r.pathKeyLower, q);
+        if (ps != null) score = ps + _kPathMatchPenalty;
+      }
       if (score != null) scored.add((score, r));
     }
     scored.sort((a, b) => a.$1.compareTo(b.$1));
