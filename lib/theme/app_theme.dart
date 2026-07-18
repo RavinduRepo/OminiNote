@@ -235,6 +235,132 @@ class AppTheme {
     onAccent: Colors.white,
   );
 
+  static const _sand = ThemeVariant(
+    id: 'sand',
+    name: 'Sand',
+    blurb: 'Warm desert',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFEDE5D6),
+      dot: Color(0xFFD9CDB8),
+      ink: Color(0xFF38322A),
+      accent: Color(0xFFC2703C),
+      accentSoft: Color(0x1FC2703C),
+      surface2: Color(0xFFF7F1E6),
+      border: Color(0xFFE2D8C6),
+      textDim: Color(0xFF8C8272),
+    ),
+    scaffold: Color(0xFFF2ECE1),
+    surface: Color(0xFFFBF7EF),
+    onSurface: Color(0xFF2D2820),
+    onAccent: Colors.white,
+  );
+
+  static const _sky = ThemeVariant(
+    id: 'sky',
+    name: 'Sky',
+    blurb: 'Airy blue',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFEEF5FC),
+      dot: Color(0xFFC3D8ED),
+      ink: Color(0xFF22303F),
+      accent: Color(0xFF2E8BD0),
+      accentSoft: Color(0x1F2E8BD0),
+      surface2: Color(0xFFF2F8FD),
+      border: Color(0xFFD2E1F0),
+      textDim: Color(0xFF5E7080),
+    ),
+    scaffold: Color(0xFFEAF2FA),
+    surface: Color(0xFFFFFFFF),
+    onSurface: Color(0xFF1B2836),
+    onAccent: Colors.white,
+  );
+
+  static const _lavender = ThemeVariant(
+    id: 'lavender',
+    name: 'Lavender',
+    blurb: 'Soft violet',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFECE8F4),
+      dot: Color(0xFFD2CADF),
+      ink: Color(0xFF2F2A38),
+      accent: Color(0xFF7E5FC0),
+      accentSoft: Color(0x1F7E5FC0),
+      surface2: Color(0xFFF6F3FC),
+      border: Color(0xFFE0DAEC),
+      textDim: Color(0xFF746D82),
+    ),
+    scaffold: Color(0xFFF0EDF6),
+    surface: Color(0xFFFCFAFF),
+    onSurface: Color(0xFF27222F),
+    onAccent: Colors.white,
+  );
+
+  static const _rose = ThemeVariant(
+    id: 'rose',
+    name: 'Rose',
+    blurb: 'Warm blush',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFF1E6E7),
+      dot: Color(0xFFE0C9CC),
+      ink: Color(0xFF3A2E30),
+      accent: Color(0xFFC15570),
+      accentSoft: Color(0x1FC15570),
+      surface2: Color(0xFFF9F1F2),
+      border: Color(0xFFEAD8DA),
+      textDim: Color(0xFF8C7A7C),
+    ),
+    scaffold: Color(0xFFF6EDEE),
+    surface: Color(0xFFFDF8F8),
+    onSurface: Color(0xFF302628),
+    onAccent: Colors.white,
+  );
+
+  static const _mint = ThemeVariant(
+    id: 'mint',
+    name: 'Mint',
+    blurb: 'Fresh teal',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFE4EFEA),
+      dot: Color(0xFFC3DAD0),
+      ink: Color(0xFF23322C),
+      accent: Color(0xFF1F9E82),
+      accentSoft: Color(0x1F1F9E82),
+      surface2: Color(0xFFF1F8F5),
+      border: Color(0xFFD3E4DC),
+      textDim: Color(0xFF64786F),
+    ),
+    scaffold: Color(0xFFE9F3EF),
+    surface: Color(0xFFFBFDFC),
+    onSurface: Color(0xFF1D2A25),
+    onAccent: Colors.white,
+  );
+
+  static const _cloud = ThemeVariant(
+    id: 'cloud',
+    name: 'Cloud',
+    blurb: 'Crisp neutral',
+    brightness: Brightness.light,
+    palette: AppPalette(
+      canvas: Color(0xFFF7F8FA),
+      dot: Color(0xFFD0D4DB),
+      ink: Color(0xFF1E2127),
+      accent: Color(0xFF4F5BD5),
+      accentSoft: Color(0x1F4F5BD5),
+      surface2: Color(0xFFF6F7F9),
+      border: Color(0xFFE1E4E9),
+      textDim: Color(0xFF616772),
+    ),
+    scaffold: Color(0xFFF4F5F7),
+    surface: Color(0xFFFFFFFF),
+    onSurface: Color(0xFF16181D),
+    onAccent: Colors.white,
+  );
+
   // ── Dark variants ───────────────────────────────────────────────────────
 
   static const _charcoal = ThemeVariant(
@@ -321,8 +447,145 @@ class AppTheme {
     onAccent: Color(0xFF0B0D10),
   );
 
+  static const _nord = ThemeVariant(
+    id: 'nord',
+    name: 'Nord',
+    blurb: 'Blue-grey · frost',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF2B303B),
+      dot: Color(0xFF434C5E),
+      ink: Color(0xFFECEFF4),
+      accent: Color(0xFF88C0D0),
+      accentSoft: Color(0x2488C0D0),
+      surface2: Color(0xFF3B4252),
+      border: Color(0xFF3F4859),
+      textDim: Color(0xFF9AA4B8),
+    ),
+    scaffold: Color(0xFF2E3440),
+    surface: Color(0xFF343B48),
+    onSurface: Color(0xFFECEFF4),
+    onAccent: Color(0xFF2E3440),
+  );
+
+  static const _forest = ThemeVariant(
+    id: 'forest',
+    name: 'Forest',
+    blurb: 'Deep green',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF0E140D),
+      dot: Color(0xFF2A3A28),
+      ink: Color(0xFFE4EBE0),
+      accent: Color(0xFF6FB05A),
+      accentSoft: Color(0x246FB05A),
+      surface2: Color(0xFF1D271B),
+      border: Color(0xFF283A24),
+      textDim: Color(0xFF93A08D),
+    ),
+    scaffold: Color(0xFF10160F),
+    surface: Color(0xFF172016),
+    onSurface: Color(0xFFE4EBE0),
+    onAccent: Color(0xFF10160F),
+  );
+
+  static const _plum = ThemeVariant(
+    id: 'plum',
+    name: 'Plum',
+    blurb: 'Deep violet',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF140F1A),
+      dot: Color(0xFF362B45),
+      ink: Color(0xFFECE6F2),
+      accent: Color(0xFFB57BE0),
+      accentSoft: Color(0x24B57BE0),
+      surface2: Color(0xFF241C30),
+      border: Color(0xFF2E2540),
+      textDim: Color(0xFFA398B0),
+    ),
+    scaffold: Color(0xFF17121E),
+    surface: Color(0xFF1F1829),
+    onSurface: Color(0xFFECE6F2),
+    onAccent: Color(0xFF17121E),
+  );
+
+  static const _ocean = ThemeVariant(
+    id: 'ocean',
+    name: 'Ocean',
+    blurb: 'Deep teal',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF0A1416),
+      dot: Color(0xFF24393C),
+      ink: Color(0xFFDEEBEC),
+      accent: Color(0xFF35B0C0),
+      accentSoft: Color(0x2435B0C0),
+      surface2: Color(0xFF16292C),
+      border: Color(0xFF21363A),
+      textDim: Color(0xFF8AA2A4),
+    ),
+    scaffold: Color(0xFF0C1719),
+    surface: Color(0xFF122123),
+    onSurface: Color(0xFFDEEBEC),
+    onAccent: Color(0xFF0C1719),
+  );
+
+  static const _mocha = ThemeVariant(
+    id: 'mocha',
+    name: 'Mocha',
+    blurb: 'Warm mauve',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF11111B),
+      dot: Color(0xFF313244),
+      ink: Color(0xFFCDD6F4),
+      accent: Color(0xFFCBA6F7),
+      accentSoft: Color(0x24CBA6F7),
+      surface2: Color(0xFF262637),
+      border: Color(0xFF313244),
+      textDim: Color(0xFF9399B2),
+    ),
+    scaffold: Color(0xFF181825),
+    surface: Color(0xFF1E1E2E),
+    onSurface: Color(0xFFCDD6F4),
+    onAccent: Color(0xFF181825),
+  );
+
+  static const _steel = ThemeVariant(
+    id: 'steel',
+    name: 'Steel',
+    blurb: 'Neutral slate',
+    brightness: Brightness.dark,
+    palette: AppPalette(
+      canvas: Color(0xFF16181B),
+      dot: Color(0xFF33383D),
+      ink: Color(0xFFE7E9EC),
+      accent: Color(0xFF6E8CB0),
+      accentSoft: Color(0x246E8CB0),
+      surface2: Color(0xFF23272B),
+      border: Color(0xFF2D3136),
+      textDim: Color(0xFF969CA3),
+    ),
+    scaffold: Color(0xFF1A1C1F),
+    surface: Color(0xFF232629),
+    onSurface: Color(0xFFE7E9EC),
+    onAccent: Color(0xFF1A1C1F),
+  );
+
   /// Pickable light palettes (first is the default).
-  static const List<ThemeVariant> lightVariants = [_slate, _paper, _mist, _sage];
+  static const List<ThemeVariant> lightVariants = [
+    _slate,
+    _paper,
+    _mist,
+    _sage,
+    _sand,
+    _sky,
+    _lavender,
+    _rose,
+    _mint,
+    _cloud,
+  ];
 
   /// Pickable dark palettes (first is the default).
   static const List<ThemeVariant> darkVariants = [
@@ -330,6 +593,12 @@ class AppTheme {
     _midnight,
     _espresso,
     _carbon,
+    _nord,
+    _forest,
+    _plum,
+    _ocean,
+    _mocha,
+    _steel,
   ];
 
   /// The light variant for [id], or the default when unknown/null.
