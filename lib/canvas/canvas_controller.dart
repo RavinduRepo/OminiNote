@@ -3865,6 +3865,9 @@ class CanvasController extends ChangeNotifier {
     canvas.bookmarks
       ..clear()
       ..addAll(fresh.bookmarks);
+    canvas.recordings
+      ..clear()
+      ..addAll(fresh.recordings);
 
     // Keep live in-memory pages (they may be ahead of disk); read only the
     // ones we don't have yet, and drop ones no row references anymore.

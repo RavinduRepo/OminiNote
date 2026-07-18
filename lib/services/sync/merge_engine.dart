@@ -401,6 +401,14 @@ class MergeEngine {
         ...atExtra,
       ];
     }
+
+    final recExtra = _extraById(merged['recordings'], loser['recordings']);
+    if (recExtra.isNotEmpty) {
+      merged['recordings'] = [
+        ...((merged['recordings'] as List?) ?? const []),
+        ...recExtra,
+      ];
+    }
   }
 
   /// The elements of [loserList] (id-keyed maps) whose `id` is absent from

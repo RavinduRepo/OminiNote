@@ -48,6 +48,52 @@ class Bookmark {
   );
 }
 
+/// A voice recording captured over the canvas. The audio lives as a
+/// content-addressed asset (`assetId`, in the canvas `assets/` dir, synced like
+/// any image/PDF); this record lives in canvas.json (synced structurally).
+///
+/// [startedAt] is the wall-clock time the recording began. Because every
+/// [StrokeElement] already carries its own `createdAt` wall-clock, playback can
+/// map a playhead offset to `startedAt + offset` and highlight the strokes
+/// drawn at that moment ("audio sync") without any per-stroke schema change.
+class AudioRecording {
+  final String id;
+  String name;
+  final String assetId;
+  final DateTime startedAt;
+  final int durationMs;
+  final DateTime createdAt;
+
+  AudioRecording({
+    required this.id,
+    required this.name,
+    required this.assetId,
+    required this.startedAt,
+    required this.durationMs,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'assetId': assetId,
+        'startedAt': startedAt.millisecondsSinceEpoch,
+        'durationMs': durationMs,
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory AudioRecording.fromJson(Map<String, dynamic> json) => AudioRecording(
+        id: json['id'] ?? newModelId('rec'),
+        name: json['name'] ?? 'Recording',
+        assetId: json['assetId'] ?? '',
+        startedAt: json['startedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['startedAt'])
+            : DateTime.now(),
+        durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
+        createdAt: DateTime.tryParse(json['createdAt'] ?? '') ?? DateTime.now(),
+      );
+}
+
 /// A file added "as attachment" — stored with the canvas but not rendered
 /// into it.
 class Attachment {
@@ -110,6 +156,7 @@ class Canvas {
   final List<PageRow> rows;
   final List<Attachment> attachments;
   final List<Bookmark> bookmarks;
+  final List<AudioRecording> recordings;
 
   Canvas({
     this.schemaVersion = 1,
@@ -130,10 +177,12 @@ class Canvas {
     List<PageRow>? rows,
     List<Attachment>? attachments,
     List<Bookmark>? bookmarks,
+    List<AudioRecording>? recordings,
   })  : updatedAt = updatedAt ?? DateTime.now(),
         rows = rows ?? [],
         attachments = attachments ?? [],
-        bookmarks = bookmarks ?? [];
+        bookmarks = bookmarks ?? [],
+        recordings = recordings ?? [];
 
   int get pageCount => rows.fold(0, (sum, r) => sum + r.pageIds.length);
 
@@ -162,6 +211,8 @@ class Canvas {
     'rows': rows.map((r) => r.toJson()).toList(),
     'attachments': attachments.map((a) => a.toJson()).toList(),
     'bookmarks': bookmarks.map((b) => b.toJson()).toList(),
+    if (recordings.isNotEmpty)
+      'recordings': recordings.map((r) => r.toJson()).toList(),
   };
 
   factory Canvas.fromJson(Map<String, dynamic> json) => Canvas(
@@ -199,5 +250,8 @@ class Canvas {
     bookmarks: List<Map<String, dynamic>>.from(
       json['bookmarks'] ?? [],
     ).map(Bookmark.fromJson).toList(),
+    recordings: List<Map<String, dynamic>>.from(
+      json['recordings'] ?? [],
+    ).map(AudioRecording.fromJson).toList(),
   );
 }

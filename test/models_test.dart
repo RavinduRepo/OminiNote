@@ -482,6 +482,44 @@ void main() {
       expect(decoded.defaultBackground.pattern, BgPattern.ruled);
       expect(decoded.attachments.single.name, 'syllabus.pdf');
     });
+
+    test('audio recordings survive; empty recordings omit the JSON key', () {
+      final base = Canvas(
+        id: 'c1',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Lecture',
+        createdAt: DateTime(2026, 7, 18),
+      );
+      // No recordings → the key is absent (keeps old canvas.json byte-stable
+      // and avoids spurious merge diffs).
+      expect(base.toJson().containsKey('recordings'), isFalse);
+
+      final canvas = Canvas(
+        id: 'c1',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Lecture',
+        createdAt: DateTime(2026, 7, 18),
+        recordings: [
+          AudioRecording(
+            id: 'rec1',
+            name: 'Take 1',
+            assetId: 'beef.m4a',
+            startedAt: DateTime(2026, 7, 18, 9, 30),
+            durationMs: 65000,
+            createdAt: DateTime(2026, 7, 18, 9, 31),
+          ),
+        ],
+      );
+      final decoded = Canvas.fromJson(
+        jsonDecode(jsonEncode(canvas.toJson())) as Map<String, dynamic>,
+      );
+      expect(decoded.recordings.single.name, 'Take 1');
+      expect(decoded.recordings.single.assetId, 'beef.m4a');
+      expect(decoded.recordings.single.durationMs, 65000);
+      expect(decoded.recordings.single.startedAt, DateTime(2026, 7, 18, 9, 30));
+    });
   });
 
   group('Tree round-trips (shared by Notebook & Section)', () {

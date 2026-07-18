@@ -1027,6 +1027,7 @@ class NotebookService {
             rows: c.rows,
             attachments: c.attachments,
             bookmarks: c.bookmarks,
+            recordings: c.recordings,
           ).toJson(),
         ),
       );
@@ -1158,6 +1159,7 @@ class NotebookService {
           rows: c.rows,
           attachments: c.attachments,
           bookmarks: c.bookmarks,
+          recordings: c.recordings,
         ).toJson(),
       ),
     );
@@ -2079,6 +2081,7 @@ class NotebookService {
       c.rows.clear();
       c.attachments.clear();
       c.bookmarks.clear();
+      c.recordings.clear();
       await saveCanvas(c);
     }
     await applyCanvasPurgeLocally(notebookId, sectionId, canvasId);
