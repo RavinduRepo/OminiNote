@@ -4,5 +4,4 @@
          so the native splash hands off to the first Flutter frame without a
          visible color flash. -->
     <color name="splash_background">#F5F6F9</color>
-	<color name="ic_launcher_background">#FFFFFF</color>
 </resources>

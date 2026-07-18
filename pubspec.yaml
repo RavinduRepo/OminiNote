@@ -66,14 +66,18 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
 
-# App icon (Android/Windows/macOS — iOS is not a project priority) generated
-# via `dart run flutter_launcher_icons` from the "Stroke Page" mark. See
-# assets/branding/ and CLAUDE.md's Branding section.
+# App icon (Android/iOS/Windows/macOS) generated via `dart run
+# flutter_launcher_icons` from the "amber field + O" mark. See
+# assets/branding/ (sourced from OmniNote-IconPack/) and CLAUDE.md's Branding
+# section. Android's Material You monochrome themed-icon layer isn't
+# supported by this tool — it's hand-maintained directly in
+# android/app/src/main/res/mipmap-*/ic_launcher_monochrome.png.
 flutter_launcher_icons:
   image_path: "assets/branding/icon_flat.png"
   android: true
-  ios: false
-  adaptive_icon_background: "#FFFFFF"
+  ios: true
+  image_path_ios: "assets/branding/icon_square.png"
+  adaptive_icon_background: "#DFA550"
   adaptive_icon_foreground: "assets/branding/icon_foreground_light.png"
   windows:
     generate: true
