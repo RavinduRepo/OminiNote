@@ -70,10 +70,13 @@ class ActionSheetItem {
   });
 }
 
-/// A styled mobile action sheet (the redesign's kebab menus): a floating,
-/// rounded card sliding up from the bottom with a grab handle and a list of
-/// icon+label actions. Tapping an item dismisses the sheet, then runs its
-/// callback (after the pop, so any dialog it opens isn't dismissed with it).
+/// A styled mobile action sheet (the redesign's kebab menus): a bottom sheet
+/// with a grab handle and a list of icon+label actions. It renders as a plain
+/// edge-to-edge sheet using the theme's own background + shape — the SAME look
+/// as the "+" (Add) sheet and every other modal sheet — so there's a single
+/// sheet outline, not the floating-card-inside-a-sheet double border it used
+/// to draw. Tapping an item dismisses the sheet, then runs its callback (after
+/// the pop, so any dialog it opens isn't dismissed with it).
 Future<void> showActionSheet(
   BuildContext context, {
   required List<ActionSheetItem> items,
@@ -81,74 +84,48 @@ Future<void> showActionSheet(
 }) {
   return showModalBottomSheet<void>(
     context: context,
-    backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withValues(alpha: 0.45),
     // Let the sheet grow to its content (capped + scrolled internally below);
     // without this the sheet is capped at ~half-screen and a long menu
     // overflows instead of scrolling.
     isScrollControlled: true,
     builder: (sheetContext) {
-      final theme = Theme.of(sheetContext);
-      final palette = theme.extension<AppPalette>()!;
-      return SafeArea(
-        top: false,
+      final palette = Theme.of(sheetContext).extension<AppPalette>()!;
+      return scrollableSheetBody(
+        sheetContext,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          child: Container(
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surface,
-              borderRadius: BorderRadius.circular(kRadius + 8),
-              border: Border.all(color: palette.border),
-            ),
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Center(
-                  child: Container(
-                    width: 36,
-                    height: 4,
-                    margin: const EdgeInsets.only(top: 2, bottom: 8),
-                    decoration: BoxDecoration(
-                      color: palette.border,
-                      borderRadius: BorderRadius.circular(2),
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(top: 2, bottom: 8),
+                  decoration: BoxDecoration(
+                    color: palette.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              if (title != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: palette.textDim,
                     ),
                   ),
                 ),
-                if (title != null)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
-                    child: Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: palette.textDim,
-                      ),
-                    ),
-                  ),
-                // Scrollable + height-capped so a long menu on a short screen
-                // never overflows.
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(sheetContext).size.height * 0.6,
-                  ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        for (final item in items)
-                          _SheetButton(item: item, palette: palette),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
+              for (final item in items)
+                _SheetButton(item: item, palette: palette),
+            ],
           ),
         ),
       );
