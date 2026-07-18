@@ -269,14 +269,16 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
           themeMode: s.themeMode.value,
           navigatorObservers: [searchRouteObserver],
           home: const _RootRouter(),
-          // Mobile-only: clear a stylus's stuck hover on pen-lift (see
-          // _clearStuckStylusHover). Wraps every route incl. the canvas.
+          // Mobile-only: clear a stylus's stuck hover (see _onRootPointer).
+          // Wraps every route incl. the canvas.
           builder: (context, child) {
             if (child == null) return const SizedBox.shrink();
             if (!(Platform.isAndroid || Platform.isIOS)) return child;
             return Listener(
-              onPointerUp: _clearStuckStylusHover,
-              onPointerCancel: _clearStuckStylusHover,
+              onPointerHover: _onRootPointer,
+              onPointerDown: _onRootPointer,
+              onPointerUp: _onRootPointer,
+              onPointerCancel: _onRootPointer,
               child: child,
             );
           },
@@ -286,29 +288,48 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   }
 }
 
+/// Device id of the stylus that most recently hovered, so we can clear its
+/// stuck hover later (it never emits its own exit — see [_onRootPointer]).
+int? _lastStylusHoverDevice;
+
+bool _isStylusKind(PointerDeviceKind k) =>
+    k == PointerDeviceKind.stylus || k == PointerDeviceKind.invertedStylus;
+
 /// Clears a **stuck stylus hover** on mobile. A pen/S-Pen hovering a button
 /// shows the same hover shadow + tooltip as a desktop mouse — but when it lifts
-/// off the digitizer it emits no `PointerExitEvent`, so `MouseTracker` keeps
-/// the last-hovered widget hovered forever (the shadow/tooltip then linger, and
-/// re-appear whenever anything lands where the pen was last lifted). On
-/// pen-lift we (1) dismiss any open tooltip and (2) nudge the tracked hover
-/// position off-screen, which fires the missing exit on the previously-hovered
-/// widget. Best-effort and mobile-only; desktop hover (a real mouse, which
-/// exits correctly) is left untouched.
-void _clearStuckStylusHover(PointerEvent e) {
-  if (e.kind != PointerDeviceKind.stylus &&
-      e.kind != PointerDeviceKind.invertedStylus) {
+/// off the digitizer it emits **no** `PointerExitEvent`, so `MouseTracker`
+/// keeps the last-hovered widget hovered forever. The tell is that the shadow
+/// (and sometimes the tooltip) re-appears wherever the pen was last lifted,
+/// **even when you then tap elsewhere with a finger**.
+///
+/// Since a pure hover→lift produces no event at all, there's nothing to react
+/// to on lift. Instead we remember the hovering stylus, then on the next
+/// **non-stylus** interaction (a finger tap — the exact moment the stale shadow
+/// is visible and in the way) nudge that stylus's tracked hover off-screen,
+/// which fires the missing exit, and dismiss any lingering tooltip. Mobile-only
+/// and best-effort; desktop mouse hover (which exits correctly) is untouched.
+void _onRootPointer(PointerEvent e) {
+  if (_isStylusKind(e.kind)) {
+    // Remember where the pen is hovering; its own down/up mean the pen is
+    // present, so leave the hover state alone.
+    if (e is PointerHoverEvent) _lastStylusHoverDevice = e.device;
     return;
   }
+  // A finger (or mouse) press/release. If a stylus was last hovering, its hover
+  // is very likely stuck (no exit on lift) — clear it now.
+  if (e is! PointerDownEvent && e is! PointerUpEvent) return;
+  final device = _lastStylusHoverDevice;
+  if (device == null) return;
+  _lastStylusHoverDevice = null;
   Tooltip.dismissAllToolTips();
   // Dispatch after this event unwinds (never re-enter the pointer pipeline).
   scheduleMicrotask(() {
     try {
       GestureBinding.instance.handlePointerEvent(
         PointerHoverEvent(
-          kind: e.kind,
-          device: e.device,
-          position: const Offset(-1, -1),
+          kind: PointerDeviceKind.stylus,
+          device: device,
+          position: const Offset(-100, -100),
         ),
       );
     } catch (_) {

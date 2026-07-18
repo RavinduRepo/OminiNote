@@ -777,7 +777,16 @@ class CanvasController extends ChangeNotifier {
   }
 
   void _afterMutation(_CanvasOp op) {
-    if (op.structural) _relayout();
+    if (op.structural) {
+      _relayout();
+      // A structural change can shrink the document — a page deleted from the
+      // page menu, or an add-page undone — and leave the viewport stranded far
+      // past the (now shorter) end, where the very next scroll immediately
+      // over-scroll-adds another page. Halt any momentum and pull the viewport
+      // back onto real content so the user always lands somewhere safe.
+      stopScrollAnimation();
+      _clampPan();
+    }
     _markDirty(op.dirtyPageIds, structural: op.structural);
     chromeContentTick.value++;
     notifyListeners();
