@@ -76,6 +76,18 @@ class CanvasScreen extends StatefulWidget {
   /// fills the whole window. Called with the new full-screen state.
   final ValueChanged<bool>? onFullScreenChanged;
 
+  /// Split-view (in-app multi-canvas, `CanvasWorkspaceScreen`). When non-null,
+  /// an "Open canvas alongside" item appears in the overflow to add a pane.
+  final VoidCallback? onSplitRequested;
+
+  /// When non-null (a secondary split pane), the app bar's leading becomes a
+  /// close-pane "×" that calls this, instead of a back arrow.
+  final VoidCallback? onClosePane;
+
+  /// When non-null, the app bar shows a back arrow that calls this (used by the
+  /// workspace's primary embedded pane, which has no route of its own to pop).
+  final VoidCallback? onBack;
+
   const CanvasScreen({
     super.key,
     required this.canvas,
@@ -83,6 +95,9 @@ class CanvasScreen extends StatefulWidget {
     this.initialPageId,
     this.embedded = false,
     this.onFullScreenChanged,
+    this.onSplitRequested,
+    this.onClosePane,
+    this.onBack,
   });
 
   @override
@@ -1367,6 +1382,26 @@ class _CanvasScreenState extends State<CanvasScreen>
   /// when embedded in the desktop split-view. `embedded` is the exact signal.
   bool _useMobileMenus(BuildContext context) => !widget.embedded;
 
+  /// Leading button for a split-view pane: close "×" for a secondary pane, a
+  /// back arrow for the primary embedded pane, else null (normal behavior).
+  Widget? _paneLeading() {
+    if (widget.onClosePane != null) {
+      return IconButton(
+        icon: const Icon(Icons.close),
+        tooltip: 'Close pane',
+        onPressed: widget.onClosePane,
+      );
+    }
+    if (widget.onBack != null) {
+      return IconButton(
+        icon: const BackButtonIcon(),
+        tooltip: 'Back',
+        onPressed: widget.onBack,
+      );
+    }
+    return null;
+  }
+
   /// Every overflow action **not** already promoted to the app bar (see
   /// `_buildDesktopToolbar`/mobile actions) shows up here instead — an item
   /// lives in exactly one place at a time.
@@ -1385,6 +1420,12 @@ class _CanvasScreenState extends State<CanvasScreen>
         onPressed: () => showActionSheet(
           context,
           items: [
+            if (widget.onSplitRequested != null)
+              ActionSheetItem(
+                icon: Icons.vertical_split_outlined,
+                label: 'Open canvas alongside',
+                onTap: widget.onSplitRequested!,
+              ),
             if (shown('fullscreen'))
               ActionSheetItem(
                 icon: Icons.fullscreen,
@@ -1480,6 +1521,8 @@ class _CanvasScreenState extends State<CanvasScreen>
     return PopupMenuButton<String>(
       onSelected: (action) {
         switch (action) {
+          case 'split':
+            widget.onSplitRequested?.call();
           case 'fullscreen':
             _toggleFullScreen();
           case 'toggle_toolbar':
@@ -1514,6 +1557,9 @@ class _CanvasScreenState extends State<CanvasScreen>
         }
       },
       itemBuilder: (context) => [
+        if (widget.onSplitRequested != null)
+          iconMenuItem('split', Icons.vertical_split_outlined,
+              'Open canvas alongside'),
         if (shown('fullscreen'))
           iconMenuItem('fullscreen', Icons.fullscreen, 'Full screen'),
         if (shown('toggle_toolbar'))
@@ -2821,20 +2867,26 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
 
     final mobile = _useMobileMenus(context);
+    // Split-view panes inject their own leading: a close-pane "×" for a
+    // secondary pane, or a back arrow for the primary embedded pane (which has
+    // no route of its own to pop).
+    final paneLeading = _paneLeading();
     return Scaffold(
       backgroundColor: palette.canvas,
       appBar: AppBar(
         titleSpacing: 0,
         // Mobile keeps the automatic back button (pushed as its own route);
-        // desktop is embedded, no leading.
-        automaticallyImplyLeading: mobile,
+        // desktop is embedded, no leading — unless a split pane supplies one.
+        leading: paneLeading,
+        automaticallyImplyLeading: mobile && paneLeading == null,
         title: null,
         // Both layouts render the whole toolbar in flexibleSpace (full width)
         // so the name stays fixed on the left and the controls scroll /
-        // right-align on the right. Mobile pads left to clear the back button.
+        // right-align on the right. Left-pad to clear the leading button.
         flexibleSpace: SafeArea(
           child: Padding(
-            padding: EdgeInsets.only(left: mobile ? 52 : 10, right: 10),
+            padding: EdgeInsets.only(
+                left: (mobile || paneLeading != null) ? 52 : 10, right: 10),
             child: Align(
               alignment: Alignment.centerLeft,
               child: SizedBox(
