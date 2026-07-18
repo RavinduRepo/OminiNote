@@ -163,7 +163,6 @@ class SettingsScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              const _MultiWindowSection(),
               const SizedBox(height: 16),
               const _SectionLabel('Default page'),
               _Card(
@@ -183,6 +182,10 @@ class SettingsScreen extends StatelessWidget {
               ),
             ],
           ),
+          // Multi-window isn't an appearance/visual setting, so it lives at the
+          // top level rather than inside the Appearance group. (Renders nothing
+          // on platforms without multi-window support.)
+          const _MultiWindowSection(),
         ],
           ),
         ),
