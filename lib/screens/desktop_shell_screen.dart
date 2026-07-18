@@ -145,7 +145,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     // Expand super-sections leading to the section in the notebook tree.
     _expandFoldersTo(nb.nodes, sectionId);
 
-    final section = _sectionMaps[nb.id]?[sectionId] ??
+    final section =
+        _sectionMaps[nb.id]?[sectionId] ??
         await _service.getSection(nb.id, sectionId);
     if (section == null || !mounted) return;
     await _selectSection(section);
@@ -335,8 +336,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (!mounted) return;
     final target = await chooseNewNotebookAccount(context);
     if (target == null) return; // cancelled the account picker
-    final notebook =
-        await _service.createNotebook(name, syncTarget: target.accountId);
+    final notebook = await _service.createNotebook(
+      name,
+      syncTarget: target.accountId,
+    );
     if (target.localOnly) {
       await _service.setNotebookLocalOnly(notebook.id, true);
     }
@@ -571,8 +574,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (kind == null || !mounted) return;
     final Canvas canvas;
     if (kind == NewCanvasKind.pdf) {
-      final c =
-          await pickAndCreatePdfCanvas(context, section, parentFolderId: folderId);
+      final c = await pickAndCreatePdfCanvas(
+        context,
+        section,
+        parentFolderId: folderId,
+      );
       if (c == null) return;
       canvas = c;
     } else {
@@ -768,53 +774,60 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       child: Focus(
         autofocus: true,
         child: Scaffold(
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          // The left icon nav rail is a fixed strip; the pane width math works
-          // off the space that remains beside it.
-          const railWidth = 60.0;
-          final avail = constraints.maxWidth.isFinite
-              ? (constraints.maxWidth - railWidth).clamp(0.0, double.infinity)
-              : constraints.maxWidth;
-          final desired = _sidebarCollapsed ? _collapsedWidth : _sidebarWidth;
-          final width = avail.isFinite ? desired.clamp(0.0, avail) : desired;
-          // Space left for the canvas-list column (guards the transient
-          // zero-width startup frame, same as the sidebar clamp).
-          final remaining = avail.isFinite
-              ? (avail - width).clamp(0.0, double.infinity)
-              : double.infinity;
-          final canvasColumnOpen =
-              !_sidebarCollapsed && _selectedSection != null;
-          return Row(
-            children: [
-              _buildNavRail(context, theme, palette),
-              _buildSidebar(theme, palette, width),
-              if (!_sidebarCollapsed)
-                _resizeDivider(
-                  palette,
-                  (dx) => setState(() {
-                    _sidebarWidth = (_sidebarWidth + dx).clamp(
-                      _minSidebarWidth,
-                      _maxSidebarWidth,
-                    );
-                  }),
-                ),
-              _buildCanvasColumn(theme, palette, remaining),
-              if (canvasColumnOpen)
-                _resizeDivider(
-                  palette,
-                  (dx) => setState(() {
-                    _canvasListWidth = (_canvasListWidth + dx).clamp(
-                      _minCanvasListWidth,
-                      _maxCanvasListWidth,
-                    );
-                  }),
-                ),
-              Expanded(child: _buildMainPane(theme, palette)),
-            ],
-          );
-        },
-      ),
+          body: LayoutBuilder(
+            builder: (context, constraints) {
+              // The left icon nav rail is a fixed strip; the pane width math works
+              // off the space that remains beside it.
+              const railWidth = 60.0;
+              final avail = constraints.maxWidth.isFinite
+                  ? (constraints.maxWidth - railWidth).clamp(
+                      0.0,
+                      double.infinity,
+                    )
+                  : constraints.maxWidth;
+              final desired = _sidebarCollapsed
+                  ? _collapsedWidth
+                  : _sidebarWidth;
+              final width = avail.isFinite
+                  ? desired.clamp(0.0, avail)
+                  : desired;
+              // Space left for the canvas-list column (guards the transient
+              // zero-width startup frame, same as the sidebar clamp).
+              final remaining = avail.isFinite
+                  ? (avail - width).clamp(0.0, double.infinity)
+                  : double.infinity;
+              final canvasColumnOpen =
+                  !_sidebarCollapsed && _selectedSection != null;
+              return Row(
+                children: [
+                  _buildNavRail(context, theme, palette),
+                  _buildSidebar(theme, palette, width),
+                  if (!_sidebarCollapsed)
+                    _resizeDivider(
+                      palette,
+                      (dx) => setState(() {
+                        _sidebarWidth = (_sidebarWidth + dx).clamp(
+                          _minSidebarWidth,
+                          _maxSidebarWidth,
+                        );
+                      }),
+                    ),
+                  _buildCanvasColumn(theme, palette, remaining),
+                  if (canvasColumnOpen)
+                    _resizeDivider(
+                      palette,
+                      (dx) => setState(() {
+                        _canvasListWidth = (_canvasListWidth + dx).clamp(
+                          _minCanvasListWidth,
+                          _maxCanvasListWidth,
+                        );
+                      }),
+                    ),
+                  Expanded(child: _buildMainPane(theme, palette)),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
@@ -825,7 +838,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   /// behavior — Notebooks is the always-present pane, Search opens the overlay,
   /// Bin/Settings push their screens.
   Widget _buildNavRail(
-      BuildContext context, ThemeData theme, AppPalette palette) {
+    BuildContext context,
+    ThemeData theme,
+    AppPalette palette,
+  ) {
     return Container(
       width: 60,
       decoration: BoxDecoration(
@@ -858,37 +874,50 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           // Filled while the panes are expanded (the mobile nav's selected
           // look), outlined while collapsed.
           _railButton(
-              palette,
-              _mainMode == _MainMode.canvas && !_sidebarCollapsed
-                  ? Icons.book
-                  : Icons.book_outlined,
-              'Notebooks',
-              active: _mainMode == _MainMode.canvas && !_sidebarCollapsed,
-              onTap: () => setState(() {
-                    if (_mainMode != _MainMode.canvas) {
-                      _mainMode = _MainMode.canvas;
-                      _sidebarCollapsed = false;
-                    } else {
-                      _sidebarCollapsed = !_sidebarCollapsed;
-                    }
-                  })),
+            palette,
+            _mainMode == _MainMode.canvas && !_sidebarCollapsed
+                ? Icons.book
+                : Icons.book_outlined,
+            'Notebooks',
+            active: _mainMode == _MainMode.canvas && !_sidebarCollapsed,
+            onTap: () => setState(() {
+              if (_mainMode != _MainMode.canvas) {
+                _mainMode = _MainMode.canvas;
+                _sidebarCollapsed = false;
+              } else {
+                _sidebarCollapsed = !_sidebarCollapsed;
+              }
+            }),
+          ),
           // Search / Bin / Settings take over the main area — the notebooks +
           // canvas-list columns collapse, leaving just this nav rail.
-          _railButton(palette, Icons.search, 'Search (Ctrl/Cmd+K)',
-              active: _mainMode == _MainMode.search,
-              onTap: () => _openMainMode(_MainMode.search)),
-          _railButton(palette, Icons.delete_outline, 'Recycle bin',
-              active: _mainMode == _MainMode.bin,
-              onTap: () {
-                _binRefresh.value++;
-                _openMainMode(_MainMode.bin);
-              }),
+          _railButton(
+            palette,
+            Icons.search,
+            'Search (Ctrl/Cmd+K)',
+            active: _mainMode == _MainMode.search,
+            onTap: () => _openMainMode(_MainMode.search),
+          ),
+          _railButton(
+            palette,
+            Icons.delete_outline,
+            'Recycle bin',
+            active: _mainMode == _MainMode.bin,
+            onTap: () {
+              _binRefresh.value++;
+              _openMainMode(_MainMode.bin);
+            },
+          ),
           const Spacer(),
           // Settings also opens as a full pane (no account avatar — multiple
           // accounts are managed inside Settings, so one avatar would mislead).
-          _railButton(palette, Icons.settings_outlined, 'Settings',
-              active: _mainMode == _MainMode.settings,
-              onTap: () => _openMainMode(_MainMode.settings)),
+          _railButton(
+            palette,
+            Icons.settings_outlined,
+            'Settings',
+            active: _mainMode == _MainMode.settings,
+            onTap: () => _openMainMode(_MainMode.settings),
+          ),
           const SizedBox(height: 18),
         ],
       ),
@@ -917,8 +946,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               color: active ? palette.accentSoft : Colors.transparent,
               borderRadius: BorderRadius.circular(11),
             ),
-            child: Icon(icon,
-                size: 20, color: active ? palette.accent : palette.textDim),
+            child: Icon(
+              icon,
+              size: 20,
+              color: active ? palette.accent : palette.textDim,
+            ),
           ),
         ),
       ),
@@ -928,9 +960,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   /// Open a full-pane mode (Search/Bin/Settings): the notebooks + canvas-list
   /// columns collapse, leaving the nav rail + the mode filling the main area.
   void _openMainMode(_MainMode mode) => setState(() {
-        _mainMode = mode;
-        _sidebarCollapsed = true;
-      });
+    _mainMode = mode;
+    _sidebarCollapsed = true;
+  });
 
   Widget _buildMainPane(ThemeData theme, AppPalette palette) {
     // Search / Bin / Settings take over the main area (panes collapsed).
@@ -1103,8 +1135,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 },
                 itemBuilder: (context) => [
                   iconMenuItem('canvas', Icons.note_add_outlined, 'New canvas'),
-                  iconMenuItem('group', Icons.create_new_folder_outlined,
-                      'New super-section'),
+                  iconMenuItem(
+                    'group',
+                    Icons.create_new_folder_outlined,
+                    'New super-section',
+                  ),
                 ],
               ),
             ],
@@ -1230,8 +1265,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             },
             itemBuilder: (context) => [
               iconMenuItem('new', Icons.note_add_outlined, 'New notebook'),
-              iconMenuItem('import', Icons.file_download_outlined,
-                  'Import notebook…'),
+              iconMenuItem(
+                'import',
+                Icons.file_download_outlined,
+                'Import notebook…',
+              ),
             ],
           ),
         ],
@@ -1308,215 +1346,311 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-        // Notebooks are the top level: neutral row, the solid initial chip
-        // carries the color; long-press anywhere to reorder (no handle).
-        Padding(
-          padding: const EdgeInsets.fromLTRB(6, 2, 6, 2),
-          child: ReorderableDelayedDragStartListener(
-            index: index,
-            child: Material(
-              color: expanded ? palette.surface2 : Colors.transparent,
-              borderRadius: BorderRadius.circular(kRadius),
-              child: Stack(
-                children: [
-                  if (glow)
-                    Positioned.fill(
-                      child: IgnorePointer(child: _glowBox(palette, notebook.id)),
+                  // Notebooks are the top level: neutral row, the solid initial chip
+                  // carries the color; long-press anywhere to reorder (no handle).
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 2, 6, 2),
+                    child: ReorderableDelayedDragStartListener(
+                      index: index,
+                      child: Material(
+                        color: expanded ? palette.surface2 : Colors.transparent,
+                        borderRadius: BorderRadius.circular(kRadius),
+                        child: Stack(
+                          children: [
+                            if (glow)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: _glowBox(palette, notebook.id),
+                                ),
+                              ),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(kRadius),
+                              onTap: () => setState(() {
+                                if (expanded) {
+                                  _expanded.remove(notebook.id);
+                                } else {
+                                  _expanded.add(notebook.id);
+                                  _everExpanded.add(notebook.id);
+                                }
+                              }),
+                              child: SizedBox(
+                                height: 44,
+                                child: Row(
+                                  children: [
+                                    const SizedBox(width: 10),
+                                    // Same glyph as the nav rail's Notebooks destination,
+                                    // tinted in the notebook's identity color; filled while
+                                    // expanded (mirrors the mobile nav's selected state) —
+                                    // no chevron, the icon carries the state.
+                                    Icon(
+                                      expanded
+                                          ? Icons.book
+                                          : Icons.book_outlined,
+                                      size: 18,
+                                      color: color,
+                                    ),
+                                    const SizedBox(width: 9),
+                                    Expanded(
+                                      child: Text(
+                                        notebook.name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 13.5,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    if (SettingsService().defaultNotebookId ==
+                                        notebook.id)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 2,
+                                        ),
+                                        child: Icon(
+                                          Icons.star_rounded,
+                                          size: 14,
+                                          color: palette.accent,
+                                        ),
+                                      ),
+                                    // Tiny account indicator (profile photo + color ring),
+                                    // matching the mobile home cards.
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 2),
+                                      child: NotebookAccountBadge(
+                                        notebook: notebook,
+                                      ),
+                                    ),
+                                    // Compacted tap targets: a bare PopupMenuButton keeps the
+                                    // IconButton's 48px min width even with padding:zero, which
+                                    // left a big gap between + and ⋮. Constrain each to ~30px
+                                    // so the trailing controls sit tight together.
+                                    SizedBox(
+                                      width: 30,
+                                      height: 40,
+                                      child: PopupMenuButton<String>(
+                                        icon: Icon(
+                                          Icons.add,
+                                          size: 18,
+                                          color: palette.textDim,
+                                        ),
+                                        tooltip: 'Add',
+                                        padding: EdgeInsets.zero,
+                                        onSelected: (a) {
+                                          if (a == 'section')
+                                            _addSection(notebook);
+                                          if (a == 'group')
+                                            _addSectionFolder(notebook);
+                                        },
+                                        itemBuilder: (context) => [
+                                          iconMenuItem(
+                                            'section',
+                                            Icons.post_add_outlined,
+                                            'New section',
+                                          ),
+                                          iconMenuItem(
+                                            'group',
+                                            Icons.create_new_folder_outlined,
+                                            'New super-section',
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    SizedBox(
+                                      width: 30,
+                                      height: 40,
+                                      child: PopupMenuButton<String>(
+                                        icon: Icon(
+                                          Icons.more_vert,
+                                          size: 18,
+                                          color: palette.textDim,
+                                        ),
+                                        padding: EdgeInsets.zero,
+                                        onSelected: (a) {
+                                          switch (a) {
+                                            case 'rename':
+                                              _renameNotebook(notebook);
+                                            case 'color':
+                                              _colorNotebook(notebook);
+                                            case 'export':
+                                              _exportNotebookPdf(notebook);
+                                            case 'share':
+                                              shareNotebookCopy(
+                                                context,
+                                                notebook,
+                                              );
+                                            case 'sharelink':
+                                              shareNotebookLink(
+                                                context,
+                                                notebook,
+                                              );
+                                            case 'sync':
+                                              _pickSyncTarget(notebook);
+                                            case 'default':
+                                              _toggleDefaultNotebook(notebook);
+                                            case 'delete':
+                                              _deleteNotebook(notebook);
+                                          }
+                                        },
+                                        itemBuilder: (context) => [
+                                          iconMenuItem(
+                                            'rename',
+                                            Icons.edit_outlined,
+                                            'Rename',
+                                          ),
+                                          iconMenuItem(
+                                            'color',
+                                            Icons.palette_outlined,
+                                            'Change color',
+                                          ),
+                                          iconMenuItem(
+                                            'export',
+                                            Icons.picture_as_pdf_outlined,
+                                            'Export to PDF',
+                                          ),
+                                          iconMenuItem(
+                                            'share',
+                                            Icons.ios_share,
+                                            'Send a copy',
+                                          ),
+                                          iconMenuItem(
+                                            'sharelink',
+                                            Icons.link,
+                                            'Share link',
+                                          ),
+                                          iconMenuItem(
+                                            'sync',
+                                            Icons.sync_outlined,
+                                            'Sync to…',
+                                          ),
+                                          iconMenuItem(
+                                            'default',
+                                            SettingsService()
+                                                        .defaultNotebookId ==
+                                                    notebook.id
+                                                ? Icons.star_rounded
+                                                : Icons.star_border_rounded,
+                                            SettingsService()
+                                                        .defaultNotebookId ==
+                                                    notebook.id
+                                                ? 'Remove as default target'
+                                                : 'Set as default target',
+                                          ),
+                                          iconMenuItem(
+                                            'delete',
+                                            Icons.delete_outline,
+                                            'Delete',
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.error,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                  InkWell(
-                borderRadius: BorderRadius.circular(kRadius),
-                onTap: () => setState(() {
-                  if (expanded) {
-                    _expanded.remove(notebook.id);
-                  } else {
-                    _expanded.add(notebook.id);
-                    _everExpanded.add(notebook.id);
-                  }
-                }),
-                child: SizedBox(
-                  height: 44,
-                  child: Row(
-                    children: [
-                      const SizedBox(width: 10),
-                      // Same glyph as the nav rail's Notebooks destination,
-                      // tinted in the notebook's identity color; filled while
-                      // expanded (mirrors the mobile nav's selected state) —
-                      // no chevron, the icon carries the state.
-                      Icon(
-                        expanded ? Icons.book : Icons.book_outlined,
-                        size: 18,
-                        color: color,
-                      ),
-                      const SizedBox(width: 9),
-                      Expanded(
-                        child: Text(
-                          notebook.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                      if (SettingsService().defaultNotebookId == notebook.id)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 2),
-                          child: Icon(Icons.star_rounded,
-                              size: 14, color: palette.accent),
-                        ),
-                      // Tiny account indicator (profile photo + color ring),
-                      // matching the mobile home cards.
-                      Padding(
-                        padding: const EdgeInsets.only(right: 2),
-                        child: NotebookAccountBadge(notebook: notebook),
-                      ),
-                      PopupMenuButton<String>(
-                        icon: Icon(Icons.add, size: 18, color: palette.textDim),
-                        tooltip: 'Add',
-                        padding: EdgeInsets.zero,
-                        onSelected: (a) {
-                          if (a == 'section') _addSection(notebook);
-                          if (a == 'group') _addSectionFolder(notebook);
-                        },
-                        itemBuilder: (context) => [
-                          iconMenuItem('section', Icons.post_add_outlined,
-                              'New section'),
-                          iconMenuItem('group', Icons.create_new_folder_outlined,
-                              'New super-section'),
-                        ],
-                      ),
-                      PopupMenuButton<String>(
-                        icon: Icon(
-                          Icons.more_vert,
-                          size: 18,
-                          color: palette.textDim,
-                        ),
-                        padding: EdgeInsets.zero,
-                        onSelected: (a) {
-                          switch (a) {
-                            case 'rename':
-                              _renameNotebook(notebook);
-                            case 'color':
-                              _colorNotebook(notebook);
-                            case 'export':
-                              _exportNotebookPdf(notebook);
-                            case 'share':
-                              shareNotebookCopy(context, notebook);
-                            case 'sharelink':
-                              shareNotebookLink(context, notebook);
-                            case 'sync':
-                              _pickSyncTarget(notebook);
-                            case 'default':
-                              _toggleDefaultNotebook(notebook);
-                            case 'delete':
-                              _deleteNotebook(notebook);
-                          }
-                        },
-                        itemBuilder: (context) => [
-                          iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
-                          iconMenuItem('color', Icons.palette_outlined,
-                              'Change color'),
-                          iconMenuItem('export', Icons.picture_as_pdf_outlined,
-                              'Export to PDF'),
-                          iconMenuItem(
-                              'share', Icons.ios_share, 'Send a copy'),
-                          iconMenuItem('sharelink', Icons.link, 'Share link'),
-                          iconMenuItem('sync', Icons.sync_outlined, 'Sync to…'),
-                          iconMenuItem(
-                              'default',
-                              SettingsService().defaultNotebookId == notebook.id
-                                  ? Icons.star_rounded
-                                  : Icons.star_border_rounded,
-                              SettingsService().defaultNotebookId == notebook.id
-                                  ? 'Remove as default target'
-                                  : 'Set as default target'),
-                          iconMenuItem('delete', Icons.delete_outline, 'Delete',
-                              color: Theme.of(context).colorScheme.error),
-                        ],
-                      ),
-                      const SizedBox(width: 2),
-                    ],
                   ),
-                ),
-              ),
+                  // Expand/collapse the section tree — animates the height + fade in
+                  // BOTH directions (AnimatedCrossFade keeps the content while shrinking,
+                  // so collapse reverses the expand instead of blinking out).
+                  AnimatedCrossFade(
+                    duration: const Duration(milliseconds: 340),
+                    sizeCurve: Curves.easeInOutCubic,
+                    firstCurve: Curves.easeInOutCubic,
+                    secondCurve: Curves.easeInOutCubic,
+                    crossFadeState: expanded
+                        ? CrossFadeState.showFirst
+                        : CrossFadeState.showSecond,
+                    secondChild: const SizedBox(width: double.infinity),
+                    // Sections hang off their notebook: indented under a rail in the
+                    // notebook's color so the parent/child relationship is visible.
+                    // Build the tree only for notebooks that have been opened —
+                    // AnimatedCrossFade constructs firstChild regardless of collapse
+                    // state, so an ungated firstChild would build EVERY notebook's whole
+                    // section subtree on every sidebar rebuild (e.g. each canvas click).
+                    // `expanded ||` guarantees it's present whenever the animation needs
+                    // it. (Perf 07/14/26.)
+                    firstChild:
+                        (expanded || _everExpanded.contains(notebook.id))
+                        ? Padding(
+                            padding: const EdgeInsets.only(
+                              left: 15,
+                              right: 4,
+                              bottom: 4,
+                            ),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                border: Border(
+                                  left: BorderSide(
+                                    color: color.withValues(alpha: 0.45),
+                                    width: 2,
+                                  ),
+                                ),
+                              ),
+                              child: ItemTreeView<Section>(
+                                containerId: notebook.id,
+                                nodes: notebook.nodes,
+                                items: sectionMap,
+                                dense: true,
+                                nameOf: (s) => s.name,
+                                colorOf: (s) => s.color,
+                                idOf: (s) => s.id,
+                                leafIcon: Icons.description_outlined,
+                                selectedId: _selectedSection?.id,
+                                glowId: _glowId,
+                                onOpen: _selectSection,
+                                onExportLeaf: _exportSectionPdf,
+                                onRenameLeaf: _renameSection,
+                                onColorLeaf: _colorSection,
+                                onDeleteLeaf: _deleteSection,
+                                onRenameFolder: (f) =>
+                                    _renameSectionFolder(notebook, f),
+                                onColorFolder: (f) =>
+                                    _colorSectionFolder(notebook, f),
+                                onAddLeafToFolder: (f) =>
+                                    _addSection(notebook, folderId: f.id),
+                                onAddFolderToFolder: (f) =>
+                                    _addSectionFolder(notebook, folderId: f.id),
+                                onUngroup: (f) async {
+                                  await _service.ungroupInNotebook(
+                                    notebook,
+                                    f.id,
+                                  );
+                                  await _reloadNotebook(notebook.id);
+                                },
+                                onDeleteFolder: (f) =>
+                                    _deleteSectionFolder(notebook, f),
+                                onRelocate: (node, {required copy}) =>
+                                    _relocateSection(
+                                      notebook,
+                                      node,
+                                      copy: copy,
+                                    ),
+                                onTreeChanged: () =>
+                                    _service.saveNotebook(notebook),
+                                onCrossDrop: (dragged, srcId, folder, index) =>
+                                    _crossDropSection(
+                                      notebook,
+                                      dragged,
+                                      srcId,
+                                      folder,
+                                    ),
+                              ),
+                            ),
+                          )
+                        : const SizedBox(width: double.infinity),
+                  ),
                 ],
               ),
-            ),
-          ),
-        ),
-        // Expand/collapse the section tree — animates the height + fade in
-        // BOTH directions (AnimatedCrossFade keeps the content while shrinking,
-        // so collapse reverses the expand instead of blinking out).
-        AnimatedCrossFade(
-          duration: const Duration(milliseconds: 340),
-          sizeCurve: Curves.easeInOutCubic,
-          firstCurve: Curves.easeInOutCubic,
-          secondCurve: Curves.easeInOutCubic,
-          crossFadeState: expanded
-              ? CrossFadeState.showFirst
-              : CrossFadeState.showSecond,
-          secondChild: const SizedBox(width: double.infinity),
-          // Sections hang off their notebook: indented under a rail in the
-          // notebook's color so the parent/child relationship is visible.
-          // Build the tree only for notebooks that have been opened —
-          // AnimatedCrossFade constructs firstChild regardless of collapse
-          // state, so an ungated firstChild would build EVERY notebook's whole
-          // section subtree on every sidebar rebuild (e.g. each canvas click).
-          // `expanded ||` guarantees it's present whenever the animation needs
-          // it. (Perf 07/14/26.)
-          firstChild: (expanded || _everExpanded.contains(notebook.id))
-              ? Padding(
-            padding: const EdgeInsets.only(left: 15, right: 4, bottom: 4),
-            child: Container(
-              decoration: BoxDecoration(
-                border: Border(
-                  left: BorderSide(
-                    color: color.withValues(alpha: 0.45),
-                    width: 2,
-                  ),
-                ),
-              ),
-              child: ItemTreeView<Section>(
-                containerId: notebook.id,
-                nodes: notebook.nodes,
-                items: sectionMap,
-                dense: true,
-                nameOf: (s) => s.name,
-                colorOf: (s) => s.color,
-                idOf: (s) => s.id,
-                leafIcon: Icons.description_outlined,
-                selectedId: _selectedSection?.id,
-                glowId: _glowId,
-                onOpen: _selectSection,
-                onExportLeaf: _exportSectionPdf,
-                onRenameLeaf: _renameSection,
-                onColorLeaf: _colorSection,
-                onDeleteLeaf: _deleteSection,
-                onRenameFolder: (f) => _renameSectionFolder(notebook, f),
-                onColorFolder: (f) => _colorSectionFolder(notebook, f),
-                onAddLeafToFolder: (f) => _addSection(notebook, folderId: f.id),
-                onAddFolderToFolder: (f) =>
-                    _addSectionFolder(notebook, folderId: f.id),
-                onUngroup: (f) async {
-                  await _service.ungroupInNotebook(notebook, f.id);
-                  await _reloadNotebook(notebook.id);
-                },
-                onDeleteFolder: (f) => _deleteSectionFolder(notebook, f),
-                onRelocate: (node, {required copy}) =>
-                    _relocateSection(notebook, node, copy: copy),
-                onTreeChanged: () => _service.saveNotebook(notebook),
-                onCrossDrop: (dragged, srcId, folder, index) =>
-                    _crossDropSection(notebook, dragged, srcId, folder),
-              ),
-            ),
-          )
-              : const SizedBox(width: double.infinity),
-        ),
-                ],
-              ),
-            ),
-          );
+      ),
+    );
   }
 }
 
