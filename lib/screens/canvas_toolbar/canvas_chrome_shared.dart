@@ -38,9 +38,10 @@ const double kTbBtnWidth = 38.0;
 const double kTbDividerWidth = 13.0;
 
 /// A compact toolbar icon button (used by the desktop app-bar toolbar row).
-Widget tbBtn(IconData icon, String tooltip, VoidCallback? onPressed) =>
+Widget tbBtn(IconData icon, String tooltip, VoidCallback? onPressed,
+        {Color? color}) =>
     IconButton(
-      icon: Icon(icon, size: 20),
+      icon: Icon(icon, size: 20, color: color),
       tooltip: tooltip,
       visualDensity: VisualDensity.compact,
       constraints: const BoxConstraints(minWidth: kTbBtnWidth, minHeight: 44),

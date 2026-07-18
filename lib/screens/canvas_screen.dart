@@ -1427,17 +1427,19 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Attachments',
                 onTap: _showAttachments,
               ),
-            if (!(_controller?.isRecordingAudio ?? false))
+            if (shown('record_audio') &&
+                !(_controller?.isRecordingAudio ?? false))
               ActionSheetItem(
                 icon: Icons.mic_none,
                 label: 'Record audio',
                 onTap: _startAudioRecording,
               ),
-            ActionSheetItem(
-              icon: Icons.graphic_eq,
-              label: 'Recordings',
-              onTap: _showRecordings,
-            ),
+            if (shown('recordings'))
+              ActionSheetItem(
+                icon: Icons.graphic_eq,
+                label: 'Recordings',
+                onTap: _showRecordings,
+              ),
             if (shown('page_settings'))
               ActionSheetItem(
                 icon: Icons.description_outlined,
@@ -1530,9 +1532,11 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
-        if (!(_controller?.isRecordingAudio ?? false))
+        if (shown('record_audio') &&
+            !(_controller?.isRecordingAudio ?? false))
           iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
-        iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
+        if (shown('recordings'))
+          iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
         if (shown('page_settings'))
           iconMenuItem(
             'page_settings',
@@ -2620,6 +2624,23 @@ class _CanvasScreenState extends State<CanvasScreen>
           'Draw with finger',
           _toggleFingerDraw,
         );
+      case 'record_audio':
+        final c = _controller;
+        if (c == null) return const SizedBox.shrink();
+        // Own narrow listener (not the static cluster): turns red while
+        // recording; the floating bar owns Stop, so tapping it again mid-record
+        // is a harmless no-op.
+        return ValueListenableBuilder<bool>(
+          valueListenable: c.isRecordingAudioNotifier,
+          builder: (context, recording, _) => tbBtn(
+            recording ? Icons.mic : Icons.mic_none,
+            recording ? 'Recording…' : 'Record audio',
+            _startAudioRecording,
+            color: recording ? const Color(0xFFE5484D) : null,
+          ),
+        );
+      case 'recordings':
+        return tbBtn(Icons.graphic_eq, 'Recordings', _showRecordings);
       default:
         return const SizedBox.shrink();
     }

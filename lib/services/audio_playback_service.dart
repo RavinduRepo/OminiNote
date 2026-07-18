@@ -2,9 +2,9 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
 /// Wraps a single `audioplayers` AudioPlayer to play one canvas recording at a
-/// time, exposing plain [ValueNotifier]s the UI (and, later, the audio-sync
-/// painter) can listen to. One instance is created lazily per open canvas and
-/// disposed with it.
+/// time, exposing plain [ValueNotifier]s the UI (and the audio-sync painter)
+/// can listen to. One instance is created lazily per open canvas and disposed
+/// with it.
 class AudioPlaybackService {
   final AudioPlayer _player = AudioPlayer();
 
@@ -14,45 +14,77 @@ class AudioPlaybackService {
   final ValueNotifier<Duration> position = ValueNotifier(Duration.zero);
   final ValueNotifier<Duration> duration = ValueNotifier(Duration.zero);
 
+  /// True while paused mid-take (so [play] resumes); false after a stop or a
+  /// natural finish (so [play] restarts from the top instead of no-op resuming
+  /// an ended player — the "can't replay after it finishes" bug).
+  bool _paused = false;
+
+  /// Where a fresh [play] of the current recording should begin — set when the
+  /// user scrubs while it isn't playing (e.g. after it finished), so dragging
+  /// the playhead back and pressing play replays from there.
+  Duration? _resumeFrom;
+
   AudioPlaybackService() {
     _player.onPositionChanged.listen((p) => position.value = p);
     _player.onDurationChanged.listen((d) => duration.value = d);
     _player.onPlayerStateChanged
         .listen((s) => playing.value = s == PlayerState.playing);
     _player.onPlayerComplete.listen((_) {
+      // Reset to the start so the scrubber returns home and Play replays it.
       playing.value = false;
-      position.value = duration.value;
+      _paused = false;
+      _resumeFrom = null;
+      position.value = Duration.zero;
     });
   }
 
   bool isCurrent(String id) => currentId.value == id;
 
-  /// Plays [filePath] as recording [id] — from the start when switching to a
-  /// different recording, else resumes the current one. [total] seeds the
-  /// duration before the source reports it (avoids a 0-length scrubber flash).
+  /// Plays [filePath] as recording [id]. Resumes when it's the paused current
+  /// recording; otherwise starts fresh from the top (or from a prior scrub via
+  /// [_resumeFrom]) — this covers a different recording, a stopped one, and a
+  /// finished one (replay). [total] seeds the duration before the source
+  /// reports it (avoids a 0-length scrubber flash).
   Future<void> play(String id, String filePath, {Duration? total}) async {
-    if (currentId.value != id) {
+    if (currentId.value == id && _paused) {
+      _paused = false;
+      await _player.resume();
+    } else {
+      final from = currentId.value == id ? _resumeFrom : null;
       currentId.value = id;
-      position.value = Duration.zero;
+      _paused = false;
+      _resumeFrom = null;
       if (total != null) duration.value = total;
       await _player.stop();
       await _player.play(DeviceFileSource(filePath));
-    } else {
-      await _player.resume();
+      if (from != null && from > Duration.zero) {
+        await _player.seek(from);
+        position.value = from;
+      } else {
+        position.value = Duration.zero;
+      }
     }
     playing.value = true;
   }
 
   Future<void> pause() async {
     await _player.pause();
+    _paused = true;
     playing.value = false;
   }
 
-  Future<void> seek(Duration to) => _player.seek(to);
+  Future<void> seek(Duration to) async {
+    await _player.seek(to);
+    position.value = to;
+    // Scrubbed while stopped/finished → remember it as the replay start point.
+    if (!playing.value) _resumeFrom = to;
+  }
 
   Future<void> stop() async {
     await _player.stop();
     playing.value = false;
+    _paused = false;
+    _resumeFrom = null;
     position.value = Duration.zero;
     currentId.value = null;
   }

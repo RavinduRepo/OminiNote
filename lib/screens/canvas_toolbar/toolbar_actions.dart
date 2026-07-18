@@ -38,6 +38,8 @@ const List<ToolbarActionSpec> kOverflowActionSpecs = [
       'page_settings', Icons.description_outlined, 'Page settings'),
   ToolbarActionSpec('shape_snap', Icons.check_box_outlined, 'Snap drawn shapes'),
   ToolbarActionSpec('finger_draw', Icons.check_box_outlined, 'Draw with finger'),
+  ToolbarActionSpec('record_audio', Icons.mic_none, 'Record audio'),
+  ToolbarActionSpec('recordings', Icons.graphic_eq, 'Recordings'),
 ];
 
 ToolbarActionSpec? findActionSpec(String id) {
