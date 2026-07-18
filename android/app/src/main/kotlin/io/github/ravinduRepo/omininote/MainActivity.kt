@@ -50,11 +50,19 @@ class MainActivity : FlutterActivity() {
      * to avoid two writers over the same store.
      */
     private fun openNewWindow() {
+        // NEW_TASK + MULTIPLE_TASK is the reliable "multiple instances of the
+        // same activity" recipe. We deliberately DON'T set NEW_DOCUMENT: it
+        // keys the task by the intent's data, and with no data every launch
+        // looks like the same document, so Android reuses the first task
+        // instead of making a new one ("opens once, then never again"). A fresh
+        // unique action string further guarantees the system can't fold this
+        // launch into an existing task.
         val intent = Intent(this, MainActivity::class.java).apply {
+            action = "io.github.ravinduRepo.omininote.NEW_WINDOW." +
+                System.nanoTime().toString()
             addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
-                    Intent.FLAG_ACTIVITY_NEW_DOCUMENT,
+                    Intent.FLAG_ACTIVITY_MULTIPLE_TASK,
             )
         }
         startActivity(intent)
