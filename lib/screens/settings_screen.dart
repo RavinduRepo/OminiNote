@@ -126,50 +126,62 @@ class SettingsScreen extends StatelessWidget {
           child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
         children: [
-          const _SectionLabel('Account'),
-          _Card(child: _AccountSection()),
-          const SizedBox(height: 24),
-          const _SectionLabel('Storage'),
-          _Card(child: _StorageSection()),
-          const SizedBox(height: 24),
-          const _SectionLabel('Appearance'),
-          _Card(
-            child: ValueListenableBuilder<ThemeMode>(
-              valueListenable: settings.themeMode,
-              builder: (context, mode, _) => _ThemeSection(
-                current: mode,
-                onChanged: settings.setThemeMode,
-              ),
-            ),
+          // Account group (collapsed by default): the accounts list + storage.
+          _CollapsibleSection(
+            title: 'Account',
+            children: [
+              _Card(child: _AccountSection()),
+              const SizedBox(height: 16),
+              const _SectionLabel('Storage'),
+              _Card(child: _StorageSection()),
+            ],
           ),
-          const SizedBox(height: 24),
-          const _SectionLabel('Layout'),
-          _Card(
-            child: ValueListenableBuilder<LayoutMode>(
-              valueListenable: settings.layoutMode,
-              builder: (context, mode, _) => _LayoutSection(
-                current: mode,
-                onChanged: settings.setLayoutMode,
-              ),
-            ),
-          ),
-          const _MultiWindowSection(),
-          const SizedBox(height: 24),
-          const _SectionLabel('Default page'),
-          _Card(
-            child: ValueListenableBuilder<bool>(
-              valueListenable: settings.autoPageColor,
-              builder: (context, isAuto, _) =>
-                  ValueListenableBuilder<PageBackground>(
-                valueListenable: settings.defaultPageBackground,
-                builder: (context, bg, _) => _DefaultPageSection(
-                  background: bg,
-                  isAuto: isAuto,
-                  onChanged: settings.setDefaultPageBackground,
-                  onSetAuto: () => settings.setAutoPageColor(true),
+          const SizedBox(height: 12),
+          // Appearance group (collapsed by default): theme, layout, and the
+          // default page background.
+          _CollapsibleSection(
+            title: 'Appearance',
+            children: [
+              const _SectionLabel('Theme'),
+              _Card(
+                child: ValueListenableBuilder<ThemeMode>(
+                  valueListenable: settings.themeMode,
+                  builder: (context, mode, _) => _ThemeSection(
+                    current: mode,
+                    onChanged: settings.setThemeMode,
+                  ),
                 ),
               ),
-            ),
+              const SizedBox(height: 16),
+              const _SectionLabel('Layout'),
+              _Card(
+                child: ValueListenableBuilder<LayoutMode>(
+                  valueListenable: settings.layoutMode,
+                  builder: (context, mode, _) => _LayoutSection(
+                    current: mode,
+                    onChanged: settings.setLayoutMode,
+                  ),
+                ),
+              ),
+              const _MultiWindowSection(),
+              const SizedBox(height: 16),
+              const _SectionLabel('Default page'),
+              _Card(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: settings.autoPageColor,
+                  builder: (context, isAuto, _) =>
+                      ValueListenableBuilder<PageBackground>(
+                    valueListenable: settings.defaultPageBackground,
+                    builder: (context, bg, _) => _DefaultPageSection(
+                      background: bg,
+                      isAuto: isAuto,
+                      onChanged: settings.setDefaultPageBackground,
+                      onSetAuto: () => settings.setAutoPageColor(true),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
           ),
@@ -1409,6 +1421,71 @@ class _SectionLabel extends StatelessWidget {
           color: palette.textDim,
         ),
       ),
+    );
+  }
+}
+
+/// A top-level settings group with a tappable header that expands/collapses
+/// its [children]. Collapsed by default, so Settings opens as a short list of
+/// group headers the user drills into (no separate screens).
+class _CollapsibleSection extends StatefulWidget {
+  final String title;
+  final List<Widget> children;
+  const _CollapsibleSection({required this.title, required this.children});
+
+  @override
+  State<_CollapsibleSection> createState() => _CollapsibleSectionState();
+}
+
+class _CollapsibleSectionState extends State<_CollapsibleSection> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(kRadius),
+          onTap: () => setState(() => _open = !_open),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.title,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                AnimatedRotation(
+                  turns: _open ? 0.5 : 0,
+                  duration: const Duration(milliseconds: 180),
+                  child: Icon(Icons.expand_more, color: palette.textDim),
+                ),
+              ],
+            ),
+          ),
+        ),
+        AnimatedCrossFade(
+          firstChild: const SizedBox(width: double.infinity),
+          secondChild: Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: widget.children,
+            ),
+          ),
+          crossFadeState:
+              _open ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+          duration: const Duration(milliseconds: 180),
+          sizeCurve: Curves.easeInOut,
+        ),
+      ],
     );
   }
 }
