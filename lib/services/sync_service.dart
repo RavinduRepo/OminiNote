@@ -81,6 +81,13 @@ class SyncService {
   final Set<String> _dirty = {};
   File? _journalFile;
 
+  /// True only in the **sync-owner** window (elected by `SyncCoordinator`). A
+  /// non-owner window never runs the poll/push loop and never journals — that
+  /// would put two writers on the shared journal/index. `init()` is only called
+  /// on the owner, so a single instance is always active (unchanged behavior).
+  bool _active = false;
+  bool get active => _active;
+
   // Open canvases wanting live merge of pulled changes, keyed by canvas id.
   final Map<String, CanvasSyncListener> _canvasListeners = {};
 
@@ -119,6 +126,8 @@ class SyncService {
   // ── Init / dispose ──────────────────────────────────────────────────────────
 
   Future<void> init() async {
+    if (_active) return; // idempotent (initial-owner + handover both call it)
+    _active = true;
     await _loadJournal();
     lastSyncAt.value = SettingsService().lastSyncAt;
     AuthService().accounts.addListener(_onAccountsChangedListener);
@@ -357,6 +366,11 @@ class SyncService {
   }
 
   void _markDirty(String rel) {
+    // Non-owner windows edit local files but must NOT journal or push (two
+    // writers on the shared journal/index corrupt them). Their edits sync once
+    // this window becomes the owner and the file is touched again. See
+    // KNOWN_ISSUES for that limitation.
+    if (!_active) return;
     _dirty.add(rel);
     unawaited(_saveJournal());
     if (!AuthService().isSignedIn) return;

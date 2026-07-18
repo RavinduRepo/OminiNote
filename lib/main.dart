@@ -10,6 +10,7 @@ import 'screens/note_search.dart';
 import 'services/auth_service.dart';
 import 'services/notebook_service.dart';
 import 'services/settings_service.dart';
+import 'services/sync_coordinator.dart';
 import 'services/sync_service.dart';
 import 'utils/notebook_share_ui.dart';
 import 'utils/open_pdf_ui.dart';
@@ -46,17 +47,26 @@ void main(List<String> args) async {
   // Initialize services in dependency order.
   await SettingsService().init();
   await NotebookService().init();
-  // Local-only tombstone cleanup (v3 §4) — fine to run for local-only users
-  // too, not gated on sign-in. Fire-and-forget so launch isn't slowed down.
-  unawaited(NotebookService().runGarbageCollection());
 
-  // Auth + sync: restore connected accounts, then start the sync loop
-  // (per-account Drive clients are created + inited by SyncService as it brings
-  // each account up; journal replay is fast; network work runs unawaited).
+  // Auth: restore connected accounts.
   await AuthService().init();
-  SyncService().init(); // Don't await — performs network operations.
+
+  // Single sync owner across app windows (Android multi-instance): only the
+  // owner window runs GC + the Drive poll/push loop + writes the shared
+  // journal/index. A lone window always wins the lease → unchanged behavior.
+  final isSyncOwner =
+      await SyncCoordinator.instance.start(onBecomeOwner: _startSyncOwnerWork);
+  if (isSyncOwner) _startSyncOwnerWork();
 
   runApp(const NoteApp());
+}
+
+/// Work only the elected sync-owner window may do (GC + Drive sync — both write
+/// the shared store/index). Called on the initial win and on a later takeover.
+void _startSyncOwnerWork() {
+  // Local-only tombstone cleanup — fire-and-forget so launch isn't slowed.
+  unawaited(NotebookService().runGarbageCollection());
+  SyncService().init(); // Don't await — performs network operations.
 }
 
 class NoteApp extends StatefulWidget {
@@ -214,6 +224,14 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Backgrounding: flush pending edits during the grace window so nothing is
     // stranded. Returning to foreground: pull anything that changed elsewhere.
+    // On teardown, release the sync-owner lease so another window takes over
+    // immediately instead of waiting out the staleness window.
+    if (state == AppLifecycleState.detached) {
+      unawaited(SyncCoordinator.instance.release());
+      return;
+    }
+    // Only the sync-owner window drives Drive I/O (a non-owner has no loop).
+    if (!SyncService().active) return;
     switch (state) {
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
