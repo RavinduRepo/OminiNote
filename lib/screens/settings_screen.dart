@@ -5,6 +5,7 @@ import '../services/notebook_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/action_sheet.dart';
 import '../widgets/sync_status_icon.dart';
 
 /// Mobile (single-pane) vs desktop (split-view sidebar) shell, or auto-detect
@@ -691,7 +692,6 @@ class _ThemeSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final settings = SettingsService();
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -725,41 +725,63 @@ class _ThemeSection extends StatelessWidget {
           const SizedBox(height: 20),
           _PaletteGroup(
             label: 'Light palette',
-            variants: AppTheme.lightVariants,
-            selected: settings.lightThemeId,
-            onPick: settings.setLightThemeId,
+            brightness: Brightness.light,
+            onOpenMaker: () => _openMaker(context, Brightness.light),
           ),
           const SizedBox(height: 18),
           _PaletteGroup(
             label: 'Dark palette',
-            variants: AppTheme.darkVariants,
-            selected: settings.darkThemeId,
-            onPick: settings.setDarkThemeId,
+            brightness: Brightness.dark,
+            onOpenMaker: () => _openMaker(context, Brightness.dark),
           ),
         ],
       ),
     );
   }
+
+  Future<void> _openMaker(BuildContext context, Brightness b) async {
+    final s = SettingsService();
+    final isLight = b == Brightness.light;
+    final result = await showThemeMaker(
+      context,
+      brightness: b,
+      initialAccent: isLight ? s.customLightAccent.value : s.customDarkAccent.value,
+      initialBase: isLight ? s.customLightBase.value : s.customDarkBase.value,
+    );
+    if (result == null) return;
+    if (isLight) {
+      await s.setCustomLight(result.$1, result.$2);
+    } else {
+      await s.setCustomDark(result.$1, result.$2);
+    }
+  }
 }
 
-/// A labelled row of palette-preview chips for one brightness. The selected id
-/// is a [ValueNotifier] so the highlight updates the moment a chip is tapped.
+/// A labelled row of palette-preview chips for one brightness, ending with the
+/// guided custom slot (a selectable chip with an edit pencil once made, or a
+/// "+ Custom" tile to create one). Rebuilds live on selection + custom edits.
 class _PaletteGroup extends StatelessWidget {
   final String label;
-  final List<ThemeVariant> variants;
-  final ValueNotifier<String> selected;
-  final ValueChanged<String> onPick;
+  final Brightness brightness;
+  final VoidCallback onOpenMaker;
 
   const _PaletteGroup({
     required this.label,
-    required this.variants,
-    required this.selected,
-    required this.onPick,
+    required this.brightness,
+    required this.onOpenMaker,
   });
 
   @override
   Widget build(BuildContext context) {
+    final s = SettingsService();
     final palette = Theme.of(context).extension<AppPalette>()!;
+    final isLight = brightness == Brightness.light;
+    final variants = isLight ? AppTheme.lightVariants : AppTheme.darkVariants;
+    final selectedN = isLight ? s.lightThemeId : s.darkThemeId;
+    final onPick = isLight ? s.setLightThemeId : s.setDarkThemeId;
+    final accentN = isLight ? s.customLightAccent : s.customDarkAccent;
+    final baseN = isLight ? s.customLightBase : s.customDarkBase;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -772,23 +794,80 @@ class _PaletteGroup extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 10),
-        ValueListenableBuilder<String>(
-          valueListenable: selected,
-          builder: (context, sel, _) => Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              for (final v in variants)
-                _VariantChip(
-                  variant: v,
-                  selected: v.id == sel,
-                  accent: palette.accent,
-                  onTap: () => onPick(v.id),
-                ),
-            ],
-          ),
+        ListenableBuilder(
+          listenable: Listenable.merge([selectedN, accentN, baseN]),
+          builder: (context, _) {
+            final sel = selectedN.value;
+            final custom =
+                isLight ? s.customLightVariant() : s.customDarkVariant();
+            return Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final v in variants)
+                  _VariantChip(
+                    variant: v,
+                    selected: v.id == sel,
+                    accent: palette.accent,
+                    onTap: () => onPick(v.id),
+                  ),
+                if (custom != null)
+                  _VariantChip(
+                    variant: custom,
+                    selected: sel == 'custom',
+                    accent: palette.accent,
+                    onTap: () => onPick('custom'),
+                    onEdit: onOpenMaker,
+                  )
+                else
+                  _CustomCreateChip(
+                    palette: palette,
+                    onTap: onOpenMaker,
+                  ),
+              ],
+            );
+          },
         ),
       ],
+    );
+  }
+}
+
+/// The "+ Custom" tile shown until a custom theme for this brightness exists.
+class _CustomCreateChip extends StatelessWidget {
+  final AppPalette palette;
+  final VoidCallback onTap;
+  const _CustomCreateChip({required this.palette, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 66,
+            height: 46,
+            margin: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: palette.border),
+              color: palette.surface2,
+            ),
+            child: Icon(Icons.add, color: palette.textDim, size: 22),
+          ),
+          const SizedBox(height: 5),
+          const SizedBox(
+            width: 70,
+            child: Text(
+              'Custom',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 11.5),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -802,76 +881,104 @@ class _VariantChip extends StatelessWidget {
   final Color accent;
   final VoidCallback onTap;
 
+  /// When set (the custom slot), a small pencil badge opens the theme maker.
+  final VoidCallback? onEdit;
+
   const _VariantChip({
     required this.variant,
     required this.selected,
     required this.accent,
     required this.onTap,
+    this.onEdit,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = variant.palette;
+    final preview = Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(
+          color: selected ? accent : Colors.transparent,
+          width: 2,
+        ),
+      ),
+      child: Container(
+        width: 66,
+        height: 46,
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          color: variant.scaffold,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: p.border),
+        ),
+        child: Container(
+          padding: const EdgeInsets.all(5),
+          decoration: BoxDecoration(
+            color: variant.surface,
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: p.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(width: 12, height: 3, color: variant.onSurface),
+                  const Spacer(),
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration:
+                        BoxDecoration(color: p.accent, shape: BoxShape.circle),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Container(width: double.infinity, height: 2.5, color: p.textDim),
+              const SizedBox(height: 3),
+              Container(width: 20, height: 2.5, color: p.textDim),
+            ],
+          ),
+        ),
+      ),
+    );
+
     return GestureDetector(
       onTap: onTap,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            padding: const EdgeInsets.all(2),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(11),
-              border: Border.all(
-                color: selected ? accent : Colors.transparent,
-                width: 2,
-              ),
-            ),
-            child: Container(
-              width: 66,
-              height: 46,
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: variant.scaffold,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: p.border),
-              ),
-              child: Container(
-                padding: const EdgeInsets.all(5),
-                decoration: BoxDecoration(
-                  color: variant.surface,
-                  borderRadius: BorderRadius.circular(5),
-                  border: Border.all(color: p.border),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 12,
-                          height: 3,
-                          color: variant.onSurface,
+          if (onEdit == null)
+            preview
+          else
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                preview,
+                Positioned(
+                  right: -4,
+                  top: -4,
+                  child: GestureDetector(
+                    onTap: onEdit,
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        color: accent,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.surface,
+                          width: 1.5,
                         ),
-                        const Spacer(),
-                        Container(
-                          width: 7,
-                          height: 7,
-                          decoration: BoxDecoration(
-                            color: p.accent,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ],
+                      ),
+                      child: const Icon(Icons.edit,
+                          size: 11, color: Colors.white),
                     ),
-                    const SizedBox(height: 4),
-                    Container(width: double.infinity, height: 2.5, color: p.textDim),
-                    const SizedBox(height: 3),
-                    Container(width: 20, height: 2.5, color: p.textDim),
-                  ],
+                  ),
                 ),
-              ),
+              ],
             ),
-          ),
           const SizedBox(height: 5),
           SizedBox(
             width: 70,
@@ -884,6 +991,291 @@ class _VariantChip extends StatelessWidget {
                 fontSize: 11.5,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Guided theme maker ───────────────────────────────────────────────────────
+
+/// Opens the guided theme maker for [brightness]: pick an accent + a background
+/// tone with a live preview; the rest of the palette is derived. Returns
+/// `(accentArgb, baseArgb)`, or null if dismissed.
+Future<(int, int)?> showThemeMaker(
+  BuildContext context, {
+  required Brightness brightness,
+  int? initialAccent,
+  int? initialBase,
+}) {
+  return showModalBottomSheet<(int, int)>(
+    context: context,
+    isScrollControlled: true,
+    builder: (context) => scrollableSheetBody(
+      context,
+      child: _ThemeMakerBody(
+        brightness: brightness,
+        initialAccent: initialAccent,
+        initialBase: initialBase,
+      ),
+    ),
+  );
+}
+
+class _ThemeMakerBody extends StatefulWidget {
+  final Brightness brightness;
+  final int? initialAccent;
+  final int? initialBase;
+  const _ThemeMakerBody({
+    required this.brightness,
+    this.initialAccent,
+    this.initialBase,
+  });
+
+  @override
+  State<_ThemeMakerBody> createState() => _ThemeMakerBodyState();
+}
+
+class _ThemeMakerBodyState extends State<_ThemeMakerBody> {
+  late Color _accent;
+  late Color _base;
+
+  List<Color> get _bases => widget.brightness == Brightness.light
+      ? AppTheme.customLightBases
+      : AppTheme.customDarkBases;
+
+  @override
+  void initState() {
+    super.initState();
+    _accent =
+        Color(widget.initialAccent ?? AppPalette.swatchColors.first.toARGB32());
+    _base = Color(widget.initialBase ?? _bases.first.toARGB32());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final isLight = widget.brightness == Brightness.light;
+    final variant = AppTheme.buildCustomVariant(
+      brightness: widget.brightness,
+      accent: _accent,
+      base: _base,
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 10),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            isLight ? 'Custom light theme' : 'Custom dark theme',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: _MiniThemePreview(variant: variant),
+        ),
+        const SizedBox(height: 18),
+        _label(palette, 'Accent'),
+        _swatchRow(
+          palette,
+          colors: AppPalette.swatchColors,
+          selected: _accent,
+          onPick: (c) => setState(() => _accent = c),
+        ),
+        const SizedBox(height: 14),
+        _label(palette, 'Background'),
+        _swatchRow(
+          palette,
+          colors: _bases,
+          selected: _base,
+          onPick: (c) => setState(() => _base = c),
+        ),
+        const SizedBox(height: 18),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                (_accent.toARGB32(), _base.toARGB32()),
+              ),
+              child: const Text('Apply theme'),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
+
+  Widget _label(AppPalette p, String s) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+        child: Text(
+          s,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: p.textDim,
+          ),
+        ),
+      );
+
+  Widget _swatchRow(
+    AppPalette palette, {
+    required List<Color> colors,
+    required Color selected,
+    required ValueChanged<Color> onPick,
+  }) {
+    return SizedBox(
+      height: 36,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: colors.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
+        itemBuilder: (context, i) {
+          final c = colors[i];
+          final sel = c.toARGB32() == selected.toARGB32();
+          return GestureDetector(
+            onTap: () => onPick(c),
+            child: Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: c,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: sel ? palette.accent : palette.border,
+                  width: sel ? 2.5 : 1,
+                ),
+              ),
+              child: sel
+                  ? Icon(
+                      Icons.check,
+                      size: 16,
+                      color: c.computeLuminance() > 0.5
+                          ? Colors.black54
+                          : Colors.white,
+                    )
+                  : null,
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// A small live "app" mockup rendered in a [ThemeVariant]'s own colors.
+class _MiniThemePreview extends StatelessWidget {
+  final ThemeVariant variant;
+  const _MiniThemePreview({required this.variant});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = variant.palette;
+    return Container(
+      decoration: BoxDecoration(
+        color: variant.scaffold,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: p.border),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Icon(Icons.menu, size: 16, color: variant.onSurface),
+              const SizedBox(width: 8),
+              Text(
+                'Notebook',
+                style: TextStyle(
+                  color: variant.onSurface,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              const Spacer(),
+              Icon(Icons.search, size: 16, color: p.textDim),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: variant.surface,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: p.border),
+            ),
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.book_outlined, size: 18, color: p.accent),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Physics',
+                      style: TextStyle(
+                        color: variant.onSurface,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '8 sections · easy to read',
+                  style: TextStyle(color: p.textDim, fontSize: 11),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: p.accent,
+                        borderRadius: BorderRadius.circular(kRadius),
+                      ),
+                      child: Text(
+                        'Accent',
+                        style: TextStyle(
+                          color: variant.onAccent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: p.accentSoft,
+                        borderRadius: BorderRadius.circular(kRadius),
+                      ),
+                      child: Text(
+                        'Soft',
+                        style: TextStyle(
+                          color: p.accent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
         ],

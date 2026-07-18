@@ -11,7 +11,6 @@ import 'services/auth_service.dart';
 import 'services/notebook_service.dart';
 import 'services/settings_service.dart';
 import 'services/sync_service.dart';
-import 'theme/app_theme.dart';
 import 'utils/notebook_share_ui.dart';
 import 'utils/open_pdf_ui.dart';
 import 'utils/progress_overlay.dart';
@@ -230,17 +229,24 @@ class _NoteAppState extends State<NoteApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final s = SettingsService();
     return ListenableBuilder(
-      // Rebuild on theme mode OR either palette-variant pick, so the chosen
-      // light/dark palettes apply live.
-      listenable:
-          Listenable.merge([s.themeMode, s.lightThemeId, s.darkThemeId]),
+      // Rebuild on theme mode, either palette-variant pick, or a custom-theme
+      // edit, so the chosen light/dark palettes apply live.
+      listenable: Listenable.merge([
+        s.themeMode,
+        s.lightThemeId,
+        s.darkThemeId,
+        s.customLightAccent,
+        s.customLightBase,
+        s.customDarkAccent,
+        s.customDarkBase,
+      ]),
       builder: (context, _) {
         return MaterialApp(
           title: 'Omininote',
           debugShowCheckedModeBanner: false,
           navigatorKey: _navigatorKey,
-          theme: AppTheme.lightVariant(s.lightThemeId.value).build(),
-          darkTheme: AppTheme.darkVariant(s.darkThemeId.value).build(),
+          theme: s.effectiveLightVariant().build(),
+          darkTheme: s.effectiveDarkVariant().build(),
           themeMode: s.themeMode.value,
           navigatorObservers: [searchRouteObserver],
           home: const _RootRouter(),

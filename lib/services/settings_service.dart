@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../models/canvas_page.dart';
 import '../models/shape_template.dart';
+import '../theme/app_theme.dart';
 
 /// Which navigation shell to show. [auto] picks based on window width (see
 /// `main.dart`'s root router); [mobile]/[desktop] force one regardless of
@@ -32,6 +33,53 @@ class SettingsService {
   /// its selected variant, so the two are remembered independently.
   final ValueNotifier<String> lightThemeId = ValueNotifier('slate');
   final ValueNotifier<String> darkThemeId = ValueNotifier('charcoal');
+
+  /// Guided custom themes (`AppTheme.buildCustomVariant`): an accent + a base
+  /// background tone (ARGB ints), per brightness. Null until the user makes one.
+  final ValueNotifier<int?> customLightAccent = ValueNotifier(null);
+  final ValueNotifier<int?> customLightBase = ValueNotifier(null);
+  final ValueNotifier<int?> customDarkAccent = ValueNotifier(null);
+  final ValueNotifier<int?> customDarkBase = ValueNotifier(null);
+
+  bool get hasCustomLight =>
+      customLightAccent.value != null && customLightBase.value != null;
+  bool get hasCustomDark =>
+      customDarkAccent.value != null && customDarkBase.value != null;
+
+  /// The built custom light variant, or null if none has been made.
+  ThemeVariant? customLightVariant() => hasCustomLight
+      ? AppTheme.buildCustomVariant(
+          brightness: Brightness.light,
+          accent: Color(customLightAccent.value!),
+          base: Color(customLightBase.value!),
+        )
+      : null;
+
+  ThemeVariant? customDarkVariant() => hasCustomDark
+      ? AppTheme.buildCustomVariant(
+          brightness: Brightness.dark,
+          accent: Color(customDarkAccent.value!),
+          base: Color(customDarkBase.value!),
+        )
+      : null;
+
+  /// The light [ThemeVariant] to actually apply: the custom one when 'custom' is
+  /// selected and exists, else the built-in for [lightThemeId] (default).
+  ThemeVariant effectiveLightVariant() {
+    if (lightThemeId.value == 'custom') {
+      final v = customLightVariant();
+      if (v != null) return v;
+    }
+    return AppTheme.lightVariant(lightThemeId.value);
+  }
+
+  ThemeVariant effectiveDarkVariant() {
+    if (darkThemeId.value == 'custom') {
+      final v = customDarkVariant();
+      if (v != null) return v;
+    }
+    return AppTheme.darkVariant(darkThemeId.value);
+  }
 
   /// App-wide default page background seeded into new sections/pages. Editable
   /// from Settings (outside a notebook) so the default applies everywhere.
@@ -294,6 +342,10 @@ class SettingsService {
     themeMode.value = _parseThemeMode(data['themeMode']);
     if (data['lightThemeId'] is String) lightThemeId.value = data['lightThemeId'];
     if (data['darkThemeId'] is String) darkThemeId.value = data['darkThemeId'];
+    customLightAccent.value = (data['customLightAccent'] as num?)?.toInt();
+    customLightBase.value = (data['customLightBase'] as num?)?.toInt();
+    customDarkAccent.value = (data['customDarkAccent'] as num?)?.toInt();
+    customDarkBase.value = (data['customDarkBase'] as num?)?.toInt();
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
@@ -386,6 +438,22 @@ class SettingsService {
     await _persist();
   }
 
+  /// Saves a guided custom light theme and selects it.
+  Future<void> setCustomLight(int accent, int base) async {
+    customLightAccent.value = accent;
+    customLightBase.value = base;
+    lightThemeId.value = 'custom';
+    await _persist();
+  }
+
+  /// Saves a guided custom dark theme and selects it.
+  Future<void> setCustomDark(int accent, int base) async {
+    customDarkAccent.value = accent;
+    customDarkBase.value = base;
+    darkThemeId.value = 'custom';
+    await _persist();
+  }
+
   Future<void> setLayoutMode(LayoutMode mode) async {
     if (layoutMode.value == mode) return;
     layoutMode.value = mode;
@@ -457,6 +525,10 @@ class SettingsService {
         'themeMode': themeMode.value.name,
         'lightThemeId': lightThemeId.value,
         'darkThemeId': darkThemeId.value,
+        'customLightAccent': customLightAccent.value,
+        'customLightBase': customLightBase.value,
+        'customDarkAccent': customDarkAccent.value,
+        'customDarkBase': customDarkBase.value,
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,

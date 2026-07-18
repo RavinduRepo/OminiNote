@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 /// Corner radius used across the app. Softer than the original crisp Graphite
@@ -616,6 +618,87 @@ class AppTheme {
   static ThemeData light() => lightVariants.first.build();
 
   static ThemeData dark() => darkVariants.first.build();
+
+  // ── Guided custom themes ─────────────────────────────────────────────────
+
+  /// Curated background tones the guided theme maker offers for a light custom
+  /// theme (the rest of the palette is derived to stay readable).
+  static const List<Color> customLightBases = [
+    Color(0xFFF4F5F7), // neutral
+    Color(0xFFF3EFE7), // warm
+    Color(0xFFEDF1F6), // cool blue
+    Color(0xFFEEF1EC), // green
+    Color(0xFFF6EDEE), // rose
+    Color(0xFFF0EDF6), // lavender
+    Color(0xFFF2ECE1), // sand
+  ];
+
+  /// Curated background tones for a dark custom theme.
+  static const List<Color> customDarkBases = [
+    Color(0xFF12151B), // charcoal
+    Color(0xFF0F1420), // navy
+    Color(0xFF1A1613), // espresso
+    Color(0xFF0B0D10), // carbon
+    Color(0xFF2E3440), // nord
+    Color(0xFF10160F), // forest
+    Color(0xFF17121E), // plum
+    Color(0xFF181825), // mocha
+  ];
+
+  /// Builds a full, readable [ThemeVariant] from just two guided choices — an
+  /// [accent] and a [base] background tone — deriving surfaces, borders, ink and
+  /// dim text from [base]'s hue via HSL so the result always stays legible. This
+  /// is what the "custom" light/dark slots use; it's as cheap as any preset.
+  static ThemeVariant buildCustomVariant({
+    required Brightness brightness,
+    required Color accent,
+    required Color base,
+  }) {
+    final isDark = brightness == Brightness.dark;
+    final baseHsl = HSLColor.fromColor(base);
+    final h = baseHsl.hue;
+    final s = baseHsl.saturation;
+    final l = isDark
+        ? baseHsl.lightness.clamp(0.06, 0.18)
+        : baseHsl.lightness.clamp(0.88, 0.985);
+
+    Color c(double sat, double light) =>
+        HSLColor.fromAHSL(1, h, sat.clamp(0, 1), light.clamp(0, 1)).toColor();
+
+    final scaffold = c(s, l);
+    final surface = isDark ? c(s, l + 0.045) : c(s * 0.5, math.min(0.995, l + 0.035));
+    final canvas = isDark ? c(s, l - 0.012) : c(s, l - 0.006);
+    final surface2 = isDark ? c(s, l + 0.03) : c(s * 0.6, l + 0.02);
+    final border = isDark ? c(s, l + 0.10) : c(s * 0.9, l - 0.10);
+    final ink = isDark ? c(math.min(s, 0.16), 0.92) : c(math.min(s, 0.22), 0.15);
+    final textDim =
+        isDark ? c(math.min(s, 0.12), 0.62) : c(math.min(s, 0.14), 0.45);
+    final dot = isDark ? c(s, l + 0.13) : c(s, l - 0.16);
+    final onAccent = accent.computeLuminance() > 0.55
+        ? const Color(0xFF17181C)
+        : Colors.white;
+
+    return ThemeVariant(
+      id: isDark ? 'custom-dark' : 'custom-light',
+      name: 'Custom',
+      blurb: isDark ? 'Your dark' : 'Your light',
+      brightness: brightness,
+      palette: AppPalette(
+        canvas: canvas,
+        dot: dot,
+        ink: ink,
+        accent: accent,
+        accentSoft: accent.withValues(alpha: isDark ? 0.14 : 0.12),
+        surface2: surface2,
+        border: border,
+        textDim: textDim,
+      ),
+      scaffold: scaffold,
+      surface: surface,
+      onSurface: ink,
+      onAccent: onAccent,
+    );
+  }
 
   static ThemeData _build({
     required Brightness brightness,
