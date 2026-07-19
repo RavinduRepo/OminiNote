@@ -55,6 +55,9 @@ dependencies:
   image_picker: ^1.2.3
   record: ^6.2.1
   audioplayers: ^6.7.1
+  # Text-to-speech (read-aloud). Covers Android/iOS/macOS/Windows; it has no
+  # Linux backend, so TtsService shells out to espeak/spd-say there.
+  flutter_tts: ^4.2.4
 
 dev_dependencies:
   flutter_test:

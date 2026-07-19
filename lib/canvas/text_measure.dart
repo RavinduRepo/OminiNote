@@ -115,6 +115,32 @@ int caretOffsetAt(TextElement el, Offset localOffset) {
   return idx.clamp(0, el.text.length);
 }
 
+/// Page-local rects covering the character range `[start, end)` of [el] —
+/// one per visual line the range spans — using the same layout the painter
+/// uses, so the boxes line up exactly with the drawn glyphs. Returned rects are
+/// already shifted into page space (offset by the element's top-left, the same
+/// origin the painter paints the text at). Used for the read-aloud highlight.
+List<Rect> selectionRectsForElement(TextElement el, int start, int end) {
+  if (el.runs.isEmpty) return const [];
+  final a = start.clamp(0, el.text.length);
+  final b = end.clamp(0, el.text.length);
+  if (b <= a) return const [];
+  final tp = TextPainter(
+    text: textSpanForElement(el),
+    textDirection: TextDirection.ltr,
+    textAlign: switch (el.align) {
+      TextAlignOption.center => TextAlign.center,
+      TextAlignOption.right => TextAlign.right,
+      _ => TextAlign.left,
+    },
+  )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+  final boxes = tp.getBoxesForSelection(
+    TextSelection(baseOffset: a, extentOffset: b),
+  );
+  tp.dispose();
+  return [for (final box in boxes) box.toRect().shift(el.rect.topLeft)];
+}
+
 /// The link URL at [localOffset] (relative to the box's top-left) within [el],
 /// or null if that point isn't on a link run. Uses the same layout the painter
 /// does, so it lines up with what's drawn.

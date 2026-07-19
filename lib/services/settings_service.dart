@@ -120,6 +120,61 @@ class SettingsService {
     await _persist();
   }
 
+  /// Read-aloud scope: when true the reader speaks only the first page of each
+  /// row (vertical pages only), skipping horizontal continuation pages.
+  /// Device-local; default OFF (read every page). Toggled by the reader bar's
+  /// scope selector.
+  bool readAloudMainColumnOnly = false;
+
+  Future<void> setReadAloudMainColumnOnly(bool value) async {
+    if (readAloudMainColumnOnly == value) return;
+    readAloudMainColumnOnly = value;
+    await _persist();
+  }
+
+  /// Chosen read-aloud voice (device-local; the engine's default when null).
+  String? ttsVoiceName;
+  String? ttsVoiceLocale;
+
+  Future<void> setTtsVoice(String name, String locale) async {
+    ttsVoiceName = name;
+    ttsVoiceLocale = locale;
+    await _persist();
+  }
+
+  /// Where read-aloud was last positioned in each canvas, so reopening the
+  /// reader resumes instead of restarting. Device-local (never synced — reading
+  /// position is per-device), capped like [_canvasViewports].
+  Map<String, dynamic> _readingPositions = {};
+  static const int _kMaxReadingPositions = 300;
+
+  ({String pageId, String? sourceId, int charStart})? readingPositionFor(
+      String canvasId) {
+    final v = _readingPositions[canvasId];
+    if (v is! Map) return null;
+    final page = v['pageId'];
+    if (page is! String) return null;
+    return (
+      pageId: page,
+      sourceId: v['sourceId'] as String?,
+      charStart: (v['charStart'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Future<void> saveReadingPosition(
+      String canvasId, String pageId, String? sourceId, int charStart) async {
+    _readingPositions.remove(canvasId);
+    _readingPositions[canvasId] = {
+      'pageId': pageId,
+      'sourceId': sourceId,
+      'charStart': charStart,
+    };
+    while (_readingPositions.length > _kMaxReadingPositions) {
+      _readingPositions.remove(_readingPositions.keys.first);
+    }
+    await _persist();
+  }
+
   /// Last-used kind for the Shapes tool (device-local).
   ShapeToolKind shapeToolKind = ShapeToolKind.rectangle;
 
@@ -360,6 +415,9 @@ class SettingsService {
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
+    readAloudMainColumnOnly = data['readAloudMainColumnOnly'] == true;
+    ttsVoiceName = data['ttsVoiceName'] as String?;
+    ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
     shapeToolKind = ShapeToolKind.values.firstWhere(
       (k) => k.name == data['shapeToolKind'],
       orElse: () => ShapeToolKind.rectangle,
@@ -403,6 +461,11 @@ class SettingsService {
     if (data['canvasViewports'] is Map<String, dynamic>) {
       _canvasViewports = Map<String, dynamic>.from(
         data['canvasViewports'] as Map,
+      );
+    }
+    if (data['readingPositions'] is Map<String, dynamic>) {
+      _readingPositions = Map<String, dynamic>.from(
+        data['readingPositions'] as Map,
       );
     }
     // Unified toolbar lists (current model). If absent, fall back to the
@@ -552,6 +615,7 @@ class SettingsService {
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
+        'readAloudMainColumnOnly': readAloudMainColumnOnly,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,
@@ -568,6 +632,9 @@ class SettingsService {
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'defaultNotebookId': defaultNotebookId,
         'canvasViewports': _canvasViewports,
+        'readingPositions': _readingPositions,
+        'ttsVoiceName': ttsVoiceName,
+        'ttsVoiceLocale': ttsVoiceLocale,
         'promotedToolbarMobile': promotedToolbarMobile,
         'promotedToolbarDesktop': promotedToolbarDesktop,
         'pinnedToolOptionPopovers': pinnedToolOptionPopovers.toList(),

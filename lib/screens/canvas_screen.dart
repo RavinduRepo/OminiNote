@@ -780,7 +780,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         final url = _urlAt(e.localPosition);
         if (url != null) {
           _openUrl(url);
-        } else {
+        } else if (!_maybeJumpRead(e.localPosition)) {
           _lassoTap(e.localPosition, e.kind);
         }
         return;
@@ -808,6 +808,12 @@ class _CanvasScreenState extends State<CanvasScreen>
       if (url != null) {
         if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
         _openUrl(url);
+        return;
+      }
+      // While reading aloud, a tap on text jumps the reader there (before the
+      // text tool would open the editor / the lasso would select).
+      if (_maybeJumpRead(e.localPosition)) {
+        if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
         return;
       }
       if (c.tool == CanvasTool.text) {
@@ -1022,6 +1028,26 @@ class _CanvasScreenState extends State<CanvasScreen>
   /// Hit-tests for an existing [TextElement] under [screenPos] — shared by
   /// [_handleTextTap] (edit vs. create) and nothing else; kept as its own
   /// function so the hit-test logic has one home.
+  /// While read-aloud is active, a tap on a typed text box jumps the reader to
+  /// the sentence under the finger (any non-inking tool — inking-tool taps draw).
+  /// Returns true if it consumed the tap.
+  bool _maybeJumpRead(Offset screenPos) {
+    final c = _controller!;
+    if (!c.readAloudActive.value) return false;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return false;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    // Typed text: precise per-sentence via the caret offset under the finger.
+    final el = _textElementAt(screenPos);
+    if (el != null) {
+      unawaited(c.jumpReadingToText(el.id, caretOffsetAt(el, local - el.rect.topLeft)));
+      return true;
+    }
+    // PDF (or any positioned) text: hit-test the tap against the line rects.
+    return c.jumpReadingAtPoint(pageLayout.pageId, local);
+  }
+
   TextElement? _textElementAt(Offset screenPos) {
     final c = _controller!;
     final canvasPos = c.screenToCanvas(screenPos);
@@ -1510,6 +1536,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Page settings',
                 onTap: _showPageSettings,
               ),
+            if (shown('read_aloud'))
+              ActionSheetItem(
+                icon: Icons.volume_up_outlined,
+                label: 'Read aloud',
+                onTap: _openReadAloud,
+              ),
             if (shown('shape_snap'))
               ActionSheetItem(
                 icon: SettingsService().shapeSnap
@@ -1566,6 +1598,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showAttachments();
           case 'page_settings':
             _showPageSettings();
+          case 'read_aloud':
+            _openReadAloud();
           case 'finger_draw':
             _toggleFingerDraw();
           case 'shape_snap':
@@ -1608,6 +1642,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             Icons.description_outlined,
             'Page settings',
           ),
+        if (shown('read_aloud'))
+          iconMenuItem('read_aloud', Icons.volume_up_outlined, 'Read aloud'),
         // Checkbox glyphs reflect toggle state, matching the mobile sheet.
         if (shown('shape_snap'))
           iconMenuItem(
@@ -2466,6 +2502,36 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (mounted) setState(() => _audioPlayerOpen = false);
   }
 
+  /// Starts read-aloud and shows the floating reader bar (its visibility is
+  /// driven by `controller.readAloudActive`, so no local flag is needed). Hints
+  /// when there's nothing to read, or when TTS isn't available (Linux without
+  /// espeak/spd-say installed).
+  Future<void> _openReadAloud() async {
+    final c = _controller;
+    if (c == null) return;
+    // Show the floating progress ring while the queue builds (PDF text
+    // extraction can take a moment); the reader opens paused — press play.
+    final progress = ProgressOverlay.show(context, 'Preparing read-aloud…');
+    int count;
+    try {
+      count = await c.prepareReadAloud();
+    } finally {
+      progress.close();
+    }
+    if (!mounted) return;
+    if (count == 0) {
+      _toast('No readable text on these pages');
+      return;
+    }
+    if (!c.tts.isSupported) {
+      await c.stopReadAloud();
+      _toast('Text-to-speech isn’t available — install espeak or spd-say');
+    }
+  }
+
+  /// Stops reading and hides the reader bar.
+  void _closeReadAloud() => _controller?.stopReadAloud();
+
   /// Starts (or resumes) playback of [rec], guarding against a not-yet-synced
   /// audio asset.
   Future<void> _playRecording(CanvasController c, AudioRecording rec) async {
@@ -2736,6 +2802,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         );
       case 'recordings':
         return tbBtn(Icons.graphic_eq, 'Recordings', _openAudioPlayer);
+      case 'read_aloud':
+        return tbBtn(Icons.volume_up_outlined, 'Read aloud', _openReadAloud);
       case 'split':
         // Only meaningful inside a workspace (split host); empty elsewhere.
         if (widget.onSplitRequested == null) return const SizedBox.shrink();
@@ -3078,6 +3146,15 @@ class _CanvasScreenState extends State<CanvasScreen>
     return KeyEventResult.ignored;
   }
 
+  /// Wraps a floating overlay card so pointer events over it — including the
+  /// gaps between its buttons — are absorbed instead of falling through to the
+  /// canvas behind. The card's own buttons still get their taps (they're hit
+  /// first as children); only the otherwise-transparent areas are caught. This
+  /// (plus the cards living outside the canvas `Listener`/`RawGestureDetector`)
+  /// is what stops a tap on the player from also acting on the page.
+  Widget _absorbTaps(Widget child) =>
+      Listener(behavior: HitTestBehavior.opaque, child: child);
+
   Widget _buildCanvasArea(CanvasController c, AppPalette palette) {
     return ClipRect(
       child: LayoutBuilder(
@@ -3086,104 +3163,139 @@ class _CanvasScreenState extends State<CanvasScreen>
           return Focus(
             focusNode: _canvasFocus,
             onKeyEvent: _onCanvasKey,
-            child: Listener(
-              onPointerDown: _onPointerDown,
-              onPointerMove: _onPointerMove,
-              onPointerUp: _onPointerUp,
-              onPointerCancel: _onPointerCancel,
-              onPointerSignal: _onPointerSignal,
-              behavior: HitTestBehavior.opaque,
-              child: RawGestureDetector(
-                gestures: {
-                  ScaleGestureRecognizer:
-                      GestureRecognizerFactoryWithHandlers<
-                        ScaleGestureRecognizer
-                      >(
-                        () => ScaleGestureRecognizer(
-                          supportedDevices: {
-                            PointerDeviceKind.touch,
-                            PointerDeviceKind.trackpad,
-                          },
-                        ),
-                        (r) => r
-                          ..onStart = _onScaleStart
-                          ..onUpdate = _onScaleUpdate
-                          ..onEnd = _onScaleEnd,
-                      ),
-                  // Touch double-tap = fit page width — but not in finger-draw
-                  // mode, where two quick taps are two ink dots, not a zoom.
-                  if (!SettingsService().fingerDraw)
-                    DoubleTapGestureRecognizer:
-                        GestureRecognizerFactoryWithHandlers<
-                          DoubleTapGestureRecognizer
-                        >(
-                          () => DoubleTapGestureRecognizer(
-                            supportedDevices: {PointerDeviceKind.touch},
-                          ),
-                          (r) => r..onDoubleTapDown = _onDoubleTapDown,
-                        ),
-                },
-                child: Stack(
-                  children: [
-                    SizedBox.expand(
-                      // Boundary lets "copy selection" capture the rendered
-                      // pixels for the OS clipboard.
-                      child: RepaintBoundary(
-                        key: _canvasBoundaryKey,
-                        child: CustomPaint(
-                          painter: CanvasPainter(
-                            controller: c,
-                            pageBorderColor: palette.border,
-                            accentColor: palette.accent,
-                            canvasTextColor: palette.textDim,
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (_textEdit != null) _buildTextEditOverlay(c),
-                    // Floating voice-recording bar (both normal + full screen,
-                    // since this area is shared). Overlaid, so recording never
-                    // shifts the canvas; the user keeps drawing while it runs.
-                    Positioned(
-                      top: 8,
-                      left: 0,
-                      right: 0,
-                      child: ValueListenableBuilder<bool>(
-                        valueListenable: c.isRecordingAudioNotifier,
-                        builder: (context, recording, _) => recording
-                            ? Align(
-                                alignment: Alignment.topCenter,
-                                child: _RecordingBar(
-                                  startedAt: c.audioRecordingStartedAt,
-                                  onStop: () => _stopAudioRecording(c),
-                                  onCancel: () => c.cancelAudioRecording(),
+            child: Stack(
+              children: [
+                // Canvas input + paint. The floating bars below are OUTSIDE this
+                // Listener/RawGestureDetector (they sit above it in this Stack),
+                // so a tap on a bar is absorbed by the bar and never falls through
+                // to the canvas or competes in its gesture arena — that arena
+                // competition (the scale recognizer) was stealing the audio
+                // player's button taps on touch devices.
+                SizedBox.expand(
+                  child: Listener(
+                    onPointerDown: _onPointerDown,
+                    onPointerMove: _onPointerMove,
+                    onPointerUp: _onPointerUp,
+                    onPointerCancel: _onPointerCancel,
+                    onPointerSignal: _onPointerSignal,
+                    behavior: HitTestBehavior.opaque,
+                    child: RawGestureDetector(
+                      gestures: {
+                        ScaleGestureRecognizer:
+                            GestureRecognizerFactoryWithHandlers<
+                              ScaleGestureRecognizer
+                            >(
+                              () => ScaleGestureRecognizer(
+                                supportedDevices: {
+                                  PointerDeviceKind.touch,
+                                  PointerDeviceKind.trackpad,
+                                },
+                              ),
+                              (r) => r
+                                ..onStart = _onScaleStart
+                                ..onUpdate = _onScaleUpdate
+                                ..onEnd = _onScaleEnd,
+                            ),
+                        // Touch double-tap = fit page width — but not in finger-
+                        // draw mode, where two quick taps are two ink dots.
+                        if (!SettingsService().fingerDraw)
+                          DoubleTapGestureRecognizer:
+                              GestureRecognizerFactoryWithHandlers<
+                                DoubleTapGestureRecognizer
+                              >(
+                                () => DoubleTapGestureRecognizer(
+                                  supportedDevices: {PointerDeviceKind.touch},
                                 ),
-                              )
-                            : const SizedBox.shrink(),
+                                (r) => r..onDoubleTapDown = _onDoubleTapDown,
+                              ),
+                      },
+                      child: Stack(
+                        children: [
+                          SizedBox.expand(
+                            // Boundary lets "copy selection" capture the rendered
+                            // pixels for the OS clipboard.
+                            child: RepaintBoundary(
+                              key: _canvasBoundaryKey,
+                              child: CustomPaint(
+                                painter: CanvasPainter(
+                                  controller: c,
+                                  pageBorderColor: palette.border,
+                                  accentColor: palette.accent,
+                                  canvasTextColor: palette.textDim,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (_textEdit != null) _buildTextEditOverlay(c),
+                        ],
                       ),
                     ),
-                    // Floating audio player (replaces the Recordings sheet).
-                    // Bottom-center so it clears the top recording bar and the
-                    // full-screen tool control at bottom-left.
-                    if (_audioPlayerOpen)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 12,
-                        child: Align(
-                          alignment: Alignment.bottomCenter,
-                          child: _AudioPlayerBar(
-                            controller: c,
-                            onPlay: (rec) => _playRecording(c, rec),
-                            onRename: (rec) => _renameRecording(c, rec),
-                            onDelete: (rec) => _deleteRecording(c, rec),
-                            onClose: _closeAudioPlayer,
-                          ),
+                  ),
+                ),
+                // Floating voice-recording bar (both normal + full screen, since
+                // this area is shared). Wrapped in an opaque Listener so taps on
+                // the whole card — including gaps between its buttons — are
+                // absorbed and never reach the canvas below.
+                Positioned(
+                  top: 8,
+                  left: 0,
+                  right: 0,
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: c.isRecordingAudioNotifier,
+                    builder: (context, recording, _) => recording
+                        ? Align(
+                            alignment: Alignment.topCenter,
+                            child: _absorbTaps(
+                              _RecordingBar(
+                                startedAt: c.audioRecordingStartedAt,
+                                onStop: () => _stopAudioRecording(c),
+                                onCancel: () => c.cancelAudioRecording(),
+                              ),
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+                // Floating audio player (replaces the Recordings sheet).
+                if (_audioPlayerOpen)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 12,
+                    child: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: _absorbTaps(
+                        _AudioPlayerBar(
+                          controller: c,
+                          onPlay: (rec) => _playRecording(c, rec),
+                          onRename: (rec) => _renameRecording(c, rec),
+                          onDelete: (rec) => _deleteRecording(c, rec),
+                          onClose: _closeAudioPlayer,
                         ),
                       ),
-                  ],
+                    ),
+                  ),
+                // Floating read-aloud (TTS) bar.
+                ValueListenableBuilder<bool>(
+                  valueListenable: c.readAloudActive,
+                  builder: (context, active, _) => active
+                      ? Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 12,
+                          child: Align(
+                            alignment: Alignment.bottomCenter,
+                            child: _absorbTaps(
+                              _ReaderBar(
+                                controller: c,
+                                onClose: _closeReadAloud,
+                              ),
+                            ),
+                          ),
+                        )
+                      : const SizedBox.shrink(),
                 ),
-              ),
+              ],
             ),
           );
         },
@@ -3751,6 +3863,330 @@ String _fmtDuration(Duration d) {
 /// play/pause, a cycling speed chip, and a close button. All controls read the
 /// controller's [AudioPlaybackService] notifiers, so it stays in sync whether
 /// playback was started here or elsewhere.
+/// Human-readable language name for a locale like "en-US" → "English (US)".
+/// Falls back to the raw language code for languages not in [_kLanguageNames],
+/// so an unknown code still groups sensibly rather than crashing.
+String _languageLabel(String locale) {
+  if (locale.isEmpty) return 'Other';
+  final parts = locale.replaceAll('_', '-').split('-');
+  final lang = parts.first.toLowerCase();
+  final region =
+      parts.length > 1 && parts[1].isNotEmpty ? parts[1].toUpperCase() : null;
+  final name = _kLanguageNames[lang] ?? lang.toUpperCase();
+  return region != null ? '$name ($region)' : name;
+}
+
+const Map<String, String> _kLanguageNames = {
+  'af': 'Afrikaans', 'ar': 'Arabic', 'bg': 'Bulgarian', 'bn': 'Bengali',
+  'ca': 'Catalan', 'cs': 'Czech', 'cy': 'Welsh', 'da': 'Danish',
+  'de': 'German', 'el': 'Greek', 'en': 'English', 'es': 'Spanish',
+  'et': 'Estonian', 'eu': 'Basque', 'fa': 'Persian', 'fi': 'Finnish',
+  'fil': 'Filipino', 'fr': 'French', 'ga': 'Irish', 'gl': 'Galician',
+  'gu': 'Gujarati', 'he': 'Hebrew', 'hi': 'Hindi', 'hr': 'Croatian',
+  'hu': 'Hungarian', 'id': 'Indonesian', 'is': 'Icelandic', 'it': 'Italian',
+  'ja': 'Japanese', 'jv': 'Javanese', 'km': 'Khmer', 'kn': 'Kannada',
+  'ko': 'Korean', 'lt': 'Lithuanian', 'lv': 'Latvian', 'ml': 'Malayalam',
+  'mr': 'Marathi', 'ms': 'Malay', 'my': 'Burmese', 'nb': 'Norwegian',
+  'ne': 'Nepali', 'nl': 'Dutch', 'no': 'Norwegian', 'pa': 'Punjabi',
+  'pl': 'Polish', 'pt': 'Portuguese', 'ro': 'Romanian', 'ru': 'Russian',
+  'si': 'Sinhala', 'sk': 'Slovak', 'sl': 'Slovenian', 'sq': 'Albanian',
+  'sr': 'Serbian', 'su': 'Sundanese', 'sv': 'Swedish', 'sw': 'Swahili',
+  'ta': 'Tamil', 'te': 'Telugu', 'th': 'Thai', 'tr': 'Turkish',
+  'uk': 'Ukrainian', 'ur': 'Urdu', 'vi': 'Vietnamese', 'zh': 'Chinese',
+};
+
+/// The floating read-aloud (text-to-speech) bar. Mirrors the visual language of
+/// [_AudioPlayerBar] but drives [TtsService] instead of file playback: a scope
+/// selector (all pages vs vertical pages only), prev/play-pause/next by
+/// sentence, a speed chip, and a progress counter.
+class _ReaderBar extends StatelessWidget {
+  final CanvasController controller;
+  final VoidCallback onClose;
+
+  const _ReaderBar({required this.controller, required this.onClose});
+
+  static const List<double> _speeds = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final tts = controller.tts;
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 340),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 8),
+          decoration: BoxDecoration(
+            color: palette.surface2,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: palette.border),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: AnimatedBuilder(
+            animation: Listenable.merge([
+              tts.speaking,
+              tts.paused,
+              tts.index,
+              tts.total,
+              tts.speed,
+              controller.readMainColumnOnly,
+            ]),
+            builder: (context, _) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _topRow(context, palette),
+                  _controlsRow(context, palette),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Lets the user pick a reading voice from the system's installed voices
+  /// (device-local, applied live). Silently does nothing on engines that expose
+  /// no selectable voices.
+  Future<void> _pickVoice(BuildContext context) async {
+    final voices = await controller.tts.availableVoices();
+    if (!context.mounted) return;
+    if (voices.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No selectable voices on this system')),
+      );
+      return;
+    }
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final currentName = SettingsService().ttsVoiceName;
+    // Group by language (locale) so the (often long) Android list is browsable;
+    // a search box filters by voice name, locale, or language name.
+    var query = '';
+    final chosen = await showModalBottomSheet<({String name, String locale})>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => cappedSheetBody(
+        context,
+        child: StatefulBuilder(
+          builder: (context, setSheetState) {
+            final q = query.trim().toLowerCase();
+            final filtered = [
+              for (final v in voices)
+                if (q.isEmpty ||
+                    v.name.toLowerCase().contains(q) ||
+                    v.locale.toLowerCase().contains(q) ||
+                    _languageLabel(v.locale).toLowerCase().contains(q))
+                  v
+            ];
+            // Group filtered voices by locale, sorted by language label.
+            final groups = <String, List<({String name, String locale})>>{};
+            for (final v in filtered) {
+              groups.putIfAbsent(v.locale, () => []).add(v);
+            }
+            final locales = groups.keys.toList()
+              ..sort((a, b) => _languageLabel(a).compareTo(_languageLabel(b)));
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                const _SheetLabel('Reading voice'),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                  child: TextField(
+                    decoration: InputDecoration(
+                      isDense: true,
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      hintText: 'Search voice or language',
+                      border: const OutlineInputBorder(),
+                    ),
+                    onChanged: (v) => setSheetState(() => query = v),
+                  ),
+                ),
+                if (filtered.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text('No matching voices',
+                        style: TextStyle(color: palette.textDim)),
+                  )
+                else
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final loc in locales) ...[
+                          Padding(
+                            padding:
+                                const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                            child: Text(
+                              _languageLabel(loc),
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: palette.accent,
+                              ),
+                            ),
+                          ),
+                          for (final v in groups[loc]!)
+                            ListTile(
+                              dense: true,
+                              leading: Icon(
+                                v.name == currentName
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_unchecked,
+                                size: 18,
+                              ),
+                              title: Text(v.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
+                              subtitle:
+                                  v.locale.isEmpty ? null : Text(v.locale),
+                              onTap: () => Navigator.pop(context, v),
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 8),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    if (chosen != null) {
+      await controller.tts.setVoice(chosen.name, chosen.locale);
+    }
+  }
+
+  // Title + voice + tiny scope selector + close.
+  Widget _topRow(BuildContext context, AppPalette palette) {
+    final mainOnly = controller.readMainColumnOnly.value;
+    return Row(
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 6),
+          child: Icon(Icons.volume_up_outlined, size: 18, color: palette.accent),
+        ),
+        const SizedBox(width: 8),
+        const Expanded(
+          child: Text(
+            'Read aloud',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontWeight: FontWeight.w600),
+          ),
+        ),
+        // Voice picker (uses the system's installed voices; hidden on engines
+        // that expose none, e.g. Linux espeak).
+        IconButton(
+          icon: Icon(Icons.record_voice_over_outlined,
+              size: 19, color: palette.textDim),
+          tooltip: 'Voice',
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _pickVoice(context),
+        ),
+        // The unobtrusive scope selector: toggles all-pages ⇄ vertical-only and
+        // restarts reading from the top with the new scope.
+        IconButton(
+          icon: Icon(
+            mainOnly ? Icons.view_day_outlined : Icons.view_column_outlined,
+            size: 20,
+            color: palette.textDim,
+          ),
+          tooltip: mainOnly
+              ? 'Reading vertical pages only — tap to include horizontal'
+              : 'Reading all pages — tap for vertical pages only',
+          visualDensity: VisualDensity.compact,
+          onPressed: () {
+            controller.readMainColumnOnly.value = !mainOnly;
+            controller.restartReadAloud();
+          },
+        ),
+        IconButton(
+          icon: Icon(Icons.close, size: 20, color: palette.textDim),
+          tooltip: 'Stop reading',
+          visualDensity: VisualDensity.compact,
+          onPressed: onClose,
+        ),
+      ],
+    );
+  }
+
+  // Prev / play-pause / next + speed chip + progress counter.
+  Widget _controlsRow(BuildContext context, AppPalette palette) {
+    final tts = controller.tts;
+    final speaking = tts.speaking.value;
+    final total = tts.total.value;
+    final pos = total == 0 ? 0 : (tts.index.value + 1).clamp(1, total);
+
+    void togglePlay() {
+      if (speaking) {
+        tts.pause();
+      } else {
+        tts.resume();
+      }
+    }
+
+    return Row(
+      children: [
+        IconButton(
+          icon: const Icon(Icons.skip_previous, size: 22),
+          tooltip: 'Previous sentence',
+          visualDensity: VisualDensity.compact,
+          onPressed: total == 0 ? null : () => tts.skip(-1),
+        ),
+        IconButton(
+          icon: Icon(speaking ? Icons.pause : Icons.play_arrow, size: 26),
+          tooltip: speaking ? 'Pause' : 'Play',
+          color: palette.accent,
+          onPressed: total == 0 ? null : togglePlay,
+        ),
+        IconButton(
+          icon: const Icon(Icons.skip_next, size: 22),
+          tooltip: 'Next sentence',
+          visualDensity: VisualDensity.compact,
+          onPressed: total == 0 ? null : () => tts.skip(1),
+        ),
+        const Spacer(),
+        Text(
+          total == 0 ? '—' : '$pos / $total',
+          style: TextStyle(fontSize: 11, color: palette.textDim),
+        ),
+        const SizedBox(width: 6),
+        // Cycling speed chip (matches the audio player).
+        InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () {
+            final i = _speeds.indexOf(tts.speed.value);
+            final next = _speeds[(i + 1) % _speeds.length];
+            tts.setSpeed(next);
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              '${tts.speed.value}×',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: palette.textDim,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _AudioPlayerBar extends StatelessWidget {
   final CanvasController controller;
 
