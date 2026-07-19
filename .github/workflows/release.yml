@@ -84,13 +84,17 @@ jobs:
           # newer libunwind8 build is already installed (pulled in by
           # another preinstalled repo) than the exact version libunwind-dev
           # pins, so apt reports "held broken packages" no matter what.
-          # We only need the gstreamer headers/.pc files for CMake's
-          # pkg_check_modules check (audioplayers_linux never actually
-          # links against libunwind), so fetch the .debs directly and
-          # force-install them, bypassing the solver.
+          # gstreamer-1.0.pc's own Requires: field lists libunwind + libdw
+          # (pkg-config resolves those even for a plain --cflags/--exists
+          # check, not just --static), so we need their .pc/headers too --
+          # not just gstreamer's. The actual shared libs (libunwind8,
+          # libdw1) are already present at a newer-but-ABI-compatible
+          # version, so only the headers are missing. Fetch every .deb
+          # directly and force-install with dpkg, bypassing apt's solver.
           cd /tmp
-          sudo apt-get download libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-          sudo dpkg -i --force-depends libgstreamer1.0-dev_*.deb libgstreamer-plugins-base1.0-dev_*.deb
+          sudo apt-get download libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libunwind-dev libdw-dev
+          sudo dpkg -i --force-depends libgstreamer1.0-dev_*.deb libgstreamer-plugins-base1.0-dev_*.deb \
+            libunwind-dev_*.deb libdw-dev_*.deb
           cd -
 
       - uses: subosito/flutter-action@v2
