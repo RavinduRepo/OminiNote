@@ -7,6 +7,10 @@ import 'package:flutter/material.dart';
 /// ~8-10 on small controls); this base + the `kRadius+N` offsets land there.
 const double kRadius = 10.0;
 
+/// Back-navigation glyph used in place of Material's default back arrow — a
+/// sleeker plain chevron ("<") across every app bar/back control in the app.
+const IconData kBackIcon = Icons.chevron_left;
+
 /// Custom color tokens that don't map cleanly onto Material's [ColorScheme].
 /// Read via `Theme.of(context).extension<AppPalette>()!`.
 @immutable

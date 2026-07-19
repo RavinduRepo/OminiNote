@@ -252,6 +252,14 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.section.name),
+        titleSpacing: 4,
+        leadingWidth: 40,
+        leading: IconButton(
+          padding: EdgeInsets.zero,
+          icon: const Icon(kBackIcon),
+          tooltip: 'Back',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         actions: [
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),

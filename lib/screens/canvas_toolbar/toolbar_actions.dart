@@ -46,7 +46,6 @@ const List<ToolbarActionSpec> kAddActionSpecs = [
 const List<ToolbarActionSpec> kOverflowActionSpecs = [
   ToolbarActionSpec('fullscreen', Icons.fullscreen, 'Full screen'),
   ToolbarActionSpec('toggle_toolbar', Icons.brush_outlined, 'Show/hide tools'),
-  ToolbarActionSpec('rename', Icons.edit_outlined, 'Rename'),
   ToolbarActionSpec('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
   ToolbarActionSpec('navigator', Icons.grid_view_outlined, 'Pages'),
   ToolbarActionSpec('bookmarks', Icons.bookmark_border, 'Bookmarks'),

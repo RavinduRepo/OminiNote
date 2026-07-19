@@ -9,7 +9,7 @@ import '../theme/app_theme.dart';
 /// gap **between rows** to make it its own row, or into a gap **within a row**
 /// to join that horizontal row. Tapping a page jumps to it; each page keeps its
 /// existing actions (duplicate, copy, delete) via its ⋮ menu.
-class PageOrganizer extends StatelessWidget {
+class PageOrganizer extends StatefulWidget {
   final CanvasController controller;
   final void Function(String pageId) onJump;
 
@@ -19,7 +19,26 @@ class PageOrganizer extends StatelessWidget {
     required this.onJump,
   });
 
+  @override
+  State<PageOrganizer> createState() => _PageOrganizerState();
+}
+
+class _PageOrganizerState extends State<PageOrganizer> {
   static const double _cellW = 118;
+
+  // A persistent controller (not one created per build) so the always-on
+  // scrollbar thumb can be drag-scrubbed straight to the bottom of a
+  // thousands-of-pages list — the default platform scrollbar is invisible on
+  // touch, which is exactly what made this unreachable on mobile.
+  final _scrollController = ScrollController();
+
+  CanvasController get controller => widget.controller;
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   // ── Drop handlers (operate on a fresh copy of the row structure) ──────────
 
@@ -56,6 +75,14 @@ class PageOrganizer extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Organize pages'),
+        titleSpacing: 4,
+        leadingWidth: 40,
+        leading: IconButton(
+          padding: EdgeInsets.zero,
+          icon: const Icon(kBackIcon),
+          tooltip: 'Back',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.undo),
@@ -69,31 +96,44 @@ class PageOrganizer extends StatelessWidget {
         builder: (context, _) {
           final palette = Theme.of(context).extension<AppPalette>()!;
           final rows = controller.pageRows;
-          return SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (var r = 0; r <= rows.length; r++) ...[
-                  _RowGap(
-                    palette: palette,
-                    onAccept: (pageId) => _dropAsNewRow(pageId, r),
-                  ),
-                  if (r < rows.length)
-                    _RowStrip(
-                      controller: controller,
+          // Explicit, always-visible, draggable thumb — the platform default
+          // (Scrollbar via ScrollConfiguration) only shows on desktop/web, so
+          // touch had no way to jump straight to the bottom of a
+          // thousands-of-pages list. Slightly thicker than Material's default
+          // (~8px) without turning it into its own UI element.
+          return Scrollbar(
+            controller: _scrollController,
+            thumbVisibility: true,
+            interactive: true,
+            thickness: 10,
+            radius: const Radius.circular(6),
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var r = 0; r <= rows.length; r++) ...[
+                    _RowGap(
                       palette: palette,
-                      cellWidth: _cellW,
-                      rowIndex: r,
-                      pageIds: rows[r],
-                      onJump: (pageId) {
-                        Navigator.pop(context);
-                        onJump(pageId);
-                      },
-                      onDropIntoRow: _dropIntoRow,
+                      onAccept: (pageId) => _dropAsNewRow(pageId, r),
                     ),
+                    if (r < rows.length)
+                      _RowStrip(
+                        controller: controller,
+                        palette: palette,
+                        cellWidth: _cellW,
+                        rowIndex: r,
+                        pageIds: rows[r],
+                        onJump: (pageId) {
+                          Navigator.pop(context);
+                          widget.onJump(pageId);
+                        },
+                        onDropIntoRow: _dropIntoRow,
+                      ),
+                  ],
                 ],
-              ],
+              ),
             ),
           );
         },

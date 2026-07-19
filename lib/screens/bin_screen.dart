@@ -140,9 +140,23 @@ class _BinScreenState extends State<BinScreen> {
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
     final items = _items;
+    final canPop = Navigator.of(context).canPop();
     return Scaffold(
       appBar: AppBar(
         title: const Text('Recycle bin'),
+        // See settings_screen.dart's identical comment: only tighten when a
+        // back chevron is actually showing (desktop, pushed); as a mobile tab
+        // root there's no leading, so keep the default spacing.
+        titleSpacing: canPop ? 4 : null,
+        leadingWidth: canPop ? 40 : null,
+        leading: canPop
+            ? IconButton(
+                padding: EdgeInsets.zero,
+                icon: const Icon(kBackIcon),
+                tooltip: 'Back',
+                onPressed: () => Navigator.of(context).pop(),
+              )
+            : null,
         actions: [
           if (items != null && items.isNotEmpty)
             IconButton(

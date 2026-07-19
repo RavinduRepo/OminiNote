@@ -114,10 +114,25 @@ class SettingsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final settings = SettingsService();
+    final canPop = Navigator.of(context).canPop();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
+        // Only tighten the title's left inset when a back chevron is actually
+        // showing (desktop, pushed) — as a tab root (mobile) there's no
+        // leading at all, so keep the default spacing that home_screen's
+        // Notebooks tab uses, or the title reads flush against the edge.
+        titleSpacing: canPop ? 4 : null,
+        leadingWidth: canPop ? 40 : null,
+        leading: canPop
+            ? IconButton(
+                padding: EdgeInsets.zero,
+                icon: const Icon(kBackIcon),
+                tooltip: 'Back',
+                onPressed: () => Navigator.of(context).pop(),
+              )
+            : null,
         actions: const [SyncStatusIcon(), SizedBox(width: 12)],
       ),
       body: Center(

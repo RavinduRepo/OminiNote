@@ -279,6 +279,15 @@ class _SearchScreenState extends State<_SearchScreen> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
+        leadingWidth: 40,
+        leading: Navigator.of(context).canPop()
+            ? IconButton(
+                padding: EdgeInsets.zero,
+                icon: const Icon(kBackIcon),
+                tooltip: 'Back',
+                onPressed: () => Navigator.of(context).pop(),
+              )
+            : null,
         title: Shortcuts(
           shortcuts: const {
             SingleActivator(LogicalKeyboardKey.arrowDown): _NextIntent(),

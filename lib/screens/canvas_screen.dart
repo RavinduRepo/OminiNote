@@ -110,6 +110,14 @@ class _CanvasScreenState extends State<CanvasScreen>
   CanvasController? _controller;
   bool _showToolbar = true;
 
+  // Tap-to-rename the canvas title shown in the app bar: tapping the name
+  // swaps it for an inline, auto-focused text field (widened via
+  // AnimatedContainer so a long name has room); losing focus (tap elsewhere)
+  // commits the edit. Replaces the old dialog-based "Rename" menu action.
+  bool _editingTitle = false;
+  TextEditingController? _titleController;
+  FocusNode? _titleFocusNode;
+
   // Full screen: hides the app bar + normal toolbar, replaced by a floating
   // exit button and a collapsed tool control (see _buildFloatingToolControl).
   bool _isFullScreen = false;
@@ -582,6 +590,8 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     _canvasFocus.dispose();
     _controller?.dispose(); // flushes pending saves
+    _titleFocusNode?.dispose();
+    _titleController?.dispose();
     super.dispose();
   }
 
@@ -1399,7 +1409,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     if (widget.onBack != null) {
       return IconButton(
-        icon: const BackButtonIcon(),
+        icon: const Icon(kBackIcon),
         tooltip: 'Back',
         onPressed: widget.onBack,
       );
@@ -1469,12 +1479,6 @@ class _CanvasScreenState extends State<CanvasScreen>
                 icon: _showToolbar ? Icons.expand_less : Icons.brush_outlined,
                 label: _showToolbar ? 'Hide tools' : 'Show tools',
                 onTap: () => setState(() => _showToolbar = !_showToolbar),
-              ),
-            if (shown('rename'))
-              ActionSheetItem(
-                icon: Icons.edit_outlined,
-                label: 'Rename',
-                onTap: _renameCanvas,
               ),
             if (shown('export'))
               ActionSheetItem(
@@ -1552,8 +1556,6 @@ class _CanvasScreenState extends State<CanvasScreen>
             _toggleFullScreen();
           case 'toggle_toolbar':
             setState(() => _showToolbar = !_showToolbar);
-          case 'rename':
-            _renameCanvas();
           case 'export':
             _exportPdf();
           case 'navigator':
@@ -1592,8 +1594,6 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showToolbar ? Icons.expand_less : Icons.brush_outlined,
             _showToolbar ? 'Hide tools' : 'Show tools',
           ),
-        if (shown('rename'))
-          iconMenuItem('rename', Icons.edit_outlined, 'Rename'),
         if (shown('export'))
           iconMenuItem('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
         if (shown('navigator'))
@@ -2547,37 +2547,39 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
   }
 
-  Future<void> _renameCanvas() async {
-    final controller = TextEditingController(text: widget.canvas.name);
-    controller.selection = TextSelection(
-      baseOffset: 0,
-      extentOffset: widget.canvas.name.length,
-    );
-    final name = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Rename'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textCapitalization: TextCapitalization.sentences,
-          decoration: const InputDecoration(hintText: 'Name'),
-          onSubmitted: (v) => Navigator.pop(context, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Rename'),
-          ),
-        ],
-      ),
-    );
-    if (name == null || name.isEmpty || !mounted) return;
+  void _startTitleEdit() {
+    if (_editingTitle) return;
+    final controller = TextEditingController(text: widget.canvas.name)
+      ..selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: widget.canvas.name.length,
+      );
+    final focusNode = FocusNode();
+    focusNode.addListener(() {
+      if (!focusNode.hasFocus) _commitTitleEdit();
+    });
+    setState(() {
+      _titleController = controller;
+      _titleFocusNode = focusNode;
+      _editingTitle = true;
+    });
+  }
+
+  Future<void> _commitTitleEdit() async {
+    if (!_editingTitle) return;
+    final name = _titleController?.text.trim() ?? '';
+    final controller = _titleController;
+    final focusNode = _titleFocusNode;
+    setState(() {
+      _editingTitle = false;
+      _titleController = null;
+      _titleFocusNode = null;
+    });
+    controller?.dispose();
+    focusNode?.dispose();
+    if (name.isEmpty || name == widget.canvas.name || !mounted) return;
     await _service.renameCanvas(widget.canvas, name);
+    if (!mounted) return;
     setState(() {}); // refresh the app-bar title
     widget.onCanvasRenamed?.call();
   }
@@ -2687,8 +2689,6 @@ class _CanvasScreenState extends State<CanvasScreen>
           _showToolbar ? 'Hide tools' : 'Show tools',
           () => setState(() => _showToolbar = !_showToolbar),
         );
-      case 'rename':
-        return tbBtn(Icons.edit_outlined, 'Rename', _renameCanvas);
       case 'export':
         return tbBtn(Icons.picture_as_pdf_outlined, 'Export PDF', _exportPdf);
       case 'navigator':
@@ -2746,6 +2746,52 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
   }
 
+  /// The canvas name shown in the app bar — tap to rename inline. Widens via
+  /// [AnimatedContainer] (long names get clipped by [displayWidth] normally,
+  /// but need room to type), auto-focuses a plain [TextField], and commits on
+  /// focus loss (tapping elsewhere). Replaces the old dialog-based rename.
+  Widget _buildCanvasTitle({
+    required double displayWidth,
+    required double editWidth,
+    required TextStyle style,
+  }) {
+    if (_editingTitle) {
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        width: editWidth,
+        child: TextField(
+          controller: _titleController,
+          focusNode: _titleFocusNode,
+          autofocus: true,
+          maxLines: 1,
+          style: style,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+            isDense: true,
+            border: UnderlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(vertical: 4),
+          ),
+          onSubmitted: (_) => _commitTitleEdit(),
+        ),
+      );
+    }
+    return GestureDetector(
+      onTap: _startTitleEdit,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        width: displayWidth,
+        child: Text(
+          widget.canvas.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        ),
+      ),
+    );
+  }
+
   /// Mobile top bar: like the desktop toolbar, the name is a fixed box on the
   /// left (always visible) and the controls live in a right-aligned,
   /// horizontally-scrollable row — so a long name never hides and promoted
@@ -2758,14 +2804,10 @@ class _CanvasScreenState extends State<CanvasScreen>
     final s = SettingsService();
     return Row(
       children: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 130),
-          child: Text(
-            widget.canvas.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
-          ),
+        _buildCanvasTitle(
+          displayWidth: 130,
+          editWidth: 220,
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
         ),
         const SizedBox(width: 4),
         Expanded(
@@ -2798,14 +2840,10 @@ class _CanvasScreenState extends State<CanvasScreen>
     // the row 50/50 with the Expanded tools, halving the tools' width.
     return Row(
       children: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 220),
-          child: Text(
-            widget.canvas.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-          ),
+        _buildCanvasTitle(
+          displayWidth: 220,
+          editWidth: 320,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
         ),
         const SizedBox(width: 12),
         // The tool cluster is STATIC except for each button's own scoped
@@ -2841,7 +2879,19 @@ class _CanvasScreenState extends State<CanvasScreen>
 
     if (c == null) {
       return Scaffold(
-        appBar: AppBar(title: Text(widget.canvas.name)),
+        appBar: AppBar(
+          title: Text(widget.canvas.name),
+          titleSpacing: widget.embedded ? null : 4,
+          leadingWidth: widget.embedded ? null : 40,
+          leading: widget.embedded
+              ? null
+              : IconButton(
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(kBackIcon),
+                  tooltip: 'Back',
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+        ),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
@@ -2896,10 +2946,18 @@ class _CanvasScreenState extends State<CanvasScreen>
       backgroundColor: palette.canvas,
       appBar: AppBar(
         titleSpacing: 0,
-        // Mobile keeps the automatic back button (pushed as its own route);
-        // desktop is embedded, no leading — unless a split pane supplies one.
-        leading: paneLeading,
-        automaticallyImplyLeading: mobile && paneLeading == null,
+        // Mobile keeps a back button (pushed as its own route), rendered as
+        // the sleeker chevron rather than Material's default arrow; desktop
+        // is embedded, no leading — unless a split pane supplies one.
+        leading: paneLeading ??
+            (mobile
+                ? IconButton(
+                    icon: const Icon(kBackIcon),
+                    tooltip: 'Back',
+                    onPressed: () => Navigator.of(context).pop(),
+                  )
+                : null),
+        automaticallyImplyLeading: false,
         title: null,
         // Both layouts render the whole toolbar in flexibleSpace (full width)
         // so the name stays fixed on the left and the controls scroll /

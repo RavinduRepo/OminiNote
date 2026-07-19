@@ -18,15 +18,12 @@ class NewNotebookTarget {
 
 /// Decides a new notebook's account (Phase 2 — no implicit default):
 /// * 0 accounts → local-only (nothing to sync to).
-/// * 1 account → that account, no prompt.
-/// * 2+ accounts → prompt (each account + Local-only).
+/// * 1+ accounts → always prompt (each account + Local-only), so the user
+///   explicitly chooses even with a single signed-in account.
 /// Returns null only if the user cancels the prompt.
 Future<NewNotebookTarget?> chooseNewNotebookAccount(BuildContext context) async {
   final accounts = AuthService().accounts.value;
   if (accounts.isEmpty) return const NewNotebookTarget(localOnly: true);
-  if (accounts.length == 1) {
-    return NewNotebookTarget(accountId: accounts.first.id);
-  }
   final selected = await showDialog<String>(
     context: context,
     builder: (context) => SimpleDialog(
