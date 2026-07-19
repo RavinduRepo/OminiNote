@@ -32,10 +32,14 @@ class CanvasPainter extends CustomPainter {
     required this.accentColor,
     required this.canvasTextColor,
   }) : super(
-          // Also repaint when the audio-sync playhead advances, so the ink glow
-          // tracks playback without notifying the rest of the widget tree.
-          repaint:
-              Listenable.merge([controller, controller.audioPlayheadNotifier]),
+          // Also repaint when the audio-sync playhead advances or the read-aloud
+          // highlight moves, so both track playback/reading without notifying the
+          // rest of the widget tree.
+          repaint: Listenable.merge([
+            controller,
+            controller.audioPlayheadNotifier,
+            controller.readAloudHighlightNotifier,
+          ]),
         );
 
   /// Set false during a picture recording when an image raster wasn't decoded
@@ -161,6 +165,19 @@ class CanvasPainter extends CustomPainter {
         if (strokeActiveAt(s.createdAt, playhead)) {
           _paintAudioGlow(canvas, s);
         }
+      }
+    }
+
+    // Read-along highlight: a soft marker behind the sentence being read.
+    // Page-local rects, so it sits inside this page's translate like the text.
+    final hl = controller.readAloudHighlightNotifier.value;
+    if (hl != null && hl.pageId == page.id) {
+      final paint = Paint()..color = accentColor.withValues(alpha: 0.24);
+      for (final r in hl.rects) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(r.inflate(1), Radius.circular(2 / controller.zoom)),
+          paint,
+        );
       }
     }
 

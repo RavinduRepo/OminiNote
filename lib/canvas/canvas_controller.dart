@@ -12,11 +12,14 @@ import '../services/audio_playback_service.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
+import '../services/pdf_text_extractor.dart';
 import '../services/render_cache.dart';
 import '../services/settings_service.dart';
 import '../services/sync/merge_engine.dart';
 import '../services/sync_service.dart';
+import '../services/tts_service.dart';
 import '../utils/ink_contrast.dart';
+import '../utils/readable_text.dart';
 import '../utils/url_text.dart';
 import 'canvas_layout.dart';
 import 'shape_recognizer.dart';
@@ -198,6 +201,33 @@ class CanvasController extends ChangeNotifier {
   }
 
   void jumpToPage(String pageId) => fitPageWidth(pageId);
+
+  /// Pans (keeping zoom) the minimum amount needed to bring [canvasRect] (in
+  /// canvas coords) inside the viewport with a small [margin]. A no-op when it's
+  /// already visible — so read-aloud page-follow never jitters a visible page.
+  void ensureCanvasRectVisible(Rect canvasRect, {double margin = 48}) {
+    if (screenSize.isEmpty) return;
+    final tl = canvasToScreen(canvasRect.topLeft);
+    final br = canvasToScreen(canvasRect.bottomRight);
+    double dx = 0, dy = 0;
+    if (tl.dy < margin) {
+      dy = margin - tl.dy;
+    } else if (br.dy > screenSize.height - margin) {
+      dy = (screenSize.height - margin) - br.dy;
+      if (tl.dy + dy < margin) dy = margin - tl.dy; // keep the top visible
+    }
+    if (tl.dx < margin) {
+      dx = margin - tl.dx;
+    } else if (br.dx > screenSize.width - margin) {
+      dx = (screenSize.width - margin) - br.dx;
+      if (tl.dx + dx < margin) dx = margin - tl.dx;
+    }
+    if (dx == 0 && dy == 0) return;
+    pan = pan + Offset(dx, dy);
+    stopScrollAnimation();
+    _clampPan();
+    notifyListeners();
+  }
 
   // ── Smooth scrolling (ticker-driven) ─────────────────────────────────
   //
@@ -3773,6 +3803,222 @@ class CanvasController extends ChangeNotifier {
     audioPlayheadNotifier.value = rec?.startedAt.add(p.position.value);
   }
 
+  // ── Read-aloud (text-to-speech over typed + PDF text) ─────────────────
+
+  PdfTextCache? _pdfTextCache;
+  PdfTextCache get _pdfText => _pdfTextCache ??= PdfTextCache(assetFileOf);
+
+  TtsService? _tts;
+
+  /// The queue currently loaded into [tts], kept so a tap on a text box can be
+  /// mapped back to its sentence index (tap-to-jump) and the current unit can be
+  /// resolved for the read-along highlight.
+  List<ReadingUnit> _readingUnits = const [];
+
+  /// Lazily-created text-to-speech service (created on first read so canvases
+  /// that never use read-aloud don't touch the engine). Wires the read-along
+  /// highlight to the sentence position on first creation.
+  TtsService get tts {
+    if (_tts == null) {
+      final t = TtsService();
+      t.index.addListener(_updateReadHighlight);
+      t.speaking.addListener(_updateReadHighlight);
+      _tts = t;
+    }
+    return _tts!;
+  }
+
+  /// Whether read-aloud is currently active (playing or paused) on this canvas —
+  /// gates the floating reader bar.
+  final ValueNotifier<bool> readAloudActive = ValueNotifier(false);
+
+  /// The page + page-local rects of the sentence currently being read, or null
+  /// when nothing is (or the current unit has no on-canvas position, e.g. a
+  /// whole-page PDF span). Drives the painter's read-along highlight, merged
+  /// into its repaint listenable so it repaints only the canvas.
+  final ValueNotifier<({String pageId, List<Rect> rects})?>
+      readAloudHighlightNotifier = ValueNotifier(null);
+
+  /// Read scope: when true only the first page of each row is read (vertical
+  /// pages only); otherwise every page is read row-major (horizontals included).
+  /// Persisted device-local so the "tiny selector" remembers the choice.
+  final ValueNotifier<bool> readMainColumnOnly =
+      ValueNotifier(SettingsService().readAloudMainColumnOnly);
+
+  /// The ordered text sources feeding read-aloud. Typed text today, imported-PDF
+  /// text today; a future image/handwriting OCR source is added to this one list
+  /// and everything downstream (ordering, sentence-splitting, the reader bar)
+  /// works unchanged.
+  List<PageTextSource> get _textSources =>
+      [const TypedTextSource(), PdfPageTextSource(_pdfText)];
+
+  /// Builds the flat, in-order list of sentences to read for the given scope.
+  Future<List<ReadingUnit>> buildReadingUnits(
+      {required bool mainColumnOnly}) async {
+    final units = <ReadingUnit>[];
+    for (final pageId
+        in readingOrderPageIds(canvas, mainColumnOnly: mainColumnOnly)) {
+      final page = pages[pageId];
+      if (page == null) continue;
+      final spans = <ReadableSpan>[];
+      for (final source in _textSources) {
+        spans.addAll(await source.spansFor(page));
+      }
+      units.addAll(readingUnitsForPage(pageId, orderSpansForReading(spans)));
+    }
+    return units;
+  }
+
+  /// Starts reading the canvas aloud with the current [readMainColumnOnly]
+  /// scope. Returns the number of sentences queued (0 → nothing readable, and
+  /// the caller can hint the user).
+  /// Builds the queue and **opens the reader paused at the resume position** —
+  /// it does not start speaking (the user presses play). Returns the sentence
+  /// count (0 → nothing readable, and the caller can hint the user). The caller
+  /// shows a progress ring while this runs (PDF extraction can take a moment).
+  Future<int> prepareReadAloud() async {
+    final units =
+        await buildReadingUnits(mainColumnOnly: readMainColumnOnly.value);
+    if (units.isEmpty) return 0;
+    _readingUnits = units;
+    readAloudActive.value = true;
+    await tts.load(units, startIndex: _resumeIndex(units));
+    return units.length;
+  }
+
+  /// The queue index to resume at from the saved reading position — an exact
+  /// match on page + source + sentence start, else the first sentence on that
+  /// page, else the top.
+  int _resumeIndex(List<ReadingUnit> units) {
+    final pos = SettingsService().readingPositionFor(canvas.id);
+    if (pos == null) return 0;
+    var pageFallback = -1;
+    for (var i = 0; i < units.length; i++) {
+      final u = units[i];
+      if (u.pageId != pos.pageId) continue;
+      if (pageFallback < 0) pageFallback = i;
+      if (u.sourceId == pos.sourceId && u.charStart == pos.charStart) return i;
+    }
+    return pageFallback < 0 ? 0 : pageFallback;
+  }
+
+  void _saveReadingPosition() {
+    final u = _tts?.current;
+    if (u != null) {
+      SettingsService()
+          .saveReadingPosition(canvas.id, u.pageId, u.sourceId, u.charStart);
+    }
+  }
+
+  /// Tap-to-jump: resolves a tap on typed text (element [elementId], character
+  /// [offset] within it) to the sentence that covers it and reads from there.
+  /// No-op if the reader isn't loaded or that text isn't in the queue.
+  Future<bool> jumpReadingToText(String elementId, int offset) async {
+    if (_readingUnits.isEmpty) return false;
+    var idx = -1;
+    for (var i = 0; i < _readingUnits.length; i++) {
+      final u = _readingUnits[i];
+      if (u.sourceId != elementId) continue;
+      if (idx < 0) idx = i; // first sentence of this box, as a fallback
+      if (offset >= u.charStart && offset < u.charEnd) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return false;
+    await tts.jumpTo(idx);
+    return true;
+  }
+
+  /// Tap-to-jump for PDF (and any positioned) text: resolves a page-local point
+  /// to the reading unit whose highlight rects (or bounds) contain it and reads
+  /// from there. Fires the jump and reports synchronously whether it hit.
+  bool jumpReadingAtPoint(String pageId, Offset local) {
+    for (var i = 0; i < _readingUnits.length; i++) {
+      final u = _readingUnits[i];
+      if (u.pageId != pageId) continue;
+      final hit = u.rects.isNotEmpty
+          ? u.rects.any((r) => r.contains(local))
+          : (u.bounds?.contains(local) ?? false);
+      if (hit) {
+        unawaited(tts.jumpTo(i));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Recomputes the read-along highlight (and keeps the read location in view)
+  /// from the current sentence. Runs on every [tts] index/speaking change.
+  void _updateReadHighlight() {
+    final t = _tts;
+    if (t == null || !t.speaking.value) {
+      readAloudHighlightNotifier.value = null;
+      return;
+    }
+    final unit = t.current;
+    if (unit == null) {
+      readAloudHighlightNotifier.value = null;
+      return;
+    }
+    final page = pages[unit.pageId];
+    var rects = const <Rect>[];
+    if (page != null && unit.sourceId != null) {
+      for (final el in page.objects) {
+        if (el.id == unit.sourceId && el is TextElement) {
+          rects = selectionRectsForElement(el, unit.charStart, unit.charEnd);
+          break;
+        }
+      }
+    }
+    // Typed text resolves rects from its element; PDF text carries precomputed
+    // per-line rects on the unit.
+    if (rects.isEmpty) rects = unit.rects;
+    readAloudHighlightNotifier.value = (pageId: unit.pageId, rects: rects);
+    _followReading(unit, rects);
+  }
+
+  /// Gently brings the sentence being read into view — but only if it's off
+  /// screen (so it doesn't fight the user or jitter within a visible page).
+  void _followReading(ReadingUnit unit, List<Rect> rects) {
+    final l = layout.layoutOf(unit.pageId);
+    if (l == null) return;
+    final Rect target = rects.isNotEmpty
+        ? rects.first.shift(l.rect.topLeft)
+        : Rect.fromLTWH(
+            l.rect.left, l.rect.top, l.rect.width, math.min(l.rect.height, 220));
+    ensureCanvasRectVisible(target);
+  }
+
+  /// Re-reads from the top with the (possibly just-changed) scope. Used when the
+  /// user flips the scope selector while the reader bar is open; keeps playing if
+  /// it was already playing.
+  Future<int> restartReadAloud() async {
+    SettingsService().setReadAloudMainColumnOnly(readMainColumnOnly.value);
+    final wasPlaying = _tts?.speaking.value ?? false;
+    final units =
+        await buildReadingUnits(mainColumnOnly: readMainColumnOnly.value);
+    if (units.isEmpty) {
+      await stopReadAloud();
+      return 0;
+    }
+    _readingUnits = units;
+    readAloudActive.value = true;
+    await tts.load(units);
+    if (wasPlaying) await tts.resume();
+    return units.length;
+  }
+
+  /// Stops reading and hides the reader bar, saving the reading position so a
+  /// later reopen resumes here.
+  Future<void> stopReadAloud() async {
+    _saveReadingPosition();
+    readAloudActive.value = false;
+    readAloudHighlightNotifier.value = null;
+    _readingUnits = const [];
+    await _tts?.stop();
+  }
+
   bool get isRecordingAudio => _recorder?.isRecording ?? false;
 
   /// Wall-clock start of the in-progress recording (for the UI elapsed timer),
@@ -4091,6 +4337,9 @@ class CanvasController extends ChangeNotifier {
     _saveTimer?.cancel();
     unawaited(_recorder?.dispose());
     unawaited(_playback?.dispose());
+    _saveReadingPosition();
+    unawaited(_tts?.dispose());
+    _pdfTextCache?.clear();
     flushSaves();
     renderCache.dispose();
     pictureCache.dispose();
@@ -4102,6 +4351,9 @@ class CanvasController extends ChangeNotifier {
     clipboardNotifier.dispose();
     isRecordingAudioNotifier.dispose();
     audioPlayheadNotifier.dispose();
+    readAloudActive.dispose();
+    readMainColumnOnly.dispose();
+    readAloudHighlightNotifier.dispose();
     chromeContentTick.dispose();
     super.dispose();
   }
