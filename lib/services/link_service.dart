@@ -139,6 +139,77 @@ class LinkService {
     await _persist();
   }
 
+  /// Rewrites the record that links [elementId]'s side to [oldTarget] so it
+  /// points at [newTarget] instead — keeping the record id, the element side
+  /// (all its ids, e.g. a lasso selection + its marker) and the label. Rev
+  /// bump so the rewrite wins LWW. Returns false when no record matched
+  /// (caller then falls back to [addLink]).
+  Future<bool> retargetByElement(
+    String elementId,
+    LinkEndpoint oldTarget,
+    LinkEndpoint newTarget,
+  ) async {
+    await _ensureLoaded();
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if (r.a.elementIds.contains(elementId) && r.b.sameAs(oldTarget)) {
+        r.b = newTarget;
+      } else if (r.b.elementIds.contains(elementId) && r.a.sameAs(oldTarget)) {
+        r.a = newTarget;
+      } else {
+        continue;
+      }
+      r.bumpRev(SettingsService().deviceId);
+      await _persist();
+      return true;
+    }
+    return false;
+  }
+
+  /// Tombstones the record linking [elementId]'s side to [target], if any.
+  Future<void> removeByElementTo(String elementId, LinkEndpoint target) async {
+    await _ensureLoaded();
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if ((r.a.elementIds.contains(elementId) && r.b.sameAs(target)) ||
+          (r.b.elementIds.contains(elementId) && r.a.sameAs(target))) {
+        r.deletedAt = DateTime.now();
+        r.bumpRev(SettingsService().deviceId);
+        await _persist();
+        return;
+      }
+    }
+  }
+
+  /// Updates a record from the Connections sheet's ✎: a new "other side"
+  /// target and/or a custom [label]. [otherIsA] says which side is the one
+  /// being retargeted (the side opposite the sheet's own item).
+  Future<void> updateLink(
+    String id, {
+    required bool otherIsA,
+    LinkEndpoint? newOther,
+    String? label,
+    bool clearLabel = false,
+  }) async {
+    await _ensureLoaded();
+    final r = _records[id];
+    if (r == null || r.deletedAt != null) return;
+    if (newOther != null) {
+      if (otherIsA) {
+        r.a = newOther;
+      } else {
+        r.b = newOther;
+      }
+    }
+    if (clearLabel) {
+      r.label = null;
+    } else if (label != null && label.trim().isNotEmpty) {
+      r.label = label;
+    }
+    r.bumpRev(SettingsService().deviceId);
+    await _persist();
+  }
+
   /// Tombstones the connection between exactly [a] and [b] (either order),
   /// if one is alive — used when a link run is retargeted or de-linked.
   Future<void> removeLinkBetween(LinkEndpoint a, LinkEndpoint b) async {

@@ -6,6 +6,7 @@ import 'package:omininote/canvas/text_measure.dart';
 import 'package:omininote/models/canvas.dart';
 import 'package:omininote/models/canvas_page.dart';
 import 'package:omininote/models/element.dart';
+import 'package:omininote/models/link.dart';
 import 'package:omininote/services/settings_service.dart';
 
 TextRun _run(String text, {String? link, double size = 16, bool bold = false}) =>
@@ -152,6 +153,48 @@ void main() {
 
     test('no spots for link-free elements', () {
       expect(linkPencilSpots(_el([_run('plain')])), isEmpty);
+    });
+  });
+
+  group('external link endpoints (unified Connections list)', () {
+    test('sideFrom detects internal URIs, external URLs, and garbage', () {
+      final internal = LinkEndpoint.sideFrom('omninote://link/n/nb/s/s1');
+      expect(internal, isNotNull);
+      expect(internal!.kind, LinkTargetKind.section);
+
+      final ext = LinkEndpoint.sideFrom('https://example.com/a?b=1');
+      expect(ext, isNotNull);
+      expect(ext!.kind, LinkTargetKind.external);
+      expect(ext.externalUrl, 'https://example.com/a?b=1');
+      expect(ext.toUri(), 'https://example.com/a?b=1'); // raw URL round-trip
+      expect(ext.leafId, 'https://example.com/a?b=1');
+
+      expect(LinkEndpoint.sideFrom('just some words'), isNull);
+    });
+
+    test('sameAs separates external from internal and URL from URL', () {
+      const a = LinkEndpoint.external('https://a.com');
+      const b = LinkEndpoint.external('https://b.com');
+      const c = LinkEndpoint(notebookId: 'nb');
+      expect(a.sameAs(const LinkEndpoint.external('https://a.com')), isTrue);
+      expect(a.sameAs(b), isFalse);
+      expect(a.sameAs(c), isFalse);
+      expect(c.sameAs(a), isFalse);
+    });
+
+    test('a record with an external side survives its JSON round-trip', () {
+      final rec = LinkRecord(
+        id: 'l1',
+        deviceId: 'test_device',
+        a: const LinkEndpoint(
+            notebookId: 'nb', sectionId: 's1', canvasId: 'c1'),
+        b: const LinkEndpoint.external('https://docs.flutter.dev'),
+        bName: 'Flutter docs',
+      );
+      final back = LinkRecord.tryFromJson(rec.toJson())!;
+      expect(back.b.kind, LinkTargetKind.external);
+      expect(back.b.externalUrl, 'https://docs.flutter.dev');
+      expect(back.a.sameAs(rec.a), isTrue);
     });
   });
 

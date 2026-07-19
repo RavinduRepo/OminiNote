@@ -2744,7 +2744,13 @@ class CanvasController extends ChangeNotifier {
   /// [title]. A trailing non-link space keeps the box grabbable/editable
   /// (same affordance linkifyRuns adds to all-link boxes). Returns the
   /// created element so the caller can register the connection.
-  TextElement? insertLinkItem(String pageId, String uri, String title) {
+  ///
+  /// [nearBounds] (page-local) anchors the box just under that rect instead
+  /// of the page centre — the visible marker a linked lasso selection gets,
+  /// so the link is *seen* next to the ink it belongs to (and, being an
+  /// ordinary text element, can be moved out of the way).
+  TextElement? insertLinkItem(String pageId, String uri, String title,
+      {Rect? nearBounds}) {
     final page = pages[pageId];
     if (page == null) return null;
     TextRun run(String text, {String? link}) => TextRun(
@@ -2766,9 +2772,21 @@ class CanvasController extends ChangeNotifier {
       color: textColor,
     );
     el.rect = autoTextRect(el, page.width * 0.85);
-    final shift = Offset(page.width / 2, page.height / 2) - el.rect.center;
+    final Offset shift;
+    if (nearBounds != null) {
+      shift = Offset(nearBounds.left, nearBounds.bottom + 4) - el.rect.topLeft;
+    } else {
+      shift = Offset(page.width / 2, page.height / 2) - el.rect.center;
+    }
     el.translate(shift.dx, shift.dy);
     if (el.rect.top < 16) el.translate(0, 16 - el.rect.top);
+    // Clamp onto the page (a marker under a selection near the bottom/right
+    // edge must stay visible).
+    if (el.rect.bottom > page.height) {
+      el.translate(0, page.height - el.rect.bottom);
+    }
+    if (el.rect.right > page.width) el.translate(page.width - el.rect.right, 0);
+    if (el.rect.left < 0) el.translate(-el.rect.left, 0);
     _doOp(_addElementsOp('Paste link', pageId, [el]));
     return el;
   }

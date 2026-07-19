@@ -40,6 +40,17 @@ Future<ResolvedLink> resolveEndpoint(
         kind: kind,
       );
 
+  // External URLs are always "alive"; opening them is the caller's job
+  // (no in-app reveal target).
+  if (kind == LinkTargetKind.external) {
+    return ResolvedLink(
+      alive: true,
+      title: fallbackName.isNotEmpty ? fallbackName : e.externalUrl!,
+      path: e.externalUrl!,
+      kind: kind,
+    );
+  }
+
   final service = NotebookService();
   final nb = await service.getNotebook(e.notebookId);
   if (nb == null) return dead();
@@ -184,6 +195,7 @@ Future<ResolvedLink> resolveEndpoint(
     case LinkTargetKind.notebook:
     case LinkTargetKind.folder:
     case LinkTargetKind.section:
+    case LinkTargetKind.external:
       return dead(); // unreachable — handled above
   }
 }

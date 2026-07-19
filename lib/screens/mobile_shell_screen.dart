@@ -96,10 +96,48 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   /// covers this shell on the root navigator — pop back to the shell first so
   /// the reveal is actually visible (and canvases don't stack up). Same-canvas
   /// targets never reach here (the Connections sheet jumps in place instead).
+  ///
+  /// Mobile design rule ("stop one level up"): a link to a *container*
+  /// (notebook / folder / section / canvas) lands on its **parent list** with
+  /// the target briefly glowing, instead of auto-opening the target — opening
+  /// it would lose the "this is what was linked" context. Targets *inside* a
+  /// canvas (page/element/bookmark — always carrying a pageId) still open the
+  /// canvas: there the landing flash/page jump is the indication. Desktop
+  /// keeps full reveal (everything is visible at once there).
   void _revealFromLink(SearchResult r) {
     Navigator.of(context, rootNavigator: true)
         .popUntil((route) => route.isFirst);
-    _revealSearchResult(r);
+    if (r.pageId != null) {
+      _revealSearchResult(r); // in-canvas target: open + flash/jump
+      return;
+    }
+    _pageController.jumpToPage(_kNotebooks);
+    setState(() => _index = _kNotebooks);
+    final nav = _navKeys[_kNotebooks].currentState;
+    if (nav == null) return;
+    nav.popUntil((route) => route.isFirst);
+
+    if (r.kind == SearchKind.notebook) {
+      HomeScreen.glowRequest.value = r.notebook.id; // glow the home card
+      return;
+    }
+    // Notebook-level folder or section: notebook screen, target glowing.
+    if (r.section == null || r.kind == SearchKind.section) {
+      nav.push(slideRoute(NotebookScreen(
+        notebook: r.notebook,
+        glowId: r.kind == SearchKind.superSection ? r.folderId : r.section?.id,
+      )));
+      return;
+    }
+    // Canvas or canvas-tree folder: drill to the section's canvas list,
+    // target glowing — the canvas itself is NOT opened.
+    nav.push(slideRoute(
+      NotebookScreen(notebook: r.notebook, glowId: r.section!.id),
+    ));
+    nav.push(slideRoute(SectionScreen(
+      section: r.section!,
+      glowId: r.kind == SearchKind.superSection ? r.folderId : r.canvas?.id,
+    )));
   }
 
   @override

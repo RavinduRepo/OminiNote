@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../models/link.dart';
 import '../models/notebook.dart';
@@ -20,6 +22,12 @@ import 'notebook_screen.dart';
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
+  /// One-shot glow request: the mobile shell sets a notebook id here when an
+  /// internal link targets a notebook — the home list (this tab root, kept
+  /// alive) briefly glows that card instead of auto-opening the notebook
+  /// (the mobile "stop one level up" link-navigation rule).
+  static final ValueNotifier<String?> glowRequest = ValueNotifier(null);
+
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -32,17 +40,35 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _removingId;
   static const _kRemoveAnim = Duration(milliseconds: 280);
 
+  // Card briefly highlighted after arriving via an internal link.
+  String? _glowId;
+  Timer? _glowTimer;
+
   @override
   void initState() {
     super.initState();
     _loadNotebooks();
     SyncService().dataVersion.addListener(_onSyncData);
+    HomeScreen.glowRequest.addListener(_onGlowRequest);
   }
 
   @override
   void dispose() {
+    HomeScreen.glowRequest.removeListener(_onGlowRequest);
+    _glowTimer?.cancel();
     SyncService().dataVersion.removeListener(_onSyncData);
     super.dispose();
+  }
+
+  void _onGlowRequest() {
+    final id = HomeScreen.glowRequest.value;
+    if (id == null || !mounted) return;
+    HomeScreen.glowRequest.value = null; // consumed
+    _glowTimer?.cancel();
+    setState(() => _glowId = id);
+    _glowTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted) setState(() => _glowId = null);
+    });
   }
 
   void _onSyncData() {
@@ -250,7 +276,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                     // reorder — no visible drag handle.
                                     child: ReorderableDelayedDragStartListener(
                                       index: index,
-                            child: _NotebookRow(
+                            child: Stack(children: [
+                              _NotebookRow(
                               notebook: notebook,
                               onTap: () {
                                 Navigator.push(
@@ -278,7 +305,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                   notebook.id,
                               onSetDefault: () =>
                                   _toggleDefaultNotebook(notebook),
-                            ),
+                              ),
+                              if (notebook.id == _glowId)
+                                Positioned.fill(
+                                  child: IgnorePointer(
+                                    child: _glowOverlay(context, notebook.id),
+                                  ),
+                                ),
+                            ]),
                           ),
                         ),
                       ),
@@ -286,6 +320,28 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                     ),
             ),
+    );
+  }
+
+  /// A fading accent wash + border briefly highlighting the card an internal
+  /// link led to (same look as the tree rows' reveal glow).
+  Widget _glowOverlay(BuildContext context, String id) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('glow_$id'),
+      tween: Tween(begin: 1, end: 0),
+      duration: const Duration(milliseconds: 1600),
+      curve: Curves.easeOut,
+      builder: (context, t, _) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: palette.accent.withValues(alpha: 0.28 * t),
+          borderRadius: BorderRadius.circular(kRadius),
+          border: Border.all(
+            color: palette.accent.withValues(alpha: 0.7 * t),
+            width: 1.5,
+          ),
+        ),
+      ),
     );
   }
 

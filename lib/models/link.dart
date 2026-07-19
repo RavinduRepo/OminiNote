@@ -18,6 +18,7 @@ enum LinkTargetKind {
   page,
   element, // one or more lasso-selected elements on a page
   bookmark,
+  external, // an outside URL — Connections list external links distinctly
 }
 
 /// An address inside the store: notebook, then optionally deeper. The deepest
@@ -38,6 +39,11 @@ class LinkEndpoint {
   /// [sectionId] is null, else in that section's canvas tree.
   final String? folderId;
 
+  /// An outside URL — external links live in the same Connections registry
+  /// (one unified links list), just resolving/opening differently. When set,
+  /// every internal field is empty.
+  final String? externalUrl;
+
   const LinkEndpoint({
     required this.notebookId,
     this.sectionId,
@@ -46,9 +52,14 @@ class LinkEndpoint {
     this.elementIds = const [],
     this.bookmarkId,
     this.folderId,
+    this.externalUrl,
   });
 
+  const LinkEndpoint.external(String url)
+      : this(notebookId: '', externalUrl: url);
+
   LinkTargetKind get kind {
+    if (externalUrl != null) return LinkTargetKind.external;
     if (bookmarkId != null) return LinkTargetKind.bookmark;
     if (elementIds.isNotEmpty) return LinkTargetKind.element;
     if (pageId != null) return LinkTargetKind.page;
@@ -62,6 +73,7 @@ class LinkEndpoint {
   /// element endpoint this is the *first* element id — use [touchesId] for
   /// membership checks.
   String get leafId {
+    if (externalUrl != null) return externalUrl!;
     if (bookmarkId != null) return bookmarkId!;
     if (elementIds.isNotEmpty) return elementIds.first;
     if (pageId != null) return pageId!;
@@ -88,6 +100,7 @@ class LinkEndpoint {
   /// `[/e/id1,id2…] [/b/bookmark]` — `f` binds to the notebook tree when it
   /// appears before `s`, to the canvas tree after it.
   String toUri() {
+    if (externalUrl != null) return externalUrl!;
     final b = StringBuffer('omninote://link/n/$notebookId');
     if (folderId != null && sectionId == null) b.write('/f/$folderId');
     if (sectionId != null) b.write('/s/$sectionId');
@@ -144,8 +157,21 @@ class LinkEndpoint {
     );
   }
 
+  /// A record side from its stored/pasted string: an internal endpoint when
+  /// it parses, an external one when it's URL-shaped, else null.
+  static LinkEndpoint? sideFrom(String s) {
+    final internal = tryParse(s);
+    if (internal != null) return internal;
+    final t = s.trim();
+    if (t.startsWith('http://') || t.startsWith('https://')) {
+      return LinkEndpoint.external(t);
+    }
+    return null;
+  }
+
   /// Structural equality on the full id path (element order-insensitive).
   bool sameAs(LinkEndpoint other) =>
+      externalUrl == other.externalUrl &&
       notebookId == other.notebookId &&
       sectionId == other.sectionId &&
       canvasId == other.canvasId &&
@@ -168,10 +194,11 @@ class LinkRecord {
   DateTime? deletedAt;
 
   /// Where the link was placed (the item whose Connections "+" created it).
-  final LinkEndpoint a;
+  /// Mutable so a ✎ retarget rewrites the side in place (rev bump → LWW).
+  LinkEndpoint a;
 
-  /// What it points at (the copied/picked target).
-  final LinkEndpoint b;
+  /// What it points at (the copied/picked target — possibly external).
+  LinkEndpoint b;
 
   /// Optional user-edited label (overrides the resolved title in lists).
   String? label;
@@ -237,8 +264,8 @@ class LinkRecord {
   /// Returns null (skip the entry) when either endpoint URI fails to parse —
   /// a forward-compat guard so a future schema never crashes an old build.
   static LinkRecord? tryFromJson(Map<String, dynamic> json) {
-    final a = LinkEndpoint.tryParse(json['a'] as String? ?? '');
-    final b = LinkEndpoint.tryParse(json['b'] as String? ?? '');
+    final a = LinkEndpoint.sideFrom(json['a'] as String? ?? '');
+    final b = LinkEndpoint.sideFrom(json['b'] as String? ?? '');
     if (a == null || b == null) return null;
     return LinkRecord(
       schemaVersion: json['schemaVersion'] ?? 1,

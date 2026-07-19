@@ -7,6 +7,7 @@ import '../../models/element.dart';
 import '../../models/link.dart';
 import '../../models/shape_template.dart';
 import '../../services/link_navigator.dart';
+import '../../services/link_service.dart';
 import '../../services/settings_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/color_wheel_picker.dart';
@@ -568,6 +569,10 @@ Widget buildLassoActionRow(
           onTap: () {
             final ep = _selectionEndpoint(c);
             if (ep == null) return;
+            // Snapshot the selection geometry now — adding a target from the
+            // sheet may outlive the live selection.
+            final pageId = c.selectionPageId!;
+            final bounds = c.selectionBounds;
             showConnectionsSheet(
               context,
               title: 'Selection',
@@ -581,6 +586,40 @@ Widget buildLassoActionRow(
                 } else if (pid != null) {
                   c.jumpToPage(pid);
                 }
+              },
+              // Linking a selection drops a visible hyperlink marker right
+              // next to it (the on-canvas indication that a link exists) and
+              // registers the record with the marker's id included — so the
+              // marker's ✎ retargets this very record.
+              onAddTarget: (target, resolved) async {
+                // Dedup by overlap: the stored record's element side also
+                // holds the marker id, so exact-pair matching can't see it.
+                final existing =
+                    await LinkService().linksOfElements(ep.elementIds);
+                for (final r in existing) {
+                  if (r.a.sameAs(target) || r.b.sameAs(target)) return;
+                }
+                final marker = c.insertLinkItem(
+                  pageId,
+                  target.toUri(),
+                  resolved.title,
+                  nearBounds: bounds,
+                );
+                await LinkService().addLink(
+                  from: LinkEndpoint(
+                    notebookId: ep.notebookId,
+                    sectionId: ep.sectionId,
+                    canvasId: ep.canvasId,
+                    pageId: ep.pageId,
+                    elementIds: [
+                      ...ep.elementIds,
+                      if (marker != null) marker.id,
+                    ],
+                  ),
+                  to: target,
+                  fromName: 'Selection in ${c.canvas.name}',
+                  toName: resolved.title,
+                );
               },
             );
           },

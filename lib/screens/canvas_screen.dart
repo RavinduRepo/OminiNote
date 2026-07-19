@@ -1063,31 +1063,38 @@ class _CanvasScreenState extends State<CanvasScreen>
       newText: result.text,
       newLink: result.link,
     );
-    // Keep the Connections registry in step for internal links.
-    final oldTarget = LinkEndpoint.tryParse(oldLink);
+    // Keep the Connections registry in step. Element-based matching: the
+    // record's element side may hold MORE ids than this one element (a lasso
+    // selection + its marker), so retarget rewrites that record in place —
+    // preserving the pairing — and only falls back to a fresh record when
+    // none existed (e.g. a plain auto-linkified URL being upgraded).
+    final oldTarget = LinkEndpoint.sideFrom(oldLink);
     final newTarget =
-        result.link == null ? null : LinkEndpoint.tryParse(result.link!);
+        result.link == null ? null : LinkEndpoint.sideFrom(result.link!);
     if (oldTarget == null && newTarget == null) return;
-    final here = LinkEndpoint(
-      notebookId: widget.canvas.notebookId,
-      sectionId: widget.canvas.sectionId,
-      canvasId: widget.canvas.id,
-      pageId: pageId,
-      elementIds: [el.id],
+    if (oldTarget != null && newTarget != null) {
+      if (newTarget.sameAs(oldTarget)) return; // text-only edit
+      final ok =
+          await LinkService().retargetByElement(el.id, oldTarget, newTarget);
+      if (ok) return;
+    } else if (oldTarget != null) {
+      await LinkService().removeByElementTo(el.id, oldTarget);
+      return;
+    }
+    if (newTarget == null) return;
+    final resolved = await resolveEndpoint(newTarget);
+    await LinkService().addLink(
+      from: LinkEndpoint(
+        notebookId: widget.canvas.notebookId,
+        sectionId: widget.canvas.sectionId,
+        canvasId: widget.canvas.id,
+        pageId: pageId,
+        elementIds: [el.id],
+      ),
+      to: newTarget,
+      fromName: 'Link in ${widget.canvas.name}',
+      toName: resolved.title,
     );
-    if (oldTarget != null &&
-        (newTarget == null || !newTarget.sameAs(oldTarget))) {
-      await LinkService().removeLinkBetween(here, oldTarget);
-    }
-    if (newTarget != null && (oldTarget == null || !newTarget.sameAs(oldTarget))) {
-      final resolved = await resolveEndpoint(newTarget);
-      await LinkService().addLink(
-        from: here,
-        to: newTarget,
-        fromName: 'Link in ${widget.canvas.name}',
-        toName: resolved.title,
-      );
-    }
   }
 
   /// The link URL under a screen position, if the tap landed on a link run in

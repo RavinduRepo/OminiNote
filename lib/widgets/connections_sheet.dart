@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/link.dart';
+import '../utils/url_text.dart';
 import '../services/link_navigator.dart';
 import '../services/link_resolver.dart';
 import '../services/link_service.dart';
 import '../theme/app_theme.dart';
 import 'action_sheet.dart';
+import 'edit_link_sheet.dart';
 import 'link_target_picker.dart';
 
 /// Copies [endpoint]'s `omninote://link/...` URI to the OS clipboard — the
@@ -40,6 +43,8 @@ Future<void> showConnectionsSheet(
   String? aggregateCanvasId,
   String? insideCanvasId,
   void Function(String? pageId)? onJumpInSameCanvas,
+  Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
+      onAddTarget,
 }) {
   assert((endpoint == null) != (aggregateCanvasId == null),
       'pass exactly one of endpoint / aggregateCanvasId');
@@ -55,6 +60,7 @@ Future<void> showConnectionsSheet(
         aggregateCanvasId: aggregateCanvasId,
         insideCanvasId: insideCanvasId,
         onJumpInSameCanvas: onJumpInSameCanvas,
+        onAddTarget: onAddTarget,
         // Navigation must outlive the sheet; snackbars anchor to the host.
         hostContext: context,
       ),
@@ -69,6 +75,13 @@ class _ConnectionsList extends StatefulWidget {
   final String? aggregateCanvasId;
   final String? insideCanvasId;
   final void Function(String? pageId)? onJumpInSameCanvas;
+
+  /// When set (the lasso-selection host), adding a target routes here instead
+  /// of the default [LinkService.addLink] — the host drops a visible link
+  /// marker next to the selection and registers the record itself.
+  final Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
+      onAddTarget;
+
   final BuildContext hostContext;
 
   const _ConnectionsList({
@@ -78,6 +91,7 @@ class _ConnectionsList extends StatefulWidget {
     required this.aggregateCanvasId,
     this.insideCanvasId,
     this.onJumpInSameCanvas,
+    this.onAddTarget,
     required this.hostContext,
   });
 
@@ -144,10 +158,17 @@ class _ConnectionsListState extends State<_ConnectionsList> {
 
   Future<void> _pasteLink() async {
     final data = await Clipboard.getData('text/plain');
-    final target = LinkEndpoint.tryParse(data?.text?.trim() ?? '');
+    final text = data?.text?.trim() ?? '';
+    // Type is auto-detected: an internal item link, else any URL (external
+    // links live in the same list, shown distinctly).
+    var target = LinkEndpoint.tryParse(text);
     if (target == null) {
-      _toast('The clipboard doesn\'t contain an Omininote link — use '
-          '"Copy link" on any item first.');
+      final url = firstUrlIn(text);
+      if (url != null) target = LinkEndpoint.external(url);
+    }
+    if (target == null) {
+      _toast('The clipboard doesn\'t contain an Omininote link or a URL — '
+          'use "Copy link" on any item, or copy a web address.');
       return;
     }
     await _addTarget(target);
@@ -168,11 +189,45 @@ class _ConnectionsListState extends State<_ConnectionsList> {
       return;
     }
     final resolved = await resolveEndpoint(target);
-    await LinkService().addLink(
-      from: ep,
-      to: target,
-      fromName: widget.endpointName,
-      toName: resolved.title,
+    if (widget.onAddTarget != null) {
+      await widget.onAddTarget!(target, resolved);
+    } else {
+      await LinkService().addLink(
+        from: ep,
+        to: target,
+        fromName: widget.endpointName,
+        toName: resolved.title,
+      );
+    }
+    await _load();
+  }
+
+  /// The ✎ on a row: rename (label) and/or retarget — internal item link or
+  /// external URL, freely swapped; an emptied destination removes the record.
+  Future<void> _editRow(_Row row) async {
+    final other = _otherEndOf(row.record);
+    final result = await showEditLinkSheet(
+      context,
+      text: row.record.label ?? row.resolved.title,
+      link: other.toUri(),
+    );
+    if (result == null || !mounted) return;
+    if (result.link == null) {
+      await _remove(row.record);
+      return;
+    }
+    final newOther = LinkEndpoint.sideFrom(result.link!);
+    if (newOther == null) {
+      _toast('Not a valid destination — paste a copied item link or a URL.');
+      return;
+    }
+    final defaultTitle = row.resolved.title;
+    await LinkService().updateLink(
+      row.record.id,
+      otherIsA: identical(other, row.record.a),
+      newOther: newOther.sameAs(other) ? null : newOther,
+      label: result.text == defaultTitle ? null : result.text,
+      clearLabel: result.text == defaultTitle,
     );
     await _load();
   }
@@ -184,13 +239,19 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   void _openRow(_Row row) {
+    final other = _otherEndOf(row.record);
+    // External link: straight to the browser (the sheet stays open).
+    if (other.kind == LinkTargetKind.external) {
+      launchUrl(Uri.parse(other.externalUrl!),
+          mode: LaunchMode.externalApplication);
+      return;
+    }
     final reveal = row.resolved.reveal;
     if (reveal == null) return;
     Navigator.of(context).pop();
     // Element targets hand their ids to the destination canvas (scroll-to +
     // landing flash) via the one-shot pending-focus channel — consumed by the
     // same-canvas jump below or by the CanvasScreen the reveal opens.
-    final other = _otherEndOf(row.record);
     if (other.elementIds.isNotEmpty &&
         other.canvasId != null &&
         other.pageId != null) {
@@ -230,6 +291,7 @@ class _ConnectionsListState extends State<_ConnectionsList> {
         LinkTargetKind.page => Icons.article_outlined,
         LinkTargetKind.element => Icons.gesture,
         LinkTargetKind.bookmark => Icons.bookmark_outline,
+        LinkTargetKind.external => Icons.public,
       };
 
   @override
@@ -365,6 +427,12 @@ class _ConnectionsListState extends State<_ConnectionsList> {
               ),
             ),
             IconButton(
+              tooltip: 'Edit link (name / destination)',
+              icon: const Icon(Icons.edit_outlined, size: 18),
+              color: palette.textDim,
+              onPressed: () => _editRow(row),
+            ),
+            IconButton(
               tooltip: 'Remove connection (both sides)',
               icon: const Icon(Icons.close, size: 18),
               color: palette.textDim,
@@ -384,5 +452,6 @@ class _ConnectionsListState extends State<_ConnectionsList> {
         LinkTargetKind.page => 'Page',
         LinkTargetKind.element => 'Canvas selection',
         LinkTargetKind.bookmark => 'Bookmark',
+        LinkTargetKind.external => 'External link',
       };
 }
