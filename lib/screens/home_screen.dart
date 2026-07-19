@@ -13,6 +13,7 @@ import '../widgets/color_swatch_picker.dart';
 import '../widgets/connections_sheet.dart';
 import '../widgets/notebook_account_badge.dart';
 import '../widgets/refreshable_empty.dart';
+import '../widgets/scroll_into_view.dart';
 import '../widgets/sync_status_icon.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
@@ -43,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // Card briefly highlighted after arriving via an internal link.
   String? _glowId;
   Timer? _glowTimer;
+  final ScrollController _scroll = ScrollController();
 
   @override
   void initState() {
@@ -56,6 +58,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     HomeScreen.glowRequest.removeListener(_onGlowRequest);
     _glowTimer?.cancel();
+    _scroll.dispose();
     SyncService().dataVersion.removeListener(_onSyncData);
     super.dispose();
   }
@@ -66,6 +69,13 @@ class _HomeScreenState extends State<HomeScreen> {
     HomeScreen.glowRequest.value = null; // consumed
     _glowTimer?.cancel();
     setState(() => _glowId = id);
+    // Coarse jump so a lazily-built off-screen card gets built at all; the
+    // card's own ScrollIntoViewOnce then fine-tunes the position.
+    final index = _notebooks?.indexWhere((n) => n.id == id) ?? -1;
+    if (index >= 0 && _scroll.hasClients) {
+      _scroll.jumpTo((index * 84.0 - 160.0)
+          .clamp(0.0, _scroll.position.maxScrollExtent));
+    }
     _glowTimer = Timer(const Duration(milliseconds: 1800), () {
       if (mounted) setState(() => _glowId = null);
     });
@@ -250,6 +260,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: _EmptyState(onCreate: _createNotebook),
                     )
                   : ReorderableListView.builder(
+                      scrollController: _scroll,
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                       itemCount: notebooks.length,
@@ -309,7 +320,11 @@ class _HomeScreenState extends State<HomeScreen> {
                               if (notebook.id == _glowId)
                                 Positioned.fill(
                                   child: IgnorePointer(
-                                    child: _glowOverlay(context, notebook.id),
+                                    child: ScrollIntoViewOnce(
+                                      key: ValueKey('sv_${notebook.id}'),
+                                      child:
+                                          _glowOverlay(context, notebook.id),
+                                    ),
                                   ),
                                 ),
                             ]),

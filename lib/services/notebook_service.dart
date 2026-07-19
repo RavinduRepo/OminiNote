@@ -2,11 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'dart:ui' show Color, Offset, Rect;
 import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart' show PdfDocument;
+import '../canvas/text_measure.dart' show autoTextRect, stackBelowObstacles;
 import '../models/canvas.dart';
 import '../models/canvas_page.dart';
+import '../models/element.dart';
 import '../models/link.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
@@ -1415,6 +1418,81 @@ class NotebookService {
     // .deletePage) — nudge the Bin / lists so it appears without a full
     // rescan. Ordinary drawing autosaves (deletedAt == null) must NOT bump.
     if (page.deletedAt != null) SyncService().notifyDataChanged();
+  }
+
+  /// Disk-path reciprocal link marker (callers try
+  /// [SyncService.insertMarkerInOpenCanvas] FIRST — an open canvas's autosave
+  /// would clobber this write): loads the page, appends a small link-item
+  /// TextElement next to [nearIds]'s union bounds, and saves through
+  /// [savePage] (rev bump → syncs like any edit). Returns the marker element
+  /// id, or null when the canvas/page is gone.
+  Future<String?> addLinkMarkerToPage({
+    required String notebookId,
+    required String sectionId,
+    required String canvasId,
+    required String pageId,
+    required List<String> nearIds,
+    required String uri,
+    required String title,
+  }) async {
+    final canvas = await getCanvas(notebookId, sectionId, canvasId);
+    if (canvas == null) return null;
+    final file = _pageFile(canvas, pageId);
+    if (!await file.exists()) return null;
+    CanvasPage page;
+    try {
+      page = CanvasPage.fromJson(
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+    if (page.deletedAt != null || page.purgedAt != null) return null;
+
+    Rect? bounds;
+    for (final el in [...page.strokes, ...page.objects]) {
+      if (!nearIds.contains(el.id)) continue;
+      bounds = bounds == null ? el.bounds : bounds.expandToInclude(el.bounds);
+    }
+    const black = Color(0xFF000000);
+    TextRun run(String text, {String? link}) => TextRun(
+          text: text,
+          fontSize: 16,
+          bold: false,
+          italic: false,
+          color: black,
+          fontFamily: 'sans',
+          link: link,
+        );
+    final el = TextElement(
+      id: newModelId('el'),
+      deviceId: SettingsService().deviceId,
+      rect: const Rect.fromLTWH(0, 0, 10, 10),
+      runs: [run(title, link: uri), run(' ')],
+      color: black,
+    );
+    el.rect = autoTextRect(el, page.width * 0.85);
+    final anchor = bounds != null
+        ? Offset(bounds.left, bounds.bottom + 4)
+        : Offset((page.width - el.rect.width) / 2, 24);
+    el.translate(anchor.dx - el.rect.left, anchor.dy - el.rect.top);
+    // Several connections onto the same item anchor at the SAME spot — stack
+    // below existing text boxes into a list, don't overlap (mirrors
+    // CanvasController.insertLinkItem, the open-canvas path).
+    final placed = stackBelowObstacles(
+      el.rect,
+      [for (final o in page.objects.whereType<TextElement>()) o.rect],
+      pageHeight: page.height,
+    );
+    el.translate(placed.left - el.rect.left, placed.top - el.rect.top);
+    if (el.rect.bottom > page.height) {
+      el.translate(0, page.height - el.rect.bottom);
+    }
+    if (el.rect.right > page.width) el.translate(page.width - el.rect.right, 0);
+    if (el.rect.left < 0) el.translate(-el.rect.left, 0);
+    if (el.rect.top < 0) el.translate(0, -el.rect.top);
+    page.objects.add(el);
+    await savePage(canvas, page);
+    return el.id;
   }
 
   Future<void> deletePageFile(Canvas canvas, String pageId) async {

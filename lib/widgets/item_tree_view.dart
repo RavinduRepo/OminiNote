@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/tree.dart';
 import '../theme/app_theme.dart';
 import 'action_sheet.dart';
+import 'scroll_into_view.dart';
 
 /// The dragged node plus the container it came from (a notebook id for a
 /// section tree, a section id for a canvas tree) so a drop can tell same- from
@@ -472,6 +473,24 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     final glow = widget.glowId != null && widget.glowId == id;
     final color = AppPalette.resolveColor(id, widget.colorOf(item));
 
+    final row = _buildLeafRow(context, palette, entry, node, item, id,
+        selected: selected, glow: glow, color: color);
+    // A glowing row (search reveal / link landing) scrolls itself into view —
+    // the highlight is pointless off-screen in a long list.
+    return glow ? ScrollIntoViewOnce(key: ValueKey('sv_$id'), child: row) : row;
+  }
+
+  Widget _buildLeafRow(
+    BuildContext context,
+    AppPalette palette,
+    _FlatEntry entry,
+    LeafNode node,
+    T item,
+    String id, {
+    required bool selected,
+    required bool glow,
+    required Color color,
+  }) {
     return Material(
       color: selected ? palette.accentSoft : Colors.transparent,
       child: Stack(
@@ -646,6 +665,22 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
     final count = folder.collectLeafIds().length;
     final glow = widget.glowId != null && widget.glowId == folder.id;
 
+    final row = _buildFolderRow(context, palette, entry, folder,
+        color: color, count: count, glow: glow);
+    return glow
+        ? ScrollIntoViewOnce(key: ValueKey('sv_${folder.id}'), child: row)
+        : row;
+  }
+
+  Widget _buildFolderRow(
+    BuildContext context,
+    AppPalette palette,
+    _FlatEntry entry,
+    FolderNode folder, {
+    required Color color,
+    required int count,
+    required bool glow,
+  }) {
     return DragTarget<_DragData>(
       onWillAcceptWithDetails: (d) => _accepts(d.data, folder.children),
       onAcceptWithDetails: (d) async {

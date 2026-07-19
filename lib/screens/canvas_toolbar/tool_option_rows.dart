@@ -605,7 +605,10 @@ Widget buildLassoActionRow(
                   resolved.title,
                   nearBounds: bounds,
                 );
-                await LinkService().addLink(
+                // Reciprocal variant: an element-endpoint TARGET (linking
+                // lasso→lasso) gets its own marker back at this selection, so
+                // both linked spots are visible.
+                await LinkService().addLinkWithReciprocalMarker(
                   from: LinkEndpoint(
                     notebookId: ep.notebookId,
                     sectionId: ep.sectionId,

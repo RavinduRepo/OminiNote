@@ -544,3 +544,31 @@ Rect autoTextRect(TextElement el, double maxWidth) {
     wrapped.height + kTextBoxPad,
   );
 }
+
+/// Nudges [candidate] straight down past any of [obstacles] it intersects,
+/// so link markers dropped at a shared anchor (several connections onto the
+/// same item) stack into a tidy vertical list instead of overlapping. Each
+/// round jumps below the LOWEST intersecting obstacle (converges fast even
+/// through a pile of existing markers). Clamped back onto the page at the
+/// end — at the extreme bottom an overlap beats an invisible marker.
+Rect stackBelowObstacles(
+  Rect candidate,
+  Iterable<Rect> obstacles, {
+  required double pageHeight,
+  double gap = 4,
+}) {
+  var rect = candidate;
+  for (var i = 0; i < 24; i++) {
+    Rect? hit;
+    for (final o in obstacles) {
+      if (!rect.overlaps(o)) continue;
+      if (hit == null || o.bottom > hit.bottom) hit = o;
+    }
+    if (hit == null) break;
+    rect = Rect.fromLTWH(rect.left, hit.bottom + gap, rect.width, rect.height);
+  }
+  if (rect.bottom > pageHeight) {
+    rect = rect.translate(0, pageHeight - rect.bottom);
+  }
+  return rect;
+}
