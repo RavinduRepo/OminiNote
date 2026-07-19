@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../models/canvas.dart';
+import '../models/link.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
 import '../services/notebook_service.dart';
@@ -8,6 +9,7 @@ import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/new_canvas_ui.dart';
 import '../widgets/color_swatch_picker.dart';
+import '../widgets/connections_sheet.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
@@ -296,6 +298,26 @@ class _SectionScreenState extends State<SectionScreen> with RouteAware {
                         selectedId: null,
                         glowId: _glowId,
                         onOpen: _openCanvas,
+                        onConnectionsLeaf: (c) => showConnectionsSheet(
+                          context,
+                          title: c.name,
+                          endpoint: LinkEndpoint(
+                            notebookId: section.notebookId,
+                            sectionId: section.id,
+                            canvasId: c.id,
+                          ),
+                          endpointName: c.name,
+                        ),
+                        onConnectionsFolder: (f) => showConnectionsSheet(
+                          context,
+                          title: f.name,
+                          endpoint: LinkEndpoint(
+                            notebookId: section.notebookId,
+                            sectionId: section.id,
+                            folderId: f.id,
+                          ),
+                          endpointName: f.name,
+                        ),
                         onRenameLeaf: _renameCanvas,
                         onColorLeaf: _colorCanvas,
                         onDeleteLeaf: _deleteCanvas,

@@ -94,6 +94,12 @@ class MergeEngine {
     if (relPath == 'notebooks.json') {
       return mergeNotebooksIndex(local, remote);
     }
+    if (relPath == 'links.json') {
+      // Same shape as notebooks.json: an id-keyed map of enveloped records —
+      // union by id + per-record LWW + tombstone deletes, so a link created
+      // concurrently on two devices survives and a delete propagates.
+      return mergeNotebooksIndex(local, remote);
+    }
     if (relPath.endsWith('/pages/') || _isPagePath(relPath)) {
       return _mergePageJson(local, remote);
     }

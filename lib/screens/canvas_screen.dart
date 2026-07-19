@@ -32,6 +32,7 @@ import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/action_sheet.dart';
+import '../widgets/connections_sheet.dart';
 import '../widgets/sync_status_icon.dart';
 import 'canvas_toolbar/adaptive_toolbar_row.dart';
 import 'canvas_toolbar/canvas_chrome_shared.dart';
@@ -1542,6 +1543,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Read aloud',
                 onTap: _openReadAloud,
               ),
+            if (shown('connections'))
+              ActionSheetItem(
+                icon: Icons.hub_outlined,
+                label: 'All connections',
+                onTap: _showCanvasConnections,
+              ),
             if (shown('shape_snap'))
               ActionSheetItem(
                 icon: SettingsService().shapeSnap
@@ -1600,6 +1607,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showPageSettings();
           case 'read_aloud':
             _openReadAloud();
+          case 'connections':
+            _showCanvasConnections();
           case 'finger_draw':
             _toggleFingerDraw();
           case 'shape_snap':
@@ -1644,6 +1653,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           ),
         if (shown('read_aloud'))
           iconMenuItem('read_aloud', Icons.volume_up_outlined, 'Read aloud'),
+        if (shown('connections'))
+          iconMenuItem('connections', Icons.hub_outlined, 'All connections'),
         // Checkbox glyphs reflect toggle state, matching the mobile sheet.
         if (shown('shape_snap'))
           iconMenuItem(
@@ -2287,6 +2298,20 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
+  /// The canvas ⋯ menu's "All connections": every link touching anything in
+  /// this canvas (its pages, elements, bookmarks — or the canvas itself).
+  void _showCanvasConnections() {
+    showConnectionsSheet(
+      context,
+      title: widget.canvas.name,
+      aggregateCanvasId: widget.canvas.id,
+      insideCanvasId: widget.canvas.id,
+      onJumpInSameCanvas: (pageId) {
+        if (pageId != null) _controller?.jumpToPage(pageId);
+      },
+    );
+  }
+
   Future<void> _showBookmarks() async {
     final c = _controller!;
     await showModalBottomSheet<void>(
@@ -2804,6 +2829,9 @@ class _CanvasScreenState extends State<CanvasScreen>
         return tbBtn(Icons.graphic_eq, 'Recordings', _openAudioPlayer);
       case 'read_aloud':
         return tbBtn(Icons.volume_up_outlined, 'Read aloud', _openReadAloud);
+      case 'connections':
+        return tbBtn(
+            Icons.hub_outlined, 'All connections', _showCanvasConnections);
       case 'split':
         // Only meaningful inside a workspace (split host); empty elsewhere.
         if (widget.onSplitRequested == null) return const SizedBox.shrink();

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../models/link.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
@@ -8,6 +9,7 @@ import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/pdf_export_ui.dart';
 import '../widgets/color_swatch_picker.dart';
+import '../widgets/connections_sheet.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/refreshable_empty.dart';
@@ -279,6 +281,20 @@ class _NotebookScreenState extends State<NotebookScreen> with RouteAware {
                 glowId: _glowId,
                 onOpen: _openSection,
                 onExportLeaf: _exportSectionPdf,
+                onConnectionsLeaf: (s) => showConnectionsSheet(
+                  context,
+                  title: s.name,
+                  endpoint: LinkEndpoint(
+                      notebookId: notebook.id, sectionId: s.id),
+                  endpointName: s.name,
+                ),
+                onConnectionsFolder: (f) => showConnectionsSheet(
+                  context,
+                  title: f.name,
+                  endpoint: LinkEndpoint(
+                      notebookId: notebook.id, folderId: f.id),
+                  endpointName: f.name,
+                ),
                 onRenameLeaf: _renameSection,
                 onColorLeaf: _colorSection,
                 onDeleteLeaf: _deleteSection,

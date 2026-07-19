@@ -421,6 +421,21 @@ class SyncService {
           await batchedSave();
           continue;
         }
+        if (rel == 'links.json') {
+          // Connections registry: uploaded whole to every account (records are
+          // tiny id tuples; the union merge makes any account's copy safe to
+          // reconcile against, and endpoints an account lacks resolve as dead).
+          final file = NotebookService().fileForRelPath(rel);
+          if (await file.exists()) {
+            final content = await file.readAsString();
+            for (final id in connected) {
+              await DriveManager.forAccount(id).uploadJson(rel, content);
+            }
+          }
+          _dirty.remove(rel);
+          await batchedSave();
+          continue;
+        }
         final nbId = NotebookService().notebookIdOfRelPath(rel);
         if (nbId != null && localOnly.contains(nbId)) {
           _dirty.remove(rel); // content of a local-only notebook — never upload
@@ -594,8 +609,8 @@ class SyncService {
       // Push local files this account OWNS that its Drive lacks.
       for (final rel in localPaths) {
         if (remote.containsKey(rel)) continue;
-        if (rel == 'notebooks.json') {
-          _dirty.add(rel); // uploaded per-account (filtered) by the push drain
+        if (rel == 'notebooks.json' || rel == 'links.json') {
+          _dirty.add(rel); // uploaded per-account by the push drain
           continue;
         }
         final nbId = NotebookService().notebookIdOfRelPath(rel);

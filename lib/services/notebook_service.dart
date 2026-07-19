@@ -47,6 +47,27 @@ class NotebookService {
   late Directory appDir;
   late File notebooksFile;
 
+  /// The Connections registry (`links.json`, store root — synced like
+  /// `notebooks.json`, merged by union + LWW). May not exist yet.
+  File get linksFile => File('${appDir.path}/links.json');
+
+  /// Reads the raw links registry (id → record json), `{}` when absent or
+  /// unreadable — the registry is never load-bearing enough to fail an app
+  /// path over.
+  Future<Map<String, dynamic>> readLinksJson() async {
+    try {
+      if (!await linksFile.exists()) return {};
+      return jsonDecode(await linksFile.readAsString()) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Persists the links registry through the normal atomic write path, so the
+  /// save journals + uploads like any local edit.
+  Future<void> saveLinksJson(Map<String, dynamic> data) =>
+      _writeAtomic(linksFile, jsonEncode(data));
+
   static const int _storageVersion = 2;
 
   Future<void> init() async {
@@ -1496,6 +1517,7 @@ class NotebookService {
   static bool isSyncedRelPath(String rel) {
     if (rel.endsWith('.tmp')) return false;
     if (rel == 'notebooks.json') return true;
+    if (rel == 'links.json') return true; // Connections registry
     if (!rel.startsWith('notebooks/')) return false;
     // Only structural JSON, page JSON, and asset blobs are synced.
     return true;
@@ -1585,6 +1607,7 @@ class NotebookService {
     final out = <String>{};
     final nb = notebooksFile;
     if (await nb.exists()) out.add('notebooks.json');
+    if (await linksFile.exists()) out.add('links.json');
     final dir = Directory('${appDir.path}/notebooks');
     if (await dir.exists()) {
       await for (final e in dir.list(recursive: true, followLinks: false)) {

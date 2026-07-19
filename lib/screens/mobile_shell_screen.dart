@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../services/link_navigator.dart';
 import '../services/search_service.dart';
 import '../theme/app_theme.dart';
 import 'bin_screen.dart';
@@ -84,7 +85,26 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    // Internal links ("Connections") navigate through the same reveal path as
+    // search results, whichever shell is active.
+    LinkNavigator().register(_revealFromLink);
+  }
+
+  /// A tapped internal link can come from *inside* a full-bleed canvas, which
+  /// covers this shell on the root navigator — pop back to the shell first so
+  /// the reveal is actually visible (and canvases don't stack up). Same-canvas
+  /// targets never reach here (the Connections sheet jumps in place instead).
+  void _revealFromLink(SearchResult r) {
+    Navigator.of(context, rootNavigator: true)
+        .popUntil((route) => route.isFirst);
+    _revealSearchResult(r);
+  }
+
+  @override
   void dispose() {
+    LinkNavigator().unregister(_revealFromLink);
     _binReloadTimer?.cancel();
     _pageController.dispose();
     _binRefresh.dispose();

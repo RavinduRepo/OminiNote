@@ -2,9 +2,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/canvas.dart';
+import '../models/link.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
+import '../services/link_navigator.dart';
 import '../services/notebook_service.dart';
 import '../services/search_service.dart';
 import '../services/settings_service.dart';
@@ -12,6 +14,7 @@ import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/sync_status_icon.dart';
 import '../widgets/color_swatch_picker.dart';
+import '../widgets/connections_sheet.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/notebook_account_badge.dart';
@@ -97,14 +100,28 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     super.initState();
     _loadAll();
     SyncService().dataVersion.addListener(_onSyncData);
+    // Internal links ("Connections") navigate through the same reveal path as
+    // search results, whichever shell is active.
+    LinkNavigator().register(_revealFromLink);
   }
 
   @override
   void dispose() {
+    LinkNavigator().unregister(_revealFromLink);
     SyncService().dataVersion.removeListener(_onSyncData);
     _glowTimer?.cancel();
     _binRefresh.dispose();
     super.dispose();
+  }
+
+  /// A tapped internal link (Connections) reveals like a search result, first
+  /// making sure the panes are showing (mirrors the search overlay's onReveal).
+  void _revealFromLink(SearchResult r) {
+    setState(() {
+      _mainMode = _MainMode.canvas;
+      _sidebarCollapsed = false;
+    });
+    _revealSearchResult(r);
   }
 
   // ── Search reveal ───────────────────────────────────────────────────────
@@ -1189,6 +1206,26 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                       _mainMode = _MainMode.canvas; // leave Search/Bin
                       _pendingJumpPageId = null; // manual open: don't re-jump
                     }),
+                    onConnectionsLeaf: (c) => showConnectionsSheet(
+                      context,
+                      title: c.name,
+                      endpoint: LinkEndpoint(
+                        notebookId: section.notebookId,
+                        sectionId: section.id,
+                        canvasId: c.id,
+                      ),
+                      endpointName: c.name,
+                    ),
+                    onConnectionsFolder: (f) => showConnectionsSheet(
+                      context,
+                      title: f.name,
+                      endpoint: LinkEndpoint(
+                        notebookId: section.notebookId,
+                        sectionId: section.id,
+                        folderId: f.id,
+                      ),
+                      endpointName: f.name,
+                    ),
                     onRenameLeaf: _renameCanvas,
                     onColorLeaf: _colorCanvas,
                     onDeleteLeaf: _deleteCanvas,
@@ -1490,6 +1527,15 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                                               _pickSyncTarget(notebook);
                                             case 'default':
                                               _toggleDefaultNotebook(notebook);
+                                            case 'connections':
+                                              showConnectionsSheet(
+                                                context,
+                                                title: notebook.name,
+                                                endpoint: LinkEndpoint(
+                                                  notebookId: notebook.id,
+                                                ),
+                                                endpointName: notebook.name,
+                                              );
                                             case 'delete':
                                               _deleteNotebook(notebook);
                                           }
@@ -1537,6 +1583,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                                                     notebook.id
                                                 ? 'Remove as default target'
                                                 : 'Set as default target',
+                                          ),
+                                          iconMenuItem(
+                                            'connections',
+                                            Icons.hub_outlined,
+                                            'Connections',
                                           ),
                                           iconMenuItem(
                                             'delete',
@@ -1609,6 +1660,25 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                                 glowId: _glowId,
                                 onOpen: _selectSection,
                                 onExportLeaf: _exportSectionPdf,
+                                onConnectionsLeaf: (s) => showConnectionsSheet(
+                                  context,
+                                  title: s.name,
+                                  endpoint: LinkEndpoint(
+                                    notebookId: notebook.id,
+                                    sectionId: s.id,
+                                  ),
+                                  endpointName: s.name,
+                                ),
+                                onConnectionsFolder: (f) =>
+                                    showConnectionsSheet(
+                                  context,
+                                  title: f.name,
+                                  endpoint: LinkEndpoint(
+                                    notebookId: notebook.id,
+                                    folderId: f.id,
+                                  ),
+                                  endpointName: f.name,
+                                ),
                                 onRenameLeaf: _renameSection,
                                 onColorLeaf: _colorSection,
                                 onDeleteLeaf: _deleteSection,

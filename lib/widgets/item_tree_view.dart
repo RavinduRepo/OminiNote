@@ -68,6 +68,11 @@ class ItemTreeView<T> extends StatefulWidget {
   /// whole section exports from the list without opening it). Null = no item.
   final void Function(T)? onExportLeaf;
 
+  /// Optional "Connections" (internal links) actions. Null = no menu items —
+  /// hosts that can build a [LinkEndpoint] for their level pass these.
+  final void Function(T)? onConnectionsLeaf;
+  final void Function(FolderNode)? onConnectionsFolder;
+
   final void Function(FolderNode) onRenameFolder;
   final void Function(FolderNode) onColorFolder;
   final void Function(FolderNode) onAddLeafToFolder;
@@ -110,6 +115,8 @@ class ItemTreeView<T> extends StatefulWidget {
     required this.onColorLeaf,
     required this.onDeleteLeaf,
     this.onExportLeaf,
+    this.onConnectionsLeaf,
+    this.onConnectionsFolder,
     required this.onRenameFolder,
     required this.onColorFolder,
     required this.onAddLeafToFolder,
@@ -558,6 +565,11 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
                 icon: Icons.picture_as_pdf_outlined,
                 label: 'Export to PDF',
                 onTap: () => widget.onExportLeaf?.call(item)),
+          if (widget.onConnectionsLeaf != null)
+            ActionSheetItem(
+                icon: Icons.hub_outlined,
+                label: 'Connections',
+                onTap: () => widget.onConnectionsLeaf?.call(item)),
           ActionSheetItem(
               icon: Icons.delete_outline,
               label: 'Delete',
@@ -581,6 +593,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
             widget.onRelocate(node, copy: true);
           case 'export':
             widget.onExportLeaf?.call(item);
+          case 'connections':
+            widget.onConnectionsLeaf?.call(item);
           case 'delete':
             _deleteLeaf(item);
         }
@@ -593,6 +607,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
         if (widget.onExportLeaf != null)
           iconMenuItem('export', Icons.picture_as_pdf_outlined,
               'Export to PDF'),
+        if (widget.onConnectionsLeaf != null)
+          iconMenuItem('connections', Icons.hub_outlined, 'Connections'),
         iconMenuItem('delete', Icons.delete_outline, 'Delete',
             color: Theme.of(context).colorScheme.error),
       ],
@@ -746,6 +762,11 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
               icon: Icons.folder_off_outlined,
               label: 'Ungroup (keep items)',
               onTap: () => widget.onUngroup(folder)),
+          if (widget.onConnectionsFolder != null)
+            ActionSheetItem(
+                icon: Icons.hub_outlined,
+                label: 'Connections',
+                onTap: () => widget.onConnectionsFolder?.call(folder)),
           ActionSheetItem(
               icon: Icons.delete_outline,
               label: 'Delete group + items',
@@ -773,6 +794,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
             widget.onRelocate(folder, copy: true);
           case 'ungroup':
             widget.onUngroup(folder);
+          case 'connections':
+            widget.onConnectionsFolder?.call(folder);
           case 'delete':
             _deleteFolder(folder);
         }
@@ -788,6 +811,8 @@ class _ItemTreeViewState<T> extends State<ItemTreeView<T>> {
         iconMenuItem('copy', Icons.copy_all_outlined, 'Copy to…'),
         iconMenuItem('ungroup', Icons.folder_off_outlined,
             'Ungroup (keep items)'),
+        if (widget.onConnectionsFolder != null)
+          iconMenuItem('connections', Icons.hub_outlined, 'Connections'),
         iconMenuItem('delete', Icons.delete_outline, 'Delete group + items',
             color: Theme.of(context).colorScheme.error),
       ],

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../canvas/canvas_controller.dart';
 import '../canvas/page_thumbnail.dart';
+import '../models/link.dart';
 import '../theme/app_theme.dart';
+import '../widgets/connections_sheet.dart';
 
 /// A drag-reorder view of a canvas's pages that mirrors the canvas's exact
 /// structure: rows stacked vertically, and a horizontal (multi-page) row shows
@@ -400,6 +402,19 @@ class _CellMenu extends StatelessWidget {
                   behavior: SnackBarBehavior.floating,
                 ),
               );
+            case 'copylink':
+              copyLinkToClipboard(context, _endpoint());
+            case 'connections':
+              showConnectionsSheet(
+                context,
+                title: _pageLabel(),
+                endpoint: _endpoint(),
+                endpointName: _pageLabel(),
+                insideCanvasId: controller.canvas.id,
+                onJumpInSameCanvas: (pid) {
+                  if (pid != null) controller.jumpToPage(pid);
+                },
+              );
             case 'delete':
               if (!controller.deletePage(pageId)) {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -414,9 +429,34 @@ class _CellMenu extends StatelessWidget {
         itemBuilder: (context) => const [
           PopupMenuItem(value: 'duplicate', child: Text('Duplicate')),
           PopupMenuItem(value: 'copy', child: Text('Copy page')),
+          PopupMenuItem(value: 'copylink', child: Text('Copy link')),
+          PopupMenuItem(value: 'connections', child: Text('Connections')),
           PopupMenuItem(value: 'delete', child: Text('Delete')),
         ],
       ),
     );
+  }
+
+  LinkEndpoint _endpoint() {
+    final canvas = controller.canvas;
+    return LinkEndpoint(
+      notebookId: canvas.notebookId,
+      sectionId: canvas.sectionId,
+      canvasId: canvas.id,
+      pageId: pageId,
+    );
+  }
+
+  /// "Page N (canvas name)" in reading order — the snapshot name new link
+  /// records keep for when the page is later deleted.
+  String _pageLabel() {
+    var n = 0;
+    for (final row in controller.canvas.rows) {
+      for (final id in row.pageIds) {
+        n++;
+        if (id == pageId) return 'Page $n (${controller.canvas.name})';
+      }
+    }
+    return 'Page (${controller.canvas.name})';
   }
 }

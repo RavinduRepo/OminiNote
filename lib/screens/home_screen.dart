@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../models/link.dart';
 import '../models/notebook.dart';
 import '../services/notebook_service.dart';
 import '../services/settings_service.dart';
@@ -7,6 +8,7 @@ import '../theme/app_theme.dart';
 import '../utils/formatting.dart';
 import '../widgets/action_sheet.dart';
 import '../widgets/color_swatch_picker.dart';
+import '../widgets/connections_sheet.dart';
 import '../widgets/notebook_account_badge.dart';
 import '../widgets/refreshable_empty.dart';
 import '../widgets/sync_status_icon.dart';
@@ -264,6 +266,13 @@ class _HomeScreenState extends State<HomeScreen> {
                               onShare: () => _shareNotebook(notebook),
                               onShareLink: () => _shareNotebookLink(notebook),
                               onSyncTo: () => _pickSyncTarget(notebook),
+                              onConnections: () => showConnectionsSheet(
+                                context,
+                                title: notebook.name,
+                                endpoint:
+                                    LinkEndpoint(notebookId: notebook.id),
+                                endpointName: notebook.name,
+                              ),
                               onDelete: () => _deleteNotebook(notebook),
                               isDefault: SettingsService().defaultNotebookId ==
                                   notebook.id,
@@ -296,6 +305,7 @@ class _NotebookRow extends StatelessWidget {
   final VoidCallback onShare;
   final VoidCallback onShareLink;
   final VoidCallback onSyncTo;
+  final VoidCallback onConnections;
   final VoidCallback onDelete;
   final bool isDefault;
   final VoidCallback onSetDefault;
@@ -309,6 +319,7 @@ class _NotebookRow extends StatelessWidget {
     required this.onShare,
     required this.onShareLink,
     required this.onSyncTo,
+    required this.onConnections,
     required this.onDelete,
     required this.isDefault,
     required this.onSetDefault,
@@ -394,6 +405,7 @@ class _NotebookRow extends StatelessWidget {
                 onShare: onShare,
                 onShareLink: onShareLink,
                 onSyncTo: onSyncTo,
+                onConnections: onConnections,
                 onDelete: onDelete,
                 isDefault: isDefault,
                 onSetDefault: onSetDefault,
@@ -413,6 +425,7 @@ class _RowMenu extends StatelessWidget {
   final VoidCallback onShare;
   final VoidCallback onShareLink;
   final VoidCallback onSyncTo;
+  final VoidCallback onConnections;
   final VoidCallback onDelete;
   final bool isDefault;
   final VoidCallback onSetDefault;
@@ -423,6 +436,7 @@ class _RowMenu extends StatelessWidget {
     required this.onShare,
     required this.onShareLink,
     required this.onSyncTo,
+    required this.onConnections,
     required this.onDelete,
     required this.isDefault,
     required this.onSetDefault,
@@ -453,6 +467,10 @@ class _RowMenu extends StatelessWidget {
             icon: Icons.link, label: 'Share link', onTap: onShareLink),
         ActionSheetItem(
             icon: Icons.sync_outlined, label: 'Sync to…', onTap: onSyncTo),
+        ActionSheetItem(
+            icon: Icons.hub_outlined,
+            label: 'Connections',
+            onTap: onConnections),
         ActionSheetItem(
             icon: isDefault ? Icons.star_rounded : Icons.star_border_rounded,
             label: isDefault
