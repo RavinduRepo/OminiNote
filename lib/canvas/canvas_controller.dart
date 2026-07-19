@@ -18,6 +18,7 @@ import '../services/settings_service.dart';
 import '../services/sync/merge_engine.dart';
 import '../services/sync_service.dart';
 import '../services/tts_service.dart';
+import '../utils/audio_sync.dart';
 import '../utils/ink_contrast.dart';
 import '../utils/readable_text.dart';
 import '../utils/url_text.dart';
@@ -3800,7 +3801,40 @@ class CanvasController extends ChangeNotifier {
         break;
       }
     }
-    audioPlayheadNotifier.value = rec?.startedAt.add(p.position.value);
+    final playhead = rec?.startedAt.add(p.position.value);
+    audioPlayheadNotifier.value = playhead;
+    if (playhead != null) _followAudioGlow(playhead);
+  }
+
+  /// Gently keeps the ink glowing under the audio playhead in view — pans
+  /// (keeping zoom) only when the glow is off screen, mirroring read-aloud's
+  /// [_followReading]. Runs only from the playback position listener while a
+  /// recording is actively playing, so it costs nothing during normal use.
+  void _followAudioGlow(DateTime playhead) {
+    StrokeElement? latest;
+    CanvasPage? latestPage;
+    for (final page in pages.values) {
+      for (final s in page.strokes) {
+        if (!strokeActiveAt(s.createdAt, playhead)) continue;
+        if (latest == null || s.createdAt.isAfter(latest.createdAt)) {
+          latest = s;
+          latestPage = page;
+        }
+      }
+    }
+    if (latest == null || latestPage == null) return;
+    // Union the glowing strokes on the page being drawn "now" so the whole
+    // cluster comes into view, not just the newest stroke.
+    var target = latest.bounds;
+    for (final s in latestPage.strokes) {
+      if (identical(s, latest)) continue;
+      if (strokeActiveAt(s.createdAt, playhead)) {
+        target = target.expandToInclude(s.bounds);
+      }
+    }
+    final l = layout.layoutOf(latestPage.id);
+    if (l == null) return;
+    ensureCanvasRectVisible(target.shift(l.rect.topLeft));
   }
 
   // ── Read-aloud (text-to-speech over typed + PDF text) ─────────────────
