@@ -139,6 +139,22 @@ class LinkService {
     await _persist();
   }
 
+  /// Tombstones the connection between exactly [a] and [b] (either order),
+  /// if one is alive — used when a link run is retargeted or de-linked.
+  Future<void> removeLinkBetween(LinkEndpoint a, LinkEndpoint b) async {
+    await _ensureLoaded();
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if ((r.a.sameAs(a) && r.b.sameAs(b)) ||
+          (r.a.sameAs(b) && r.b.sameAs(a))) {
+        r.deletedAt = DateTime.now();
+        r.bumpRev(SettingsService().deviceId);
+        await _persist();
+        return;
+      }
+    }
+  }
+
   /// Sets/clears the user label on [id].
   Future<void> setLabel(String id, String? label) async {
     await _ensureLoaded();

@@ -141,6 +141,86 @@ List<Rect> selectionRectsForElement(TextElement el, int start, int end) {
   return [for (final box in boxes) box.toRect().shift(el.rect.topLeft)];
 }
 
+/// Replaces the character range [start, end) of [runs] with [insert],
+/// splitting boundary runs so every other character keeps its exact style.
+/// Pure — used by the `[[` link insertion to splice a link run into a
+/// committed element's runs at a caret position.
+List<TextRun> replaceRunRange(
+  List<TextRun> runs,
+  int start,
+  int end,
+  List<TextRun> insert,
+) {
+  final out = <TextRun>[];
+  var pos = 0;
+  var inserted = false;
+  for (final run in runs) {
+    final runStart = pos;
+    final runEnd = pos + run.text.length;
+    pos = runEnd;
+    // Part of the run before the replaced range.
+    if (runStart < start) {
+      final keepEnd = runEnd < start ? runEnd : start;
+      out.add(run.clone()..text = run.text.substring(0, keepEnd - runStart));
+    }
+    if (!inserted && runEnd >= start) {
+      out.addAll([for (final r in insert) r.clone()]);
+      inserted = true;
+    }
+    // Part of the run after the replaced range.
+    if (runEnd > end) {
+      final keepStart = runStart > end ? runStart : end;
+      out.add(run.clone()..text = run.text.substring(keepStart - runStart));
+    }
+  }
+  if (!inserted) out.addAll([for (final r in insert) r.clone()]);
+  return [
+    for (final r in out)
+      if (r.text.isNotEmpty) r
+  ];
+}
+
+/// One always-visible ✎ edit affordance per link run: the small square where
+/// the pencil is drawn (page-local, like [selectionRectsForElement]'s rects),
+/// anchored just past the run's last laid-out box. The painter draws a glyph
+/// there and the canvas tap routing treats a hit as "edit this link" instead
+/// of "open it". Pure — uses the same layout the painter draws with.
+List<({int runIndex, String link, Rect rect})> linkPencilSpots(
+    TextElement el) {
+  final spots = <({int runIndex, String link, Rect rect})>[];
+  if (el.runs.every((r) => r.link == null)) return spots;
+  final tp = TextPainter(
+    text: textSpanForElement(el),
+    textDirection: TextDirection.ltr,
+    textAlign: switch (el.align) {
+      TextAlignOption.center => TextAlign.center,
+      TextAlignOption.right => TextAlign.right,
+      _ => TextAlign.left,
+    },
+  )..layout(minWidth: el.rect.width, maxWidth: math.max(el.rect.width, 8));
+  var offset = 0;
+  for (var i = 0; i < el.runs.length; i++) {
+    final run = el.runs[i];
+    final start = offset;
+    offset += run.text.length;
+    if (run.link == null || run.text.isEmpty) continue;
+    final boxes = tp.getBoxesForSelection(
+      TextSelection(baseOffset: start, extentOffset: offset),
+    );
+    if (boxes.isEmpty) continue;
+    final last = boxes.last.toRect();
+    final s = run.fontSize * 0.62;
+    spots.add((
+      runIndex: i,
+      link: run.link!,
+      rect: Rect.fromLTWH(last.right + 1.5, last.top - s * 0.2, s, s)
+          .shift(el.rect.topLeft),
+    ));
+  }
+  tp.dispose();
+  return spots;
+}
+
 /// The link URL at [localOffset] (relative to the box's top-left) within [el],
 /// or null if that point isn't on a link run. Uses the same layout the painter
 /// does, so it lines up with what's drawn.

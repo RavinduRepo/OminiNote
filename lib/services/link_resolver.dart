@@ -188,6 +188,42 @@ Future<ResolvedLink> resolveEndpoint(
   }
 }
 
+/// The [LinkEndpoint] a picked search result addresses, or null for results
+/// that can't be linked (malformed entries). Bookmarks map to their page
+/// (SearchResult carries the page, not the bookmark id) — navigation lands
+/// on the same spot either way.
+LinkEndpoint? endpointOfSearchResult(SearchResult r) {
+  switch (r.kind) {
+    case SearchKind.notebook:
+      return LinkEndpoint(notebookId: r.notebook.id);
+    case SearchKind.superSection:
+      if (r.folderId == null) return null;
+      return LinkEndpoint(
+        notebookId: r.notebook.id,
+        sectionId: r.section?.id,
+        folderId: r.folderId,
+      );
+    case SearchKind.section:
+      if (r.section == null) return null;
+      return LinkEndpoint(notebookId: r.notebook.id, sectionId: r.section!.id);
+    case SearchKind.canvas:
+      if (r.section == null || r.canvas == null) return null;
+      return LinkEndpoint(
+        notebookId: r.notebook.id,
+        sectionId: r.section!.id,
+        canvasId: r.canvas!.id,
+      );
+    case SearchKind.bookmark:
+      if (r.section == null || r.canvas == null) return null;
+      return LinkEndpoint(
+        notebookId: r.notebook.id,
+        sectionId: r.section!.id,
+        canvasId: r.canvas!.id,
+        pageId: r.pageId,
+      );
+  }
+}
+
 FolderNode? _findFolder(List<TreeNode> nodes, String id) {
   for (final n in nodes) {
     if (n is FolderNode) {

@@ -411,6 +411,23 @@ class RichTextController extends TextEditingController {
     ];
   }
 
+  /// Inserts [title] at the selection as a hyperlink to [uri] (plus a plain
+  /// trailing space so typing continues un-linked) — the in-editor landing of
+  /// a pasted internal link. The value setter reconciles attrs first; the
+  /// link is then stamped onto the inserted range.
+  void insertLinkText(String title, String uri) {
+    final sel = selection.isValid
+        ? selection
+        : TextSelection.collapsed(offset: text.length);
+    final start = sel.start;
+    value = value.replaced(sel, '$title ');
+    for (var i = start; i < start + title.length && i < _attrs.length; i++) {
+      _attrs[i].link = uri;
+    }
+    onStyleChanged?.call();
+    notifyListeners();
+  }
+
   /// Applies [mutate] to the selected characters (or to the typing style when
   /// the selection is collapsed), preserving the selection.
   void applyToSelection(void Function(CharAttr) mutate) {

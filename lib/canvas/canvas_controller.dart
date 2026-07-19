@@ -2625,6 +2625,120 @@ class CanvasController extends ChangeNotifier {
     _doOp(_addElementsOp('Insert', pageId, [element]));
   }
 
+  /// Splices an internal link run into a committed text box at [caret] —
+  /// the `[[` trigger's landing. Replaces the `[[` marker (the two chars
+  /// before [caret]) with [title] linked to [uri] plus a trailing plain
+  /// space, styled like the character before the marker. One undoable op.
+  void insertLinkIntoText(
+    String pageId,
+    String elementId,
+    int caret,
+    String title,
+    String uri,
+  ) {
+    final page = pages[pageId];
+    if (page == null || caret < 2) return;
+    TextElement? el;
+    for (final o in page.objects) {
+      if (o.id == elementId && o is TextElement) {
+        el = o;
+        break;
+      }
+    }
+    if (el == null || caret > el.text.length) return;
+    if (el.text.substring(caret - 2, caret) != '[[') return;
+    // Style the link like its surroundings: the run containing the marker.
+    TextRun styleSource = el.runs.isEmpty
+        ? TextRun(
+            text: '',
+            fontSize: el.fontSize,
+            bold: el.bold,
+            italic: el.italic,
+            color: el.color,
+            fontFamily: el.fontFamily,
+          )
+        : el.runs.first;
+    var pos = 0;
+    for (final r in el.runs) {
+      if (caret - 2 < pos + r.text.length) {
+        styleSource = r;
+        break;
+      }
+      pos += r.text.length;
+    }
+    final before = <CanvasElement>[el.deepCopy()];
+    el.runs = replaceRunRange(el.runs, caret - 2, caret, [
+      styleSource.clone()
+        ..text = title
+        ..link = uri,
+      styleSource.clone()
+        ..text = ' '
+        ..link = null,
+    ]);
+    el.rect = autoTextRect(el, page.width - el.rect.left - 6);
+    _stamp([el]);
+    final after = <CanvasElement>[el.deepCopy()];
+    var applied = true;
+    _doOp(
+      _CanvasOp(
+        label: 'Insert link',
+        dirtyPageIds: {pageId},
+        apply: () {
+          if (applied) {
+            applied = false; // live mutation already happened
+            return;
+          }
+          _replaceElements(pageId, after);
+        },
+        revert: () => _replaceElements(pageId, before),
+      ),
+    );
+  }
+
+  /// Edits one link run of a text box (the ✎ affordance): new display text
+  /// and/or destination; a null [newLink] removes the link (the text stays).
+  /// One undoable, `_stamp`ed op; the box re-auto-sizes to the new text.
+  void editLinkRun(
+    String pageId,
+    String elementId,
+    int runIndex, {
+    required String newText,
+    required String? newLink,
+  }) {
+    final page = pages[pageId];
+    if (page == null) return;
+    TextElement? el;
+    for (final o in page.objects) {
+      if (o.id == elementId && o is TextElement) {
+        el = o;
+        break;
+      }
+    }
+    if (el == null || runIndex < 0 || runIndex >= el.runs.length) return;
+    final before = <CanvasElement>[el.deepCopy()];
+    final run = el.runs[runIndex];
+    run.text = newText.isEmpty ? run.text : newText;
+    run.link = newLink;
+    el.rect = autoTextRect(el, page.width - el.rect.left - 6);
+    _stamp([el]);
+    final after = <CanvasElement>[el.deepCopy()];
+    var applied = true;
+    _doOp(
+      _CanvasOp(
+        label: 'Edit link',
+        dirtyPageIds: {pageId},
+        apply: () {
+          if (applied) {
+            applied = false; // live mutation already happened
+            return;
+          }
+          _replaceElements(pageId, after);
+        },
+        revert: () => _replaceElements(pageId, before),
+      ),
+    );
+  }
+
   /// Pastes an internal Connections link as a small tappable "link item": one
   /// auto-sized text box whose single run carries [uri] as its link, showing
   /// [title]. A trailing non-link space keeps the box grabbable/editable

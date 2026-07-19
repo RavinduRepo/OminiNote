@@ -7,6 +7,7 @@ import '../services/link_resolver.dart';
 import '../services/link_service.dart';
 import '../theme/app_theme.dart';
 import 'action_sheet.dart';
+import 'link_target_picker.dart';
 
 /// Copies [endpoint]'s `omninote://link/...` URI to the OS clipboard — the
 /// "Copy link" action every linkable item's menu offers.
@@ -142,7 +143,6 @@ class _ConnectionsListState extends State<_ConnectionsList> {
       identical(other, r.a) ? r.aName : r.bName;
 
   Future<void> _pasteLink() async {
-    final ep = widget.endpoint!;
     final data = await Clipboard.getData('text/plain');
     final target = LinkEndpoint.tryParse(data?.text?.trim() ?? '');
     if (target == null) {
@@ -150,6 +150,19 @@ class _ConnectionsListState extends State<_ConnectionsList> {
           '"Copy link" on any item first.');
       return;
     }
+    await _addTarget(target);
+  }
+
+  Future<void> _chooseTarget() async {
+    final r = await showLinkTargetPicker(context);
+    if (r == null || !mounted) return;
+    final target = endpointOfSearchResult(r);
+    if (target == null) return;
+    await _addTarget(target);
+  }
+
+  Future<void> _addTarget(LinkEndpoint target) async {
+    final ep = widget.endpoint!;
     if (target.sameAs(ep)) {
       _toast('That link points at this very item.');
       return;
@@ -263,10 +276,15 @@ class _ConnectionsListState extends State<_ConnectionsList> {
                     onPressed: () =>
                         copyLinkToClipboard(context, widget.endpoint!),
                   ),
-                  IconButton(
-                    tooltip: 'Paste a copied link here',
+                  PopupMenuButton<String>(
+                    tooltip: 'Add a connection',
                     icon: const Icon(Icons.add, size: 22),
-                    onPressed: _pasteLink,
+                    onSelected: (a) => a == 'paste' ? _pasteLink() : _chooseTarget(),
+                    itemBuilder: (context) => [
+                      iconMenuItem(
+                          'paste', Icons.content_paste, 'Paste copied link'),
+                      iconMenuItem('choose', Icons.search, 'Choose target…'),
+                    ],
                   ),
                 ],
               ],

@@ -37,6 +37,8 @@ import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/action_sheet.dart';
 import '../widgets/connections_sheet.dart';
+import '../widgets/edit_link_sheet.dart';
+import '../widgets/link_target_picker.dart';
 import '../widgets/sync_status_icon.dart';
 import 'canvas_toolbar/adaptive_toolbar_row.dart';
 import 'canvas_toolbar/canvas_chrome_shared.dart';
@@ -483,6 +485,31 @@ class _CanvasScreenState extends State<CanvasScreen>
     final text = data?.text;
     if (text == null || text.isEmpty || !mounted) return;
     if (_textEdit?.controller != rc) return; // session changed under the await
+    // A copied internal link lands as an in-text hyperlink (target's name,
+    // tappable), not as the raw URI string.
+    final linkTarget = LinkEndpoint.tryParse(text.trim());
+    if (linkTarget != null) {
+      final session = _textEdit!;
+      final resolved = await resolveEndpoint(linkTarget);
+      if (!mounted || _textEdit?.controller != rc) return;
+      rc.insertLinkText(
+        resolved.alive && resolved.title.isNotEmpty ? resolved.title : 'Link',
+        linkTarget.toUri(),
+      );
+      await LinkService().addLink(
+        from: LinkEndpoint(
+          notebookId: widget.canvas.notebookId,
+          sectionId: widget.canvas.sectionId,
+          canvasId: widget.canvas.id,
+          pageId: session.pageId,
+          elementIds: [session.element.id],
+        ),
+        to: linkTarget,
+        fromName: 'Link in ${widget.canvas.name}',
+        toName: resolved.title,
+      );
+      return;
+    }
     final sel = rc.selection;
     rc.value = rc.value.replaced(
       sel.isValid ? sel : TextSelection.collapsed(offset: rc.text.length),
@@ -790,6 +817,12 @@ class _CanvasScreenState extends State<CanvasScreen>
           c.toggleCheckboxAt(cb.$1, cb.$2.id, cb.$3);
           return;
         }
+        // The ✎ next to a link edits it; the link text itself opens it.
+        final pencil = _linkPencilAt(e.localPosition);
+        if (pencil != null) {
+          _editLinkAt(pencil);
+          return;
+        }
         final url = _urlAt(e.localPosition);
         if (url != null) {
           _openUrl(url);
@@ -813,6 +846,14 @@ class _CanvasScreenState extends State<CanvasScreen>
         // this branch — do it now rather than leave the old session open.
         if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
         c.toggleCheckboxAt(cb.$1, cb.$2.id, cb.$3);
+        return;
+      }
+      // The ✎ next to a link edits it (text + destination), regardless of
+      // tool — checked before the link itself since they sit side by side.
+      final pencil = _linkPencilAt(e.localPosition);
+      if (pencil != null) {
+        if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
+        _editLinkAt(pencil);
         return;
       }
       // A tap directly on a link opens it, regardless of tool (the blue
@@ -922,6 +963,131 @@ class _CanvasScreenState extends State<CanvasScreen>
       }
     }
     return null;
+  }
+
+  /// True while the `[[` picker is up, so re-entrant editing notifications
+  /// can't stack a second one.
+  bool _linkPickerBusy = false;
+
+  /// Detects a just-typed `[[` at a collapsed caret and opens the link target
+  /// picker. The session is COMMITTED first — the picker is a modal sheet
+  /// whose taps would land outside the TextField and kill the session anyway
+  /// — and the picked link is spliced into the committed element by id
+  /// (replacing the `[[` marker) as its own undoable op.
+  void _maybeTriggerLinkPicker() {
+    if (_linkPickerBusy) return;
+    final session = _textEdit;
+    if (session == null) return;
+    final rc = session.controller;
+    if (rc.value.composing.isValid) return; // mid-IME composition
+    final sel = rc.selection;
+    if (!sel.isValid || !sel.isCollapsed || sel.baseOffset < 2) return;
+    final caret = sel.baseOffset;
+    if (rc.text.substring(caret - 2, caret) != '[[') return;
+
+    _linkPickerBusy = true;
+    final pageId = session.pageId;
+    final elementId = session.element.id;
+    // Post-frame: committing tears the session down, which must not happen
+    // inside the controller's own change notification (same re-entrancy rule
+    // as _handleTypingOverflow).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        _linkPickerBusy = false;
+        return;
+      }
+      if (_textEdit?.element.id == elementId) _commitTextEdit();
+      showLinkTargetPicker(context).then((r) async {
+        _linkPickerBusy = false;
+        if (r == null || !mounted) return;
+        final target = endpointOfSearchResult(r);
+        if (target == null) return;
+        _controller?.insertLinkIntoText(
+            pageId, elementId, caret, r.title, target.toUri());
+        await LinkService().addLink(
+          from: LinkEndpoint(
+            notebookId: widget.canvas.notebookId,
+            sectionId: widget.canvas.sectionId,
+            canvasId: widget.canvas.id,
+            pageId: pageId,
+            elementIds: [elementId],
+          ),
+          to: target,
+          fromName: 'Link in ${widget.canvas.name}',
+          toName: r.title,
+        );
+      });
+    });
+  }
+
+  /// The ✎ link-edit affordance under a screen position — `(pageId, element,
+  /// runIndex, link)` when the tap landed on a pencil glyph (else null).
+  /// Checks a slightly inflated spot rect (the glyph is small) on every text
+  /// box near the point — the pencil can hang past the box's own rect.
+  (String, TextElement, int, String)? _linkPencilAt(Offset screenPos) {
+    final c = _controller!;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return null;
+    final page = c.pages[pageLayout.pageId]!;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    for (final el in page.objects.reversed) {
+      if (el is! TextElement) continue;
+      if (!el.rect.inflate(24).contains(local)) continue;
+      if (el.runs.every((r) => r.link == null)) continue;
+      for (final spot in linkPencilSpots(el)) {
+        if (spot.rect.inflate(4).contains(local)) {
+          return (pageLayout.pageId, el, spot.runIndex, spot.link);
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Opens the Edit-link sheet for a tapped ✎ and applies the result: run
+  /// text/destination via one undoable op, and — when an internal link's
+  /// destination changed — the registry record is retargeted so both sides'
+  /// Connections lists stay truthful.
+  Future<void> _editLinkAt((String, TextElement, int, String) hit) async {
+    final (pageId, el, runIndex, oldLink) = hit;
+    final result = await showEditLinkSheet(
+      context,
+      text: el.runs[runIndex].text,
+      link: oldLink,
+    );
+    if (result == null || !mounted) return;
+    _controller?.editLinkRun(
+      pageId,
+      el.id,
+      runIndex,
+      newText: result.text,
+      newLink: result.link,
+    );
+    // Keep the Connections registry in step for internal links.
+    final oldTarget = LinkEndpoint.tryParse(oldLink);
+    final newTarget =
+        result.link == null ? null : LinkEndpoint.tryParse(result.link!);
+    if (oldTarget == null && newTarget == null) return;
+    final here = LinkEndpoint(
+      notebookId: widget.canvas.notebookId,
+      sectionId: widget.canvas.sectionId,
+      canvasId: widget.canvas.id,
+      pageId: pageId,
+      elementIds: [el.id],
+    );
+    if (oldTarget != null &&
+        (newTarget == null || !newTarget.sameAs(oldTarget))) {
+      await LinkService().removeLinkBetween(here, oldTarget);
+    }
+    if (newTarget != null && (oldTarget == null || !newTarget.sameAs(oldTarget))) {
+      final resolved = await resolveEndpoint(newTarget);
+      await LinkService().addLink(
+        from: here,
+        to: newTarget,
+        fromName: 'Link in ${widget.canvas.name}',
+        toName: resolved.title,
+      );
+    }
   }
 
   /// The link URL under a screen position, if the tap landed on a link run in
@@ -1257,6 +1423,8 @@ class _CanvasScreenState extends State<CanvasScreen>
     c.textColor =
         display.color; // text's own color slot, whatever tool is active
     _remeasureEditing();
+    // `[[` just typed → open the link target picker (Notion-style).
+    _maybeTriggerLinkPicker();
     // Typing or moving the caret can carry it off screen (below the keyboard,
     // past the viewport edge while zoomed) — glide it back into view.
     _scheduleEnsureEditVisible();
@@ -2467,10 +2635,29 @@ class _CanvasScreenState extends State<CanvasScreen>
                             Navigator.pop(context);
                             c.jumpToBookmark(bm);
                           },
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete_outline, size: 20),
-                            tooltip: 'Remove bookmark',
-                            onPressed: () => c.removeBookmark(bm),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.link, size: 20),
+                                tooltip: 'Copy link to this bookmark',
+                                onPressed: () => copyLinkToClipboard(
+                                  context,
+                                  LinkEndpoint(
+                                    notebookId: widget.canvas.notebookId,
+                                    sectionId: widget.canvas.sectionId,
+                                    canvasId: widget.canvas.id,
+                                    bookmarkId: bm.id,
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                icon:
+                                    const Icon(Icons.delete_outline, size: 20),
+                                tooltip: 'Remove bookmark',
+                                onPressed: () => c.removeBookmark(bm),
+                              ),
+                            ],
                           ),
                         );
                       },
