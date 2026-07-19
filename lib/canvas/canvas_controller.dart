@@ -124,8 +124,8 @@ class CanvasController extends ChangeNotifier {
   Offset pan = Offset.zero;
   bool _viewportInitialized = false;
 
-  static const double minZoom = 0.25;
-  static const double maxZoom = 8.0;
+  static const double minZoom = 0.1;
+  static const double maxZoom = 10.0;
 
   /// Pan slack (px) past every edge when the content exceeds the viewport — the
   /// rubber-band "give" you can push the page past its edges while zoomed in.
@@ -133,7 +133,7 @@ class CanvasController extends ChangeNotifier {
   /// gutter; the far edges still over-scroll-to-add a page (that accumulates
   /// beyond this margin regardless). When the content is *smaller* than the
   /// viewport it's centered instead — unaffected, so zooming out is unchanged.
-  static const double _panMargin = 12;
+  static const double _panMargin = 3;
 
   Matrix4 get viewportMatrix => Matrix4.identity()
     ..translateByDouble(pan.dx, pan.dy, 0, 1)
@@ -183,7 +183,7 @@ class CanvasController extends ChangeNotifier {
   void fitPageWidth(String pageId, {bool notify = true}) {
     final l = layout.layoutOf(pageId);
     if (l == null || screenSize.isEmpty) return;
-    const pad = 16.0;
+    const pad = 3.0;
     zoom = ((screenSize.width - pad * 2) / l.rect.width).clamp(
       minZoom,
       maxZoom,
@@ -432,12 +432,10 @@ class CanvasController extends ChangeNotifier {
   // controller: a fast pen stroke calls notifyListeners() on every sampled
   // point, and a widget listening to the whole controller rebuilds on every
   // one of those — the exact jank this was introduced to fix.
-  final ValueNotifier<CanvasTool> toolNotifier =
-      ValueNotifier(CanvasTool.text);
+  final ValueNotifier<CanvasTool> toolNotifier = ValueNotifier(CanvasTool.text);
   final ValueNotifier<bool> toolOptionsOpenNotifier = ValueNotifier(false);
   final ValueNotifier<bool> hasSelectionNotifier = ValueNotifier(false);
-  final ValueNotifier<bool> isDraggingSelectionNotifier =
-      ValueNotifier(false);
+  final ValueNotifier<bool> isDraggingSelectionNotifier = ValueNotifier(false);
   final ValueNotifier<bool> isEditingTextNotifier = ValueNotifier(false);
   final ValueNotifier<bool> clipboardNotifier = ValueNotifier(false);
 
@@ -848,7 +846,8 @@ class CanvasController extends ChangeNotifier {
   bool _snapped = false; // shape currently previewed in [activeStroke]
   int _holdRetries = 0;
   ShapeFit? _snappedFit; // the recognized fit while snapped (for adjust)
-  Offset? _adjustStart; // pen pos at snap; adjust begins once it moves past slop
+  Offset?
+  _adjustStart; // pen pos at snap; adjust begins once it moves past slop
   int? _adjustAnchor; // grabbed anchor once adjusting
 
   // ── Shapes tool (drag-to-draw a chosen kind or a saved template) ─────────
@@ -910,25 +909,32 @@ class CanvasController extends ChangeNotifier {
     final h = (maxY - minY).abs() < 1e-6 ? 1.0 : maxY - minY;
     final polylines = [
       for (final s in strokes)
-        [for (final p in s.points) Offset((p.x - minX) / w, (p.y - minY) / h)]
+        [for (final p in s.points) Offset((p.x - minX) / w, (p.y - minY) / h)],
     ];
-    await SettingsService().addShapeTemplate(ShapeTemplate(
-      id: newModelId('tmpl'),
-      name: name.trim().isEmpty ? 'Shape' : name.trim(),
-      polylines: polylines,
-      createdAt: DateTime.now(),
-    ));
+    await SettingsService().addShapeTemplate(
+      ShapeTemplate(
+        id: newModelId('tmpl'),
+        name: name.trim().isEmpty ? 'Shape' : name.trim(),
+        polylines: polylines,
+        createdAt: DateTime.now(),
+      ),
+    );
     notifyListeners();
   }
 
-  bool _shiftDown() => HardwareKeyboard.instance.logicalKeysPressed.any((k) =>
-      k == LogicalKeyboardKey.shiftLeft || k == LogicalKeyboardKey.shiftRight);
+  bool _shiftDown() => HardwareKeyboard.instance.logicalKeysPressed.any(
+    (k) =>
+        k == LogicalKeyboardKey.shiftLeft || k == LogicalKeyboardKey.shiftRight,
+  );
 
   /// Builds the stamped strokes for [t] scaled into [rect] (Rect.fromPoints
   /// normalizes it). [uniform] (Shift) preserves the template's aspect,
   /// centered in the box. Each polyline becomes one stroke in the pen's ink.
-  List<StrokeElement> _templateStrokes(ShapeTemplate t, Rect rect,
-      {bool uniform = false}) {
+  List<StrokeElement> _templateStrokes(
+    ShapeTemplate t,
+    Rect rect, {
+    bool uniform = false,
+  }) {
     var w = rect.width, h = rect.height, ox = rect.left, oy = rect.top;
     if (uniform) {
       final s = math.min(w, h);
@@ -940,17 +946,20 @@ class CanvasController extends ChangeNotifier {
     final out = <StrokeElement>[];
     for (final poly in t.polylines) {
       if (poly.length < 2) continue;
-      out.add(StrokeElement(
-        id: newModelId('el'),
-        deviceId: SettingsService().deviceId,
-        z: '0|a0:',
-        tool: StrokeTool.pen,
-        color: penColor,
-        size: penSize,
-        points: [
-          for (final u in poly) StrokePoint(ox + u.dx * w, oy + u.dy * h, 0.5)
-        ],
-      ));
+      out.add(
+        StrokeElement(
+          id: newModelId('el'),
+          deviceId: SettingsService().deviceId,
+          z: '0|a0:',
+          tool: StrokeTool.pen,
+          color: penColor,
+          size: penSize,
+          points: [
+            for (final u in poly)
+              StrokePoint(ox + u.dx * w, oy + u.dy * h, 0.5),
+          ],
+        ),
+      );
     }
     return out;
   }
@@ -1157,13 +1166,17 @@ class CanvasController extends ChangeNotifier {
         final shift = _shiftDown();
         final tmpl = shapeToolTemplate;
         if (tmpl != null) {
-          previewStrokes =
-              _templateStrokes(tmpl, Rect.fromPoints(start, p), uniform: shift);
+          previewStrokes = _templateStrokes(
+            tmpl,
+            Rect.fromPoints(start, p),
+            uniform: shift,
+          );
         } else {
           final stroke = activeStroke;
           if (stroke == null) return;
           stroke.points = pointsForShape(
-              shapeToolFit(shapeToolKind, start, p, constrain: shift));
+            shapeToolFit(shapeToolKind, start, p, constrain: shift),
+          );
           stroke.invalidateCache();
         }
         notifyListeners();
@@ -1299,7 +1312,9 @@ class CanvasController extends ChangeNotifier {
       }
       return;
     }
-    _preSnapPoints = [for (final p in stroke.points) StrokePoint(p.x, p.y, p.p)];
+    _preSnapPoints = [
+      for (final p in stroke.points) StrokePoint(p.x, p.y, p.p),
+    ];
     _snappedFit = fit;
     _adjustAnchor = null;
     final lastPt = stroke.points.last;
@@ -1354,8 +1369,15 @@ class CanvasController extends ChangeNotifier {
     stroke.points = [for (final p in freehand) StrokePoint(p.x, p.y, p.p)];
     stroke.invalidateCache();
     _doOp(_addElementsOp('Draw', pageId, [stroke]));
-    _doOp(_swapPointsOp('Shape', pageId, stroke,
-        before: freehand, after: shapePoints));
+    _doOp(
+      _swapPointsOp(
+        'Shape',
+        pageId,
+        stroke,
+        before: freehand,
+        after: shapePoints,
+      ),
+    );
   }
 
   /// Test seam: runs the two-op snapped-shape commit as the hold gesture would
@@ -1367,8 +1389,7 @@ class CanvasController extends ChangeNotifier {
     String pageId,
     StrokeElement strokeWithShapePoints,
     List<StrokePoint> freehand,
-  ) =>
-      _commitSnappedShape(pageId, strokeWithShapePoints, freehand);
+  ) => _commitSnappedShape(pageId, strokeWithShapePoints, freehand);
 
   /// Undoable op that swaps a stroke's points (freehand ↔ shape), stamping on
   /// both apply and revert so rev climbs monotonically (LWW-safe). Snapshots
@@ -1416,9 +1437,7 @@ class CanvasController extends ChangeNotifier {
       // Cheap bbox reject before the per-segment scan. `el.bounds` is padded by
       // the stroke's own width, so inflating by the eraser radius stays
       // conservative — anything `_strokeHit` could hit is inside this rect.
-      if (!el.bounds
-          .inflate(eraserSize + el.size / 2)
-          .contains(local)) {
+      if (!el.bounds.inflate(eraserSize + el.size / 2).contains(local)) {
         continue;
       }
       if (!_strokeHit(el, local)) continue;
@@ -1427,8 +1446,7 @@ class CanvasController extends ChangeNotifier {
       // A segment WE created earlier in this gesture isn't persisted yet —
       // splitting it again just replaces it in the added set, no tombstone.
       final gestureSegs = _segAccum[page.id];
-      final isOwnSegment =
-          gestureSegs?.any((s) => s.id == el.id) ?? false;
+      final isOwnSegment = gestureSegs?.any((s) => s.id == el.id) ?? false;
 
       page.strokes.removeAt(i);
       if (isOwnSegment) {
@@ -1484,18 +1502,20 @@ class CanvasController extends ChangeNotifier {
     var runStart = -1;
     void flush(int end) {
       if (runStart >= 0 && end - runStart >= 2) {
-        out.add(StrokeElement(
-          id: newModelId('el'),
-          deviceId: SettingsService().deviceId,
-          z: stroke.z,
-          tool: stroke.tool,
-          color: stroke.color,
-          size: stroke.size,
-          points: [
-            for (var j = runStart; j < end; j++)
-              StrokePoint(pts[j].x, pts[j].y, pts[j].p),
-          ],
-        )..zIndex = stroke.zIndex);
+        out.add(
+          StrokeElement(
+            id: newModelId('el'),
+            deviceId: SettingsService().deviceId,
+            z: stroke.z,
+            tool: stroke.tool,
+            color: stroke.color,
+            size: stroke.size,
+            points: [
+              for (var j = runStart; j < end; j++)
+                StrokePoint(pts[j].x, pts[j].y, pts[j].p),
+            ],
+          )..zIndex = stroke.zIndex,
+        );
       }
       runStart = -1;
     }
@@ -1550,7 +1570,9 @@ class CanvasController extends ChangeNotifier {
     };
     final segments = {
       for (final pid in pageIds)
-        pid: [for (final s in (segs[pid] ?? const <StrokeElement>[])) _ElSlot(s)],
+        pid: [
+          for (final s in (segs[pid] ?? const <StrokeElement>[])) _ElSlot(s),
+        ],
     };
 
     _doOp(
@@ -1820,7 +1842,8 @@ class CanvasController extends ChangeNotifier {
           final page = pages[selectionPageId!];
           if (page == null) break;
           final localPos = canvasPos - pageLayout.rect.topLeft;
-          final leftSide = _dragMode == SelectionHit.resizeTL ||
+          final leftSide =
+              _dragMode == SelectionHit.resizeTL ||
               _dragMode == SelectionHit.resizeBL;
           const minW = 40.0;
           double newLeft = el.rect.left;
@@ -1830,11 +1853,18 @@ class CanvasController extends ChangeNotifier {
             newLeft = localPos.dx.clamp(0.0, right - minW);
             newWidth = right - newLeft;
           } else {
-            newWidth =
-                (localPos.dx - el.rect.left).clamp(minW, page.width - el.rect.left);
+            newWidth = (localPos.dx - el.rect.left).clamp(
+              minW,
+              page.width - el.rect.left,
+            );
           }
           el.manualWidth = newWidth;
-          el.rect = Rect.fromLTWH(newLeft, el.rect.top, newWidth, el.rect.height);
+          el.rect = Rect.fromLTWH(
+            newLeft,
+            el.rect.top,
+            newWidth,
+            el.rect.height,
+          );
           el.rect = autoTextRect(el, page.width - newLeft - 6);
           _dragLast = canvasPos;
           _recomputeSelectionBounds();
@@ -1867,7 +1897,8 @@ class CanvasController extends ChangeNotifier {
       case SelectionHit.resizeT:
       case SelectionHit.resizeB:
         final horizontal =
-            _dragMode == SelectionHit.resizeL || _dragMode == SelectionHit.resizeR;
+            _dragMode == SelectionHit.resizeL ||
+            _dragMode == SelectionHit.resizeR;
         // Text: a horizontal side handle changes the wrap width (same as a
         // corner); a vertical one does nothing (height follows the content).
         if (selectionIsTextOnly && selection.length == 1) {
@@ -1885,12 +1916,18 @@ class CanvasController extends ChangeNotifier {
             newLeft = localPos.dx.clamp(0.0, right - minW);
             newWidth = right - newLeft;
           } else {
-            newWidth = (localPos.dx - el.rect.left)
-                .clamp(minW, page.width - el.rect.left);
+            newWidth = (localPos.dx - el.rect.left).clamp(
+              minW,
+              page.width - el.rect.left,
+            );
           }
           el.manualWidth = newWidth;
-          el.rect =
-              Rect.fromLTWH(newLeft, el.rect.top, newWidth, el.rect.height);
+          el.rect = Rect.fromLTWH(
+            newLeft,
+            el.rect.top,
+            newWidth,
+            el.rect.height,
+          );
           el.rect = autoTextRect(el, page.width - newLeft - 6);
           _dragLast = canvasPos;
           _recomputeSelectionBounds();
@@ -2484,12 +2521,14 @@ class CanvasController extends ChangeNotifier {
     // Dedup: raise (never lower) the tombstone's rev to the element's current
     // rev. Local remove-then-add is safe — the merge takes the higher rev.
     list.removeWhere((e) => e.strokeId == el.id);
-    list.add(EraseTombstone(
-      strokeId: el.id,
-      rev: el.rev,
-      erasedAt: DateTime.now(),
-      deviceId: SettingsService().deviceId,
-    ));
+    list.add(
+      EraseTombstone(
+        strokeId: el.id,
+        rev: el.rev,
+        erasedAt: DateTime.now(),
+        deviceId: SettingsService().deviceId,
+      ),
+    );
   }
 
   /// Bumps [el]'s rev above the highest tombstone for its id on [page], so the
@@ -3349,14 +3388,18 @@ class CanvasController extends ChangeNotifier {
           // If the page was already re-linked out of band (restored from the
           // recycle bin while this canvas stayed open), don't re-insert its
           // row — that would leave two rows referencing the same page id.
-          final alreadyReferenced =
-              canvas.rows.any((r) => r.pageIds.contains(pageId));
+          final alreadyReferenced = canvas.rows.any(
+            (r) => r.pageIds.contains(pageId),
+          );
           if (!alreadyReferenced) {
             if (rowBecomesEmpty) {
               canvas.rows.insert(math.min(rowIndex, canvas.rows.length), row);
             }
             if (!row.pageIds.contains(pageId)) {
-              row.pageIds.insert(math.min(colIndex, row.pageIds.length), pageId);
+              row.pageIds.insert(
+                math.min(colIndex, row.pageIds.length),
+                pageId,
+              );
             }
           }
           // Restored to `pages` — the normal dirty-flush will persist it
@@ -3450,8 +3493,9 @@ class CanvasController extends ChangeNotifier {
 
   /// Flat list of all page ids in document order (rows top→bottom, pages
   /// left→right within a row). The page-organizer works on this order.
-  List<String> get orderedPageIds =>
-      [for (final row in canvas.rows) ...row.pageIds];
+  List<String> get orderedPageIds => [
+    for (final row in canvas.rows) ...row.pageIds,
+  ];
 
   /// Reorders pages to match [newOrder] (a permutation of [orderedPageIds]).
   /// Rows are preserved: pages that were in the same multi-page row and remain
@@ -3548,8 +3592,9 @@ class CanvasController extends ChangeNotifier {
   }
 
   /// The current structure as a list of rows of page ids (for the organizer).
-  List<List<String>> get pageRows =>
-      [for (final row in canvas.rows) [...row.pageIds]];
+  List<List<String>> get pageRows => [
+    for (final row in canvas.rows) [...row.pageIds],
+  ];
 
   bool _sameRows(List<PageRow> a, List<PageRow> b) {
     if (a.length != b.length) return false;
