@@ -29,4 +29,20 @@ class LinkNavigator {
     h(r);
     return true;
   }
+
+  /// One-shot handoff for element-endpoint navigation: set just before a
+  /// reveal (or a same-canvas jump), consumed by the target CanvasScreen once
+  /// its pages have loaded — which then scrolls to the elements and flashes
+  /// them. A plain field (not part of [SearchResult]) so the search model
+  /// stays untouched.
+  ({String canvasId, String pageId, List<String> elementIds})?
+      pendingElementFocus;
+
+  /// Consumes and returns the pending focus if it targets [canvasId].
+  ({String pageId, List<String> elementIds})? takeFocusFor(String canvasId) {
+    final f = pendingElementFocus;
+    if (f == null || f.canvasId != canvasId) return null;
+    pendingElementFocus = null;
+    return (pageId: f.pageId, elementIds: f.elementIds);
+  }
 }

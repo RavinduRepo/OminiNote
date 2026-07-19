@@ -12,12 +12,19 @@ class CharAttr {
   Color color;
   String family;
 
+  /// Hyperlink carried by this character (external URL or internal
+  /// `omninote://link/` URI). Kept through the edit round-trip so opening a
+  /// link box for editing doesn't silently strip its links on commit. Typing
+  /// never extends a link: the caret-move style adoption clears it.
+  String? link;
+
   CharAttr({
     required this.fontSize,
     required this.bold,
     required this.italic,
     required this.color,
     required this.family,
+    this.link,
   });
 
   CharAttr clone() => CharAttr(
@@ -26,6 +33,7 @@ class CharAttr {
     italic: italic,
     color: color,
     family: family,
+    link: link,
   );
 
   bool sameStyle(CharAttr o) =>
@@ -33,7 +41,8 @@ class CharAttr {
       bold == o.bold &&
       italic == o.italic &&
       color.toARGB32() == o.color.toARGB32() &&
-      family == o.family;
+      family == o.family &&
+      link == o.link;
 }
 
 /// A [TextEditingController] that carries a per-character style array and
@@ -465,13 +474,19 @@ class RichTextController extends TextEditingController {
 
   TextStyle _styleFor(CharAttr a) {
     final (family, fallback) = fontFamilyResolve(a.family);
+    final isLink = a.link != null;
+    // Link visuals mirror the painter's (kLinkColor + underline) so the box
+    // looks identical while editing — decoration doesn't affect layout, so
+    // editor/painter parity is preserved.
     return TextStyle(
-      color: a.color,
+      color: isLink ? kLinkColor : a.color,
       fontSize: a.fontSize * displayScale,
       fontFamily: family,
       fontFamilyFallback: fallback,
       fontWeight: a.bold ? FontWeight.w700 : FontWeight.w400,
       fontStyle: a.italic ? FontStyle.italic : FontStyle.normal,
+      decoration: isLink ? TextDecoration.underline : null,
+      decorationColor: isLink ? kLinkColor : null,
       height: 1.3,
     );
   }
@@ -489,6 +504,7 @@ List<CharAttr> attrsFromElement(TextElement el) {
           italic: run.italic,
           color: run.color,
           family: run.fontFamily,
+          link: run.link,
         ),
       );
     }
@@ -525,6 +541,7 @@ List<TextRun> runsFromController(RichTextController rc) {
         italic: a.italic,
         color: a.color,
         fontFamily: a.family,
+        link: a.link,
       ),
     );
     i = j;

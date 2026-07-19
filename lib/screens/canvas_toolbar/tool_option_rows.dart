@@ -4,10 +4,13 @@ import '../../canvas/canvas_controller.dart';
 import '../../canvas/rich_text_controller.dart';
 import '../../canvas/shape_recognizer.dart' show ShapeToolKind;
 import '../../models/element.dart';
+import '../../models/link.dart';
 import '../../models/shape_template.dart';
+import '../../services/link_navigator.dart';
 import '../../services/settings_service.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/color_wheel_picker.dart';
+import '../../widgets/connections_sheet.dart';
 
 const List<Color> _presetColors = [
   Color(0xFFD9553B),
@@ -474,6 +477,20 @@ class _ThicknessPreview extends StatelessWidget {
   }
 }
 
+/// The element endpoint for the current lasso selection (its element ids on
+/// their page), or null when nothing is selected.
+LinkEndpoint? _selectionEndpoint(CanvasController c) {
+  final pageId = c.selectionPageId;
+  if (pageId == null || c.selection.isEmpty) return null;
+  return LinkEndpoint(
+    notebookId: c.canvas.notebookId,
+    sectionId: c.canvas.sectionId,
+    canvasId: c.canvas.id,
+    pageId: pageId,
+    elementIds: c.selection.map((e) => e.id).toList(),
+  );
+}
+
 Widget buildLassoActionRow(
   BuildContext context,
   CanvasController c,
@@ -534,6 +551,39 @@ Widget buildLassoActionRow(
           icon: Icons.flip_to_back,
           label: 'Back',
           onTap: c.sendSelectionToBack,
+        ),
+        // Connections: link this exact selection to anything (element
+        // endpoint = the selected ids on their page).
+        _SelAction(
+          icon: Icons.link,
+          label: 'Copy link',
+          onTap: () {
+            final ep = _selectionEndpoint(c);
+            if (ep != null) copyLinkToClipboard(context, ep);
+          },
+        ),
+        _SelAction(
+          icon: Icons.hub_outlined,
+          label: 'Connections',
+          onTap: () {
+            final ep = _selectionEndpoint(c);
+            if (ep == null) return;
+            showConnectionsSheet(
+              context,
+              title: 'Selection',
+              endpoint: ep,
+              endpointName: 'Selection in ${c.canvas.name}',
+              insideCanvasId: c.canvas.id,
+              onJumpInSameCanvas: (pid) {
+                final f = LinkNavigator().takeFocusFor(c.canvas.id);
+                if (f != null) {
+                  c.focusElements(f.pageId, f.elementIds);
+                } else if (pid != null) {
+                  c.jumpToPage(pid);
+                }
+              },
+            );
+          },
         ),
         // Save a strokes-only selection as a reusable custom shape (Phase 3).
         if (c.selectionIsStrokesOnly)

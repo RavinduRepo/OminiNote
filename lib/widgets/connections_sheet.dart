@@ -101,9 +101,13 @@ class _ConnectionsListState extends State<_ConnectionsList> {
 
   Future<void> _load() async {
     final ep = widget.endpoint;
-    final records = ep != null
-        ? await LinkService().linksOf(ep.leafId)
-        : await LinkService().linksTouchingCanvas(widget.aggregateCanvasId!);
+    final records = ep == null
+        ? await LinkService().linksTouchingCanvas(widget.aggregateCanvasId!)
+        : ep.kind == LinkTargetKind.element
+            // Element endpoints match by id overlap, not leaf equality — a
+            // re-lassoed subset/superset of a linked selection still finds it.
+            ? await LinkService().linksOfElements(ep.elementIds)
+            : await LinkService().linksOf(ep.leafId);
     final rows = <_Row>[];
     for (final r in records) {
       final other = _otherEndOf(r);
@@ -121,7 +125,13 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   /// sides — the side leading *away* from the canvas, falling back to `b`.
   LinkEndpoint _otherEndOf(LinkRecord r) {
     final ep = widget.endpoint;
-    if (ep != null) return r.otherEndOf(ep.leafId) ?? r.b;
+    if (ep != null) {
+      if (ep.kind == LinkTargetKind.element) {
+        final set = ep.elementIds.toSet();
+        return r.a.elementIds.any(set.contains) ? r.b : r.a;
+      }
+      return r.otherEndOf(ep.leafId) ?? r.b;
+    }
     final cid = widget.aggregateCanvasId!;
     if (r.a.canvasId == cid && r.b.canvasId != cid) return r.b;
     if (r.b.canvasId == cid && r.a.canvasId != cid) return r.a;
@@ -164,6 +174,19 @@ class _ConnectionsListState extends State<_ConnectionsList> {
     final reveal = row.resolved.reveal;
     if (reveal == null) return;
     Navigator.of(context).pop();
+    // Element targets hand their ids to the destination canvas (scroll-to +
+    // landing flash) via the one-shot pending-focus channel — consumed by the
+    // same-canvas jump below or by the CanvasScreen the reveal opens.
+    final other = _otherEndOf(row.record);
+    if (other.elementIds.isNotEmpty &&
+        other.canvasId != null &&
+        other.pageId != null) {
+      LinkNavigator().pendingElementFocus = (
+        canvasId: other.canvasId!,
+        pageId: other.pageId!,
+        elementIds: other.elementIds,
+      );
+    }
     // Target inside the canvas we were opened from: jump in place — a shell
     // reveal would open a SECOND CanvasScreen on the same canvas id (two
     // controllers, one autosave — forbidden, same rule as split view).
@@ -173,6 +196,7 @@ class _ConnectionsListState extends State<_ConnectionsList> {
       return;
     }
     if (!LinkNavigator().reveal(reveal)) {
+      LinkNavigator().pendingElementFocus = null; // don't fire much later
       ScaffoldMessenger.of(widget.hostContext).showSnackBar(
         const SnackBar(content: Text('Couldn\'t navigate to the target.')),
       );

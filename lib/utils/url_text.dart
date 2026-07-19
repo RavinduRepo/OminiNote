@@ -18,6 +18,13 @@ final RegExp _urlPattern = RegExp(
 List<TextRun> linkifyRuns(List<TextRun> runs) {
   final out = <TextRun>[];
   for (final run in runs) {
+    // Internal (Connections) links are set deliberately — their display text
+    // is arbitrary (never URL-shaped), so the re-scan below would CLEAR them.
+    // Pass them through untouched.
+    if (run.link?.startsWith('omninote://') ?? false) {
+      out.add(run);
+      continue;
+    }
     final text = run.text;
     if (text.isEmpty) {
       out.add(run..link = null);

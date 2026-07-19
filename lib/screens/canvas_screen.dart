@@ -24,6 +24,10 @@ import '../canvas/text_measure.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
+import '../models/link.dart';
+import '../services/link_navigator.dart';
+import '../services/link_resolver.dart';
+import '../services/link_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/pdf_export_isolate.dart';
@@ -247,10 +251,18 @@ class _CanvasScreenState extends State<CanvasScreen>
     });
     // Jump to a requested page (e.g. a bookmark opened from search) once the
     // first layout has set the screen size, so the fit math has real bounds.
+    // An element-link arrival (LinkNavigator's one-shot pending focus) refines
+    // the same jump: scroll to the elements + flash them.
     final target = widget.initialPageId;
-    if (target != null) {
+    final focus = LinkNavigator().takeFocusFor(widget.canvas.id);
+    if (target != null || focus != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _controller?.jumpToPage(target);
+        if (!mounted) return;
+        if (focus != null) {
+          _controller?.focusElements(focus.pageId, focus.elementIds);
+        } else if (target != null) {
+          _controller?.jumpToPage(target);
+        }
       });
     }
   }
@@ -929,13 +941,55 @@ class _CanvasScreenState extends State<CanvasScreen>
     return null;
   }
 
-  /// Opens [url] in the system browser. Returns true if a tap was consumed.
+  /// Opens [url]: internal `omninote://link/` URIs navigate in-app, anything
+  /// else goes to the system browser.
   Future<void> _openUrl(String url) async {
+    final internal = LinkEndpoint.tryParse(url);
+    if (internal != null) {
+      await _openInternalLink(internal);
+      return;
+    }
     final ok = await launchUrl(
       Uri.parse(url),
       mode: LaunchMode.externalApplication,
     );
     if (!ok && mounted) _toast("Couldn't open $url");
+  }
+
+  /// Navigates a tapped internal link. Same-canvas targets jump in place
+  /// (never a second CanvasScreen on this canvas id — the split-view rule);
+  /// anything else resolves and rides the shell reveal, with element targets
+  /// handing their ids over via [LinkNavigator.pendingElementFocus].
+  Future<void> _openInternalLink(LinkEndpoint e) async {
+    final c = _controller;
+    if (e.canvasId == widget.canvas.id) {
+      if (e.elementIds.isNotEmpty && e.pageId != null) {
+        c?.focusElements(e.pageId!, e.elementIds);
+      } else if (e.bookmarkId != null) {
+        for (final b in widget.canvas.bookmarks) {
+          if (b.id == e.bookmarkId) {
+            c?.jumpToPage(b.pageId);
+            break;
+          }
+        }
+      } else if (e.pageId != null) {
+        c?.jumpToPage(e.pageId!);
+      }
+      return;
+    }
+    final resolved = await resolveEndpoint(e);
+    final reveal = resolved.reveal;
+    if (reveal == null) {
+      if (mounted) _toast('That link\'s target no longer exists');
+      return;
+    }
+    if (e.elementIds.isNotEmpty && e.canvasId != null && e.pageId != null) {
+      LinkNavigator().pendingElementFocus =
+          (canvasId: e.canvasId!, pageId: e.pageId!, elementIds: e.elementIds);
+    }
+    if (!LinkNavigator().reveal(reveal) && mounted) {
+      _toast('Couldn\'t navigate to the link target');
+    }
   }
 
   /// Topmost attachment chip under a screen position.
@@ -1185,7 +1239,9 @@ class _CanvasScreenState extends State<CanvasScreen>
     // the typing style (heading/quote) suppresses one adoption the same way,
     // or the rule's own caret move would clobber it.
     if (selectionMoved && !rc.consumeSuppressStyleAdopt()) {
-      rc.defaults = rc.styleForToolbar().clone();
+      // Never adopt a link into the typing style: typed characters must not
+      // extend a hyperlink (they'd inherit its target invisibly).
+      rc.defaults = rc.styleForToolbar().clone()..link = null;
     }
 
     // Reflect the authoritative current style in the toolbar: for a collapsed
@@ -2072,6 +2128,14 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     final target = c.currentPageLayout;
     if (target == null) return;
+    // An internal Connections link pastes as a tappable "link item" (name +
+    // link in one small box) and registers the connection, so the target's
+    // Connections list shows this placement.
+    final linkTarget = LinkEndpoint.tryParse(text.trim());
+    if (linkTarget != null) {
+      await _pasteLinkItem(linkTarget, target.pageId);
+      return;
+    }
     final base = TextRun(
       text: '',
       fontSize: c.textFontSize,
@@ -2099,6 +2163,32 @@ class _CanvasScreenState extends State<CanvasScreen>
     // one base-styled run.
     final boxes = c.insertRunsAsText(target.pageId, [base..text = text]);
     if (boxes > 1) _toast('Pasted text across $boxes pages');
+  }
+
+  /// Lands a pasted `omninote://link/` URI as a link item and records the
+  /// two-way connection (from = the new element, to = the link's target).
+  Future<void> _pasteLinkItem(LinkEndpoint linkTarget, String pageId) async {
+    final c = _controller!;
+    final resolved = await resolveEndpoint(linkTarget);
+    final el = c.insertLinkItem(
+      pageId,
+      linkTarget.toUri(),
+      resolved.alive && resolved.title.isNotEmpty ? resolved.title : 'Link',
+    );
+    if (el == null) return;
+    await LinkService().addLink(
+      from: LinkEndpoint(
+        notebookId: widget.canvas.notebookId,
+        sectionId: widget.canvas.sectionId,
+        canvasId: widget.canvas.id,
+        pageId: pageId,
+        elementIds: [el.id],
+      ),
+      to: linkTarget,
+      fromName: 'Link in ${widget.canvas.name}',
+      toName: resolved.title,
+    );
+    if (mounted) _toast('Pasted link to ${resolved.title}');
   }
 
   // ── Sheets: page settings, navigator, attachments ────────────────────
@@ -2306,10 +2396,19 @@ class _CanvasScreenState extends State<CanvasScreen>
       title: widget.canvas.name,
       aggregateCanvasId: widget.canvas.id,
       insideCanvasId: widget.canvas.id,
-      onJumpInSameCanvas: (pageId) {
-        if (pageId != null) _controller?.jumpToPage(pageId);
-      },
+      onJumpInSameCanvas: _jumpInThisCanvas,
     );
+  }
+
+  /// A same-canvas Connections jump: element focus when the sheet handed ids
+  /// over via the pending-focus channel, else a plain page jump.
+  void _jumpInThisCanvas(String? pageId) {
+    final focus = LinkNavigator().takeFocusFor(widget.canvas.id);
+    if (focus != null) {
+      _controller?.focusElements(focus.pageId, focus.elementIds);
+    } else if (pageId != null) {
+      _controller?.jumpToPage(pageId);
+    }
   }
 
   Future<void> _showBookmarks() async {

@@ -39,6 +39,7 @@ class CanvasPainter extends CustomPainter {
             controller,
             controller.audioPlayheadNotifier,
             controller.readAloudHighlightNotifier,
+            controller.linkFlashNotifier,
           ]),
         );
 
@@ -164,6 +165,31 @@ class CanvasPainter extends CustomPainter {
         if (s.id == skipped) continue;
         if (strokeActiveAt(s.createdAt, playhead)) {
           _paintAudioGlow(canvas, s);
+        }
+      }
+    }
+
+    // Connections landing flash: halo the elements an internal link led to.
+    // Like the audio glow — outside the picture cache, no-op when idle.
+    final flash = controller.linkFlashNotifier.value;
+    if (flash != null && flash.pageId == page.id) {
+      for (final el in [...page.strokes, ...page.objects]) {
+        if (!flash.ids.contains(el.id)) continue;
+        if (el is StrokeElement) {
+          _paintAudioGlow(canvas, el);
+        } else {
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(
+              el.bounds.inflate(6 / controller.zoom),
+              Radius.circular(4 / controller.zoom),
+            ),
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 3 / controller.zoom
+              ..color = accentColor.withValues(alpha: 0.6)
+              ..maskFilter =
+                  MaskFilter.blur(BlurStyle.normal, 2 / controller.zoom),
+          );
         }
       }
     }

@@ -2625,6 +2625,40 @@ class CanvasController extends ChangeNotifier {
     _doOp(_addElementsOp('Insert', pageId, [element]));
   }
 
+  /// Pastes an internal Connections link as a small tappable "link item": one
+  /// auto-sized text box whose single run carries [uri] as its link, showing
+  /// [title]. A trailing non-link space keeps the box grabbable/editable
+  /// (same affordance linkifyRuns adds to all-link boxes). Returns the
+  /// created element so the caller can register the connection.
+  TextElement? insertLinkItem(String pageId, String uri, String title) {
+    final page = pages[pageId];
+    if (page == null) return null;
+    TextRun run(String text, {String? link}) => TextRun(
+          text: text,
+          fontSize: textFontSize,
+          bold: false,
+          italic: false,
+          color: textColor,
+          fontFamily: textFontFamily,
+          link: link,
+        );
+    final el = TextElement(
+      id: newModelId('el'),
+      deviceId: SettingsService().deviceId,
+      rect: const Rect.fromLTWH(0, 0, 10, 10),
+      runs: [run(title, link: uri), run(' ')],
+      fontFamily: textFontFamily,
+      fontSize: textFontSize,
+      color: textColor,
+    );
+    el.rect = autoTextRect(el, page.width * 0.85);
+    final shift = Offset(page.width / 2, page.height / 2) - el.rect.center;
+    el.translate(shift.dx, shift.dy);
+    if (el.rect.top < 16) el.translate(0, 16 - el.rect.top);
+    _doOp(_addElementsOp('Paste link', pageId, [el]));
+    return el;
+  }
+
   /// Pastes [runs] as text starting on [pageId]. Fits on the page → one
   /// auto-sized box centered there (the classic paste). Taller than the page
   /// → split at line boundaries into **linked** continuation boxes
@@ -3806,6 +3840,39 @@ class CanvasController extends ChangeNotifier {
     if (playhead != null) _followAudioGlow(playhead);
   }
 
+  // ── Connections: navigate-to-element landing flash ─────────────────────
+
+  /// Elements briefly highlighted after arriving via an internal link — the
+  /// painter merges this into its repaint listenable and draws an accent halo
+  /// around them (outside the picture cache; a pure no-op when null).
+  final ValueNotifier<({String pageId, Set<String> ids})?> linkFlashNotifier =
+      ValueNotifier(null);
+  Timer? _linkFlashTimer;
+
+  /// Scrolls the elements [ids] on [pageId] into view (keeping zoom) and
+  /// flashes them for a moment — the landing move of an element link. Falls
+  /// back to a plain page jump when none of the ids exist any more.
+  void focusElements(String pageId, List<String> ids) {
+    final page = pages[pageId];
+    final l = layout.layoutOf(pageId);
+    if (page == null || l == null) return;
+    Rect? bounds;
+    for (final el in [...page.strokes, ...page.objects]) {
+      if (!ids.contains(el.id)) continue;
+      bounds = bounds == null ? el.bounds : bounds.expandToInclude(el.bounds);
+    }
+    if (bounds == null) {
+      jumpToPage(pageId);
+      return;
+    }
+    ensureCanvasRectVisible(bounds.shift(l.rect.topLeft), margin: 64);
+    linkFlashNotifier.value = (pageId: pageId, ids: ids.toSet());
+    _linkFlashTimer?.cancel();
+    _linkFlashTimer = Timer(const Duration(milliseconds: 2000), () {
+      linkFlashNotifier.value = null;
+    });
+  }
+
   /// Gently keeps the ink glowing under the audio playhead in view — pans
   /// (keeping zoom) only when the glow is off screen, mirroring read-aloud's
   /// [_followReading]. Runs only from the playback position listener while a
@@ -4385,6 +4452,8 @@ class CanvasController extends ChangeNotifier {
     clipboardNotifier.dispose();
     isRecordingAudioNotifier.dispose();
     audioPlayheadNotifier.dispose();
+    _linkFlashTimer?.cancel();
+    linkFlashNotifier.dispose();
     readAloudActive.dispose();
     readMainColumnOnly.dispose();
     readAloudHighlightNotifier.dispose();

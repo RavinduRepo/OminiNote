@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart' show PdfDocument;
 import '../models/canvas.dart';
 import '../models/canvas_page.dart';
+import '../models/link.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
@@ -67,6 +68,55 @@ class NotebookService {
   /// save journals + uploads like any local edit.
   Future<void> saveLinksJson(Map<String, dynamic> data) =>
       _writeAtomic(linksFile, jsonEncode(data));
+
+  /// Rewrites Connections endpoints per [idMap] (old→new container ids) after
+  /// a notebook re-key, so links **follow a moved notebook** instead of dying
+  /// against the tombstoned old ids. Raw-json based (LinkService depends on
+  /// this service, not vice versa); each touched record's rev is bumped so the
+  /// rewrite wins LWW everywhere, and `notifyDataChanged` flushes the
+  /// LinkService cache.
+  Future<void> remapLinkIds(Map<String, String> idMap) async {
+    if (idMap.isEmpty) return;
+    final raw = await readLinksJson();
+    var changed = false;
+    for (final e in raw.entries) {
+      final j = e.value;
+      if (j is! Map<String, dynamic>) continue;
+      final a = _remapEndpointUri(j['a'] as String?, idMap);
+      final b = _remapEndpointUri(j['b'] as String?, idMap);
+      if (a == null && b == null) continue;
+      if (a != null) j['a'] = a;
+      if (b != null) j['b'] = b;
+      j['rev'] = ((j['rev'] as num?)?.toInt() ?? 1) + 1;
+      j['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
+      j['deviceId'] = SettingsService().deviceId;
+      changed = true;
+    }
+    if (changed) {
+      await saveLinksJson(raw);
+      SyncService().notifyDataChanged();
+    }
+  }
+
+  /// The endpoint URI with any mapped ids replaced, or null when nothing in it
+  /// is mapped (or it doesn't parse).
+  static String? _remapEndpointUri(String? uri, Map<String, String> idMap) {
+    final e = LinkEndpoint.tryParse(uri ?? '');
+    if (e == null) return null;
+    final nb = idMap[e.notebookId];
+    final sec = e.sectionId == null ? null : idMap[e.sectionId!];
+    final cv = e.canvasId == null ? null : idMap[e.canvasId!];
+    if (nb == null && sec == null && cv == null) return null;
+    return LinkEndpoint(
+      notebookId: nb ?? e.notebookId,
+      sectionId: sec ?? e.sectionId,
+      canvasId: cv ?? e.canvasId,
+      pageId: e.pageId,
+      elementIds: e.elementIds,
+      bookmarkId: e.bookmarkId,
+      folderId: e.folderId,
+    ).toUri();
+  }
 
   static const int _storageVersion = 2;
 
@@ -255,8 +305,14 @@ class NotebookService {
     final data = await _readIndex();
     if (data[oldId] == null) return null;
 
-    final newNotebookId =
-        await _deepReidNotebookCopy(data, oldId, syncTarget: destAccountId);
+    // Collect the old→new id mapping so Connections link endpoints follow the
+    // move instead of dying against the tombstoned old ids (folder/page/
+    // bookmark/element ids are preserved by the clone, so remapping the three
+    // container levels is complete).
+    final idMap = <String, String>{};
+    final newNotebookId = await _deepReidNotebookCopy(
+        data, oldId, syncTarget: destAccountId, collectIdMap: idMap);
+    await remapLinkIds(idMap);
 
     // Tombstone the old id (its syncTarget stays the *source* account, so the
     // source account's notebooks.json carries the delete to other devices).
@@ -285,9 +341,11 @@ class NotebookService {
     String srcId, {
     required String? syncTarget,
     String? name,
+    Map<String, String>? collectIdMap,
   }) async {
     final srcNb = Notebook.fromJson(data[srcId] as Map<String, dynamic>);
     final newNotebookId = newId();
+    collectIdMap?[srcId] = newNotebookId;
     final sectionIdMap = <String, String>{};
     for (final oldSecId in srcNb.allSectionIds) {
       final sec = await getSection(srcId, oldSecId);
@@ -298,6 +356,7 @@ class NotebookService {
         canvasIdMap[oldCanvasId] = await _duplicateCanvasDir(
             srcId, oldSecId, oldCanvasId, newNotebookId, newSecId);
       }
+      collectIdMap?.addAll(canvasIdMap);
       await _writeAtomic(
         _sectionFile(newNotebookId, newSecId),
         jsonEncode(
@@ -314,6 +373,7 @@ class NotebookService {
       );
       sectionIdMap[oldSecId] = newSecId;
     }
+    collectIdMap?.addAll(sectionIdMap);
     final newNb = Notebook(
       id: newNotebookId,
       deviceId: SettingsService().deviceId,

@@ -60,6 +60,19 @@ class LinkService {
       ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
   }
 
+  /// Alive connections where either side is an element endpoint intersecting
+  /// [elementIds] — the Connections list for a lasso selection (any overlap
+  /// counts, so re-selecting a superset/subset still finds the link).
+  Future<List<LinkRecord>> linksOfElements(List<String> elementIds) async {
+    await _ensureLoaded();
+    final set = elementIds.toSet();
+    bool touches(LinkEndpoint e) => e.elementIds.any(set.contains);
+    return _records.values
+        .where((r) => r.deletedAt == null && (touches(r.a) || touches(r.b)))
+        .toList()
+      ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
+  }
+
   /// Alive connections touching anything inside canvas [canvasId] (the canvas
   /// itself, its pages, elements or bookmarks) — the canvas ⋯ menu's
   /// "All connections" aggregate.
