@@ -139,6 +139,83 @@ class LinkService {
     await _persist();
   }
 
+  /// Drops the visible reciprocal marker next to an element endpoint [at] —
+  /// a small hyperlink pointing back at the connection's other side, so BOTH
+  /// linked spots show something on their canvases. Routed through the open
+  /// canvas's live controller when it's open (its autosave would clobber a
+  /// disk write), else written into the page file. Null for non-element
+  /// endpoints or when the target page is gone.
+  Future<String?> dropMarkerNear(
+    LinkEndpoint at, {
+    required String uri,
+    required String title,
+  }) async {
+    if (at.kind != LinkTargetKind.element ||
+        at.sectionId == null ||
+        at.canvasId == null ||
+        at.pageId == null) {
+      return null;
+    }
+    final open = await SyncService().insertMarkerInOpenCanvas(
+        at.canvasId!, at.pageId!, at.elementIds, uri, title);
+    if (open.handled) return open.markerId;
+    return NotebookService().addLinkMarkerToPage(
+      notebookId: at.notebookId,
+      sectionId: at.sectionId!,
+      canvasId: at.canvasId!,
+      pageId: at.pageId!,
+      nearIds: at.elementIds,
+      uri: uri,
+      title: title,
+    );
+  }
+
+  /// [addLink] plus both-sides visibility: when [to] is an element endpoint,
+  /// a reciprocal marker (linking back to [from]) is dropped next to its
+  /// elements and its id folded into the record's target side — which is what
+  /// lets that marker's ✎ retarget this very record. Dedup is by element-id
+  /// OVERLAP (marker ids make exact-pair matching blind), so re-adding an
+  /// existing connection never duplicates markers.
+  Future<LinkRecord> addLinkWithReciprocalMarker({
+    required LinkEndpoint from,
+    required LinkEndpoint to,
+    String fromName = '',
+    String toName = '',
+  }) async {
+    await _ensureLoaded();
+    bool matches(LinkEndpoint x, LinkEndpoint y) =>
+        x.kind == LinkTargetKind.element && y.kind == LinkTargetKind.element
+            ? x.elementIds.any(y.elementIds.contains)
+            : x.sameAs(y);
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if ((matches(r.a, from) && matches(r.b, to)) ||
+          (matches(r.a, to) && matches(r.b, from))) {
+        return r; // already connected — no duplicate record/marker
+      }
+    }
+    var target = to;
+    if (to.kind == LinkTargetKind.element) {
+      final markerId = await dropMarkerNear(
+        to,
+        uri: from.toUri(),
+        title: fromName.isEmpty ? 'Linked item' : fromName,
+      );
+      if (markerId != null) {
+        target = LinkEndpoint(
+          notebookId: to.notebookId,
+          sectionId: to.sectionId,
+          canvasId: to.canvasId,
+          pageId: to.pageId,
+          elementIds: [...to.elementIds, markerId],
+          bookmarkId: to.bookmarkId,
+          folderId: to.folderId,
+        );
+      }
+    }
+    return addLink(from: from, to: target, fromName: fromName, toName: toName);
+  }
+
   /// Rewrites the record that links [elementId]'s side to [oldTarget] so it
   /// points at [newTarget] instead — keeping the record id, the element side
   /// (all its ids, e.g. a lasso selection + its marker) and the label. Rev

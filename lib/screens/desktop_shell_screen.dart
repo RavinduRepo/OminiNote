@@ -18,6 +18,7 @@ import '../widgets/connections_sheet.dart';
 import '../widgets/item_tree_view.dart';
 import '../widgets/location_picker.dart';
 import '../widgets/notebook_account_badge.dart';
+import '../widgets/scroll_into_view.dart';
 import '../utils/pdf_export_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
@@ -1399,7 +1400,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                             if (glow)
                               Positioned.fill(
                                 child: IgnorePointer(
-                                  child: _glowBox(palette, notebook.id),
+                                  child: ScrollIntoViewOnce(
+                                    key: ValueKey('sv_${notebook.id}'),
+                                    child: _glowBox(palette, notebook.id),
+                                  ),
                                 ),
                               ),
                             InkWell(

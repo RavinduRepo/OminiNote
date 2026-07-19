@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omininote/canvas/canvas_controller.dart';
 import 'package:omininote/canvas/rich_text_controller.dart';
+import 'package:omininote/canvas/text_measure.dart' show stackBelowObstacles;
 import 'package:omininote/models/canvas.dart';
 import 'package:omininote/models/canvas_page.dart';
 import 'package:omininote/models/element.dart';
@@ -115,6 +116,55 @@ void main() {
       c.linkFlashNotifier.value = null;
       c.focusElements('p1', ['nope']);
       expect(c.linkFlashNotifier.value, isNull); // fell back to page jump
+    });
+
+    test('markers at a shared anchor stack into a list, never overlap', () {
+      final c = build();
+      const near = Rect.fromLTWH(60, 100, 120, 40);
+      final els = [
+        for (var i = 0; i < 3; i++)
+          c.insertLinkItem('p1', 'omninote://link/n/nb$i', 'Link $i',
+              nearBounds: near)!,
+      ];
+      final page = c.pages['p1']!;
+      for (var i = 0; i < els.length; i++) {
+        expect(els[i].rect.bottom <= page.height, isTrue);
+        for (var j = i + 1; j < els.length; j++) {
+          expect(els[i].rect.overlaps(els[j].rect), isFalse,
+              reason: 'marker $i overlaps marker $j');
+        }
+      }
+      // Each later marker sits below the previous — a vertical list.
+      expect(els[1].rect.top >= els[0].rect.bottom, isTrue);
+      expect(els[2].rect.top >= els[1].rect.bottom, isTrue);
+    });
+  });
+
+  group('stackBelowObstacles', () {
+    test('no obstacles: candidate is unchanged', () {
+      const r = Rect.fromLTWH(10, 10, 100, 20);
+      expect(stackBelowObstacles(r, const [], pageHeight: 842), r);
+    });
+
+    test('drops below the lowest intersecting obstacle, keeps x', () {
+      const r = Rect.fromLTWH(10, 10, 100, 20);
+      const obstacles = [
+        Rect.fromLTWH(10, 10, 100, 20), // an existing marker at the anchor
+        Rect.fromLTWH(0, 25, 200, 30), // a taller box overlapping the first
+      ];
+      final placed = stackBelowObstacles(r, obstacles, pageHeight: 842);
+      expect(placed.left, 10);
+      expect(placed.top, 55 + 4); // below the lowest obstacle + gap
+      for (final o in obstacles) {
+        expect(placed.overlaps(o), isFalse);
+      }
+    });
+
+    test('clamps back onto the page at the extreme bottom', () {
+      const r = Rect.fromLTWH(10, 0, 100, 20);
+      const obstacles = [Rect.fromLTWH(0, 0, 200, 838)]; // page nearly full
+      final placed = stackBelowObstacles(r, obstacles, pageHeight: 842);
+      expect(placed.bottom, 842);
     });
   });
 }

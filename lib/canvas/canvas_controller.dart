@@ -104,8 +104,28 @@ class CanvasController extends ChangeNotifier {
         onPage: applyRemotePage,
         onStructure: () => unawaited(applyRemoteStructure()),
         onRestorePage: restorePage,
+        onInsertMarker: _insertMarkerFromLink,
       ),
     );
+  }
+
+  /// Dispatched reciprocal-marker insertion (see
+  /// [SyncService.insertMarkerInOpenCanvas]): drop a link item next to the
+  /// union bounds of [nearIds] on [pageId] — in memory, one undoable op.
+  Future<String?> _insertMarkerFromLink(
+    String pageId,
+    List<String> nearIds,
+    String uri,
+    String title,
+  ) async {
+    final page = pages[pageId];
+    if (page == null) return null;
+    Rect? bounds;
+    for (final el in [...page.strokes, ...page.objects]) {
+      if (!nearIds.contains(el.id)) continue;
+      bounds = bounds == null ? el.bounds : bounds.expandToInclude(el.bounds);
+    }
+    return insertLinkItem(pageId, uri, title, nearBounds: bounds)?.id;
   }
 
   final Canvas canvas;
@@ -2780,6 +2800,14 @@ class CanvasController extends ChangeNotifier {
     }
     el.translate(shift.dx, shift.dy);
     if (el.rect.top < 16) el.translate(0, 16 - el.rect.top);
+    // Several connections onto the same item drop their markers at the SAME
+    // anchor — stack below existing text boxes into a list, don't overlap.
+    final placed = stackBelowObstacles(
+      el.rect,
+      [for (final o in page.objects.whereType<TextElement>()) o.rect],
+      pageHeight: page.height,
+    );
+    el.translate(placed.left - el.rect.left, placed.top - el.rect.top);
     // Clamp onto the page (a marker under a selection near the bottom/right
     // edge must stay visible).
     if (el.rect.bottom > page.height) {

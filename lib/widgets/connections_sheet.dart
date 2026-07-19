@@ -192,7 +192,10 @@ class _ConnectionsListState extends State<_ConnectionsList> {
     if (widget.onAddTarget != null) {
       await widget.onAddTarget!(target, resolved);
     } else {
-      await LinkService().addLink(
+      // Reciprocal marker: an element-endpoint target (a pasted lasso/element
+      // link) gets a hyperlink back to this item dropped next to it, so the
+      // linked spot shows the connection on its canvas too.
+      await LinkService().addLinkWithReciprocalMarker(
         from: ep,
         to: target,
         fromName: widget.endpointName,

@@ -496,7 +496,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         resolved.alive && resolved.title.isNotEmpty ? resolved.title : 'Link',
         linkTarget.toUri(),
       );
-      await LinkService().addLink(
+      await LinkService().addLinkWithReciprocalMarker(
         from: LinkEndpoint(
           notebookId: widget.canvas.notebookId,
           sectionId: widget.canvas.sectionId,
@@ -1083,7 +1083,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     if (newTarget == null) return;
     final resolved = await resolveEndpoint(newTarget);
-    await LinkService().addLink(
+    await LinkService().addLinkWithReciprocalMarker(
       from: LinkEndpoint(
         notebookId: widget.canvas.notebookId,
         sectionId: widget.canvas.sectionId,
@@ -2351,7 +2351,11 @@ class _CanvasScreenState extends State<CanvasScreen>
       resolved.alive && resolved.title.isNotEmpty ? resolved.title : 'Link',
     );
     if (el == null) return;
-    await LinkService().addLink(
+    // Reciprocal-marker variant: when the target is itself an element
+    // endpoint (a copied lasso/element link), a hyperlink pointing back at
+    // this pasted item is dropped next to it — so BOTH linked spots show the
+    // connection on their canvases, not just the paste side.
+    await LinkService().addLinkWithReciprocalMarker(
       from: LinkEndpoint(
         notebookId: widget.canvas.notebookId,
         sectionId: widget.canvas.sectionId,

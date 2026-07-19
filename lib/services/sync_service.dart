@@ -30,10 +30,19 @@ class CanvasSyncListener {
   /// disk-level restore. Awaited so the bin sees a fresh state on reload.
   final Future<void> Function(String pageId)? onRestorePage;
 
+  /// Called to drop a link-marker text element next to elements of this OPEN
+  /// canvas (the reciprocal "there is a link here" marker on the other side
+  /// of a new connection) — in memory, so the canvas's own autosave can't
+  /// clobber a disk write. Returns the marker element's id, or null.
+  final Future<String?> Function(
+          String pageId, List<String> nearIds, String uri, String title)?
+      onInsertMarker;
+
   const CanvasSyncListener({
     required this.onPage,
     required this.onStructure,
     this.onRestorePage,
+    this.onInsertMarker,
   });
 }
 
@@ -107,6 +116,21 @@ class SyncService {
     if (cb == null) return false;
     await cb(pageId);
     return true;
+  }
+
+  /// If the named canvas is open, drop a link marker through its live
+  /// controller (see [CanvasSyncListener.onInsertMarker]); `handled: false`
+  /// means "not open" — the caller then edits the page file directly.
+  Future<({bool handled, String? markerId})> insertMarkerInOpenCanvas(
+    String canvasId,
+    String pageId,
+    List<String> nearIds,
+    String uri,
+    String title,
+  ) async {
+    final cb = _canvasListeners[canvasId]?.onInsertMarker;
+    if (cb == null) return (handled: false, markerId: null);
+    return (handled: true, markerId: await cb(pageId, nearIds, uri, title));
   }
 
   // Per-account sync state, keyed by account id (Google `sub`).
