@@ -86,7 +86,19 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   double _sidebarWidth = 300;
   double _canvasListWidth = 230;
+  // The user's explicit collapse choice for the notebook sidebar. Kept
+  // SEPARATE from full-screen and from the Search/Bin/Settings full-pane modes
+  // (which merely hide the panes) so that leaving those never silently
+  // re-expands a sidebar the user collapsed on purpose — it only expands when
+  // the user presses the Notebooks rail button while already in canvas mode.
   bool _sidebarCollapsed = false;
+  // Desktop canvas full-screen. Hides the side panes while active WITHOUT
+  // touching _sidebarCollapsed, so exiting full screen restores whatever the
+  // user had.
+  bool _fullScreen = false;
+  // Pin the canvas-list column so it stays visible even when the notebook
+  // sidebar is collapsed (toggled from the list header).
+  bool _canvasListPinned = false;
 
   static const double _minSidebarWidth = 220;
   static const double _maxSidebarWidth = 460;
@@ -803,9 +815,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                       double.infinity,
                     )
                   : constraints.maxWidth;
-              final desired = _sidebarCollapsed
-                  ? _collapsedWidth
-                  : _sidebarWidth;
+              // Whether the left area is shown at all (a full-pane mode or
+              // full screen hides it), and then whether the notebook sidebar
+              // itself is expanded within that.
+              final panesVisible = _mainMode == _MainMode.canvas && !_fullScreen;
+              final sidebarShown = panesVisible && !_sidebarCollapsed;
+              final desired = sidebarShown ? _sidebarWidth : _collapsedWidth;
               final width = avail.isFinite
                   ? desired.clamp(0.0, avail)
                   : desired;
@@ -814,13 +829,16 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               final remaining = avail.isFinite
                   ? (avail - width).clamp(0.0, double.infinity)
                   : double.infinity;
-              final canvasColumnOpen =
-                  !_sidebarCollapsed && _selectedSection != null;
+              // The canvas list stays open when the sidebar is expanded, or
+              // when pinned (so collapsing the notebook sidebar keeps it).
+              final canvasColumnOpen = panesVisible &&
+                  _selectedSection != null &&
+                  (!_sidebarCollapsed || _canvasListPinned);
               return Row(
                 children: [
                   _buildNavRail(context, theme, palette),
                   _buildSidebar(theme, palette, width),
-                  if (!_sidebarCollapsed)
+                  if (sidebarShown)
                     _resizeDivider(
                       palette,
                       (dx) => setState(() {
@@ -830,7 +848,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                         );
                       }),
                     ),
-                  _buildCanvasColumn(theme, palette, remaining),
+                  _buildCanvasColumn(theme, palette, remaining, canvasColumnOpen),
                   if (canvasColumnOpen)
                     _resizeDivider(
                       palette,
@@ -899,9 +917,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             'Notebooks',
             active: _mainMode == _MainMode.canvas && !_sidebarCollapsed,
             onTap: () => setState(() {
+              // Returning from a full-pane mode just restores the canvas view
+              // with the sidebar in whatever collapse state the user left it;
+              // only an explicit press while already in canvas mode toggles it.
               if (_mainMode != _MainMode.canvas) {
                 _mainMode = _MainMode.canvas;
-                _sidebarCollapsed = false;
               } else {
                 _sidebarCollapsed = !_sidebarCollapsed;
               }
@@ -977,9 +997,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   /// Open a full-pane mode (Search/Bin/Settings): the notebooks + canvas-list
   /// columns collapse, leaving the nav rail + the mode filling the main area.
+  // Only switches the main pane — it deliberately does NOT collapse the
+  // sidebar (the layout already hides the panes whenever _mainMode != canvas),
+  // so returning to Notebooks preserves the user's own collapse choice.
+  // Leaving the canvas view disposes the CanvasWorkspace, so clear _fullScreen
+  // (its onFullScreenChanged(false) won't fire once it's gone).
   void _openMainMode(_MainMode mode) => setState(() {
     _mainMode = mode;
-    _sidebarCollapsed = true;
+    _fullScreen = false;
   });
 
   Widget _buildMainPane(ThemeData theme, AppPalette palette) {
@@ -1016,9 +1041,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         initialPageId: _pendingJumpPageId,
         onCanvasRenamed: _reloadSelectedSection,
         // Desktop full screen: the canvas hides its own app bar/toolbar (its
-        // internal full-screen) AND the shell collapses the side panes so the
-        // canvas fills the window. This callback syncs the collapse.
-        onFullScreenChanged: (fs) => setState(() => _sidebarCollapsed = fs),
+        // internal full-screen) AND the shell hides the side panes so the
+        // canvas fills the window. Tracked separately from _sidebarCollapsed
+        // so exiting full screen restores the user's own collapse choice.
+        onFullScreenChanged: (fs) => setState(() => _fullScreen = fs),
       );
     }
     if (_selectedSection != null) {
@@ -1067,10 +1093,10 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     ThemeData theme,
     AppPalette palette,
     double maxWidth,
+    bool open,
   ) {
     final section = _selectedSection;
-    final open = !_sidebarCollapsed && section != null;
-    final target = open ? _canvasListWidth : 0.0;
+    final target = open && section != null ? _canvasListWidth : 0.0;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 280),
       curve: Curves.easeInOutCubic,
@@ -1144,6 +1170,23 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
+              ),
+              IconButton(
+                icon: Icon(
+                  _canvasListPinned
+                      ? Icons.push_pin
+                      : Icons.push_pin_outlined,
+                  size: 16,
+                  color: _canvasListPinned ? palette.accent : palette.textDim,
+                ),
+                tooltip: _canvasListPinned
+                    ? 'Unpin canvas list'
+                    : 'Pin canvas list (keep it when the sidebar is collapsed)',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                onPressed: () =>
+                    setState(() => _canvasListPinned = !_canvasListPinned),
               ),
               PopupMenuButton<String>(
                 icon: const Icon(Icons.add, size: 18),
