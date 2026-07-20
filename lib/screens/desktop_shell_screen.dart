@@ -123,9 +123,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   Future<void> _openCanvasFromResult(SearchResult r) async {
-    if (_notebooks?.any((n) => n.id == r.notebook.id) != true) {
-      await _loadAll();
-    }
+    // A quick note just created this canvas, so the section tree + canvas maps
+    // are stale — reload so the reveal finds it, then open it embedded.
+    await _loadAll();
     if (!mounted) return;
     setState(() {
       _mainMode = _MainMode.canvas;
@@ -215,7 +215,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
     // Expand super-sections leading to the canvas in the section tree.
     _expandFoldersTo(section.nodes, canvasId);
-    final canvas = _selectedCanvases[canvasId];
+    // Fall back to the result's own canvas object when the list map hasn't
+    // caught up yet (e.g. a just-created quick note) so it still opens.
+    final canvas = _selectedCanvases[canvasId] ?? r.canvas;
     if (canvas == null) return;
     setState(() {
       _selectedCanvas = canvas;
@@ -515,6 +517,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       notebook,
       name,
       parentFolderId: folderId,
+      // Drop the new super-section just below the selected section (top-level).
+      afterId: folderId == null ? _selectedSection?.id : null,
     );
     await _reloadNotebook(notebook.id);
   }
@@ -653,7 +657,13 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (section == null) return;
     final name = await _prompt(title: 'New super-section', hint: 'Group name');
     if (name == null || name.isEmpty) return;
-    await _service.createCanvasFolder(section, name, parentFolderId: folderId);
+    await _service.createCanvasFolder(
+      section,
+      name,
+      parentFolderId: folderId,
+      // Drop the new super-section just below the selected canvas (top-level).
+      afterId: folderId == null ? _selectedCanvas?.id : null,
+    );
     await _reloadSelectedSection();
   }
 

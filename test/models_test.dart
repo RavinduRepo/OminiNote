@@ -703,6 +703,23 @@ void main() {
       expect(ok, isFalse);
       expect(nodes.length, 2);
     });
+
+    test('insertNodeAfter drops a super-section below a selected leaf', () {
+      final nodes = <TreeNode>[LeafNode('a'), LeafNode('b')];
+      final folder = FolderNode(id: 'g', name: 'G');
+      final ok = TreeOps.insertNodeAfter(nodes, 'a', folder);
+      expect(ok, isTrue);
+      expect(nodes[1], same(folder)); // right after 'a'
+      expect(nodes.length, 3);
+    });
+
+    test('insertNodeAfter can target a folder id (below a selected folder)', () {
+      final folder = FolderNode(id: 'g', name: 'G');
+      final nodes = <TreeNode>[LeafNode('a'), folder, LeafNode('b')];
+      final ok = TreeOps.insertNodeAfter(nodes, 'g', LeafNode('new'));
+      expect(ok, isTrue);
+      expect((nodes[2] as LeafNode).refId, 'new'); // after the folder
+    });
   });
 
   group('Element transforms', () {

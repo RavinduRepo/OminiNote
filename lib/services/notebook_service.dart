@@ -860,18 +860,9 @@ class NotebookService {
     String canvasId,
     String? parentFolderId,
     String? afterCanvasId,
-  ) {
-    final leaf = LeafNode(canvasId);
-    if (afterCanvasId != null &&
-        TreeOps.insertLeafAfter(section.nodes, afterCanvasId, leaf)) {
-      return;
-    }
-    final target = parentFolderId == null
-        ? section.nodes
-        : TreeOps.findFolder(section.nodes, parentFolderId)?.children ??
-              section.nodes;
-    target.add(leaf);
-  }
+  ) =>
+      _insertNode(section.nodes, LeafNode(canvasId), parentFolderId,
+          afterCanvasId);
 
   Future<void> renameCanvas(Canvas canvas, String name) async {
     canvas.name = name;
@@ -907,13 +898,10 @@ class NotebookService {
     Notebook notebook,
     String name, {
     String? parentFolderId,
+    String? afterId,
   }) async {
     final folder = _newFolder(name);
-    final target = parentFolderId == null
-        ? notebook.nodes
-        : TreeOps.findFolder(notebook.nodes, parentFolderId)?.children ??
-              notebook.nodes;
-    target.add(folder);
+    _insertNode(notebook.nodes, folder, parentFolderId, afterId);
     await saveNotebook(notebook);
     SyncService().notifyDataChanged(); // reindex search (super-sections match)
   }
@@ -922,15 +910,30 @@ class NotebookService {
     Section section,
     String name, {
     String? parentFolderId,
+    String? afterId,
   }) async {
     final folder = _newFolder(name);
-    final target = parentFolderId == null
-        ? section.nodes
-        : TreeOps.findFolder(section.nodes, parentFolderId)?.children ??
-              section.nodes;
-    target.add(folder);
+    _insertNode(section.nodes, folder, parentFolderId, afterId);
     await saveSection(section);
     SyncService().notifyDataChanged(); // reindex search (super-sections match)
+  }
+
+  /// Places [node] in a tree: after the sibling [afterId] (if given and found —
+  /// so a new item lands just below the selected one, leaf or super-section),
+  /// else at the end of [parentFolderId]'s children (or the top level).
+  void _insertNode(
+    List<TreeNode> nodes,
+    TreeNode node,
+    String? parentFolderId,
+    String? afterId,
+  ) {
+    if (afterId != null && TreeOps.insertNodeAfter(nodes, afterId, node)) {
+      return;
+    }
+    final target = parentFolderId == null
+        ? nodes
+        : TreeOps.findFolder(nodes, parentFolderId)?.children ?? nodes;
+    target.add(node);
   }
 
   Future<void> ungroupInNotebook(Notebook notebook, String folderId) async {
