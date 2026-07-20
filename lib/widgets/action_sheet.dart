@@ -55,31 +55,35 @@ Future<T?> showAdaptiveMenu<T>(
       builder: builder,
     );
   }
+  // Match the plain Material popup menu (the ⋯ overflow look): surface color,
+  // standard elevation + rounded corners, no custom outline. Dropped from the
+  // top-right, where the toolbar / overflow controls live.
   final theme = Theme.of(context);
-  final palette = theme.extension<AppPalette>()!;
+  final popup = theme.popupMenuTheme;
   return showGeneralDialog<T>(
     context: context,
     barrierDismissible: true,
     barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
-    barrierColor: Colors.black.withValues(alpha: 0.06),
-    transitionDuration: const Duration(milliseconds: 150),
+    barrierColor: Colors.black.withValues(alpha: 0.05),
+    transitionDuration: const Duration(milliseconds: 130),
     pageBuilder: (ctx, _, _) {
       final h = MediaQuery.of(ctx).size.height;
       return SafeArea(
         child: Align(
           alignment: Alignment.topRight,
           child: Padding(
-            padding: const EdgeInsets.only(top: 54, right: 12),
+            padding: const EdgeInsets.only(top: 52, right: 10),
             child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: 380, maxHeight: h * 0.82),
+              constraints: BoxConstraints(maxWidth: 320, maxHeight: h * 0.8),
               child: Material(
-                color: theme.colorScheme.surface,
-                elevation: 8,
+                type: MaterialType.card,
+                color: popup.color ?? theme.colorScheme.surface,
+                elevation: popup.elevation ?? 8,
                 clipBehavior: Clip.antiAlias,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(kRadius + 2),
-                  side: BorderSide(color: palette.border),
-                ),
+                shape: popup.shape ??
+                    RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(kRadius),
+                    ),
                 child: builder(ctx),
               ),
             ),
@@ -93,7 +97,7 @@ Future<T?> showAdaptiveMenu<T>(
         opacity: curved,
         child: ScaleTransition(
           alignment: Alignment.topRight,
-          scale: Tween<double>(begin: 0.97, end: 1.0).animate(curved),
+          scale: Tween<double>(begin: 0.95, end: 1.0).animate(curved),
           child: child,
         ),
       );
