@@ -10,6 +10,7 @@ import '../services/drive_service.dart';
 import '../services/notebook_bundle_service.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
+import 'app_toast.dart';
 import 'progress_overlay.dart';
 import 'sync_target_ui.dart';
 
@@ -25,7 +26,7 @@ String _bundleFileName(String notebookName) {
 /// Exports [notebook] to a `.omninote` file and shares it: the native share
 /// sheet on mobile, a save-file dialog on desktop.
 Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
-  final messenger = ScaffoldMessenger.of(context);
+  final overlay = Overlay.of(context, rootOverlay: true);
   // Non-modal progress: the compress runs on a background isolate, so the app
   // stays usable while a big notebook exports.
   final banner = ProgressOverlay.show(context, 'Exporting “${notebook.name}”…');
@@ -55,10 +56,8 @@ Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
         final ext = '.${NotebookBundleService.kExtension}';
         final out = saved.endsWith(ext) ? saved : '$saved$ext';
         await zipFile.copy(out); // copy the file, no bytes in memory
-        messenger.showSnackBar(SnackBar(
-          content: Text('Saved ${out.split(Platform.pathSeparator).last}'),
-          behavior: SnackBarBehavior.floating,
-        ));
+        showAppToastOverlay(
+            overlay, 'Saved ${out.split(Platform.pathSeparator).last}');
       }
       if (await zipFile.exists()) {
         try {
@@ -68,10 +67,7 @@ Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
     }
   } catch (e) {
     banner.close();
-    messenger.showSnackBar(SnackBar(
-      content: Text('Couldn\'t export: $e'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToastOverlay(overlay, "Couldn't export: $e", error: true);
   }
 }
 
@@ -81,13 +77,11 @@ Future<void> shareNotebookCopy(BuildContext context, Notebook notebook) async {
 /// hint to use "Send a copy" otherwise). It's a copy at share time — later edits
 /// don't change what the link delivers.
 Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
-  final messenger = ScaffoldMessenger.of(context);
+  final overlay = Overlay.of(context, rootOverlay: true);
   final accounts = AuthService().accounts.value;
   if (accounts.isEmpty) {
-    messenger.showSnackBar(const SnackBar(
-      content: Text('Sign in to share a link — or use “Send a copy”.'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToastOverlay(
+        overlay, 'Sign in to share a link — or use “Send a copy”.');
     return;
   }
   // Host it on the notebook's own account if connected, else the first account.
@@ -111,10 +105,7 @@ Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
     }
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
     if (fileId == null) {
-      messenger.showSnackBar(const SnackBar(
-        content: Text('Couldn\'t create the link.'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      showAppToastOverlay(overlay, "Couldn't create the link.", error: true);
       return;
     }
     await SharePlus.instance.share(ShareParams(
@@ -123,10 +114,7 @@ Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
     ));
   } catch (e) {
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
-    messenger.showSnackBar(SnackBar(
-      content: Text('Couldn\'t create the link: $e'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToastOverlay(overlay, "Couldn't create the link: $e", error: true);
   }
 }
 
@@ -135,7 +123,7 @@ Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
 Future<Notebook?> importNotebookFromLink(BuildContext context, Uri uri) async {
   final id = uri.queryParameters['id'];
   if (id == null || id.isEmpty) return null;
-  final messenger = ScaffoldMessenger.of(context);
+  final overlay = Overlay.of(context, rootOverlay: true);
 
   _showProgress(context, 'Downloading notebook…');
   List<int>? bytes;
@@ -147,10 +135,8 @@ Future<Notebook?> importNotebookFromLink(BuildContext context, Uri uri) async {
   if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
 
   if (bytes == null) {
-    messenger.showSnackBar(const SnackBar(
-      content: Text('Couldn\'t download the shared notebook.'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToastOverlay(overlay, "Couldn't download the shared notebook.",
+        error: true);
     return null;
   }
   if (!context.mounted) return null;
@@ -241,7 +227,7 @@ Future<Notebook?> _runImport(
   final target = await chooseNewNotebookAccount(context);
   if (target == null || !context.mounted) return null; // cancelled
 
-  final messenger = ScaffoldMessenger.of(context);
+  final overlay = Overlay.of(context, rootOverlay: true);
   final banner = ProgressOverlay.show(context, 'Importing notebook…');
   try {
     final nb = await doImport(target.accountId, banner.report);
@@ -253,17 +239,11 @@ Future<Notebook?> _runImport(
       await SyncService().uploadNotebook(nb.id);
     }
     SyncService().notifyDataChanged(); // reload any open list screen
-    messenger.showSnackBar(SnackBar(
-      content: Text('Imported “${nb.name}”'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToastOverlay(overlay, 'Imported “${nb.name}”');
     return nb;
   } catch (e) {
     banner.close();
-    messenger.showSnackBar(SnackBar(
-      content: Text('Couldn\'t import: $e'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToastOverlay(overlay, "Couldn't import: $e", error: true);
     return null;
   }
 }

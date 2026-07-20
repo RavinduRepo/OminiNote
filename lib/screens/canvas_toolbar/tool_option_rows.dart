@@ -10,6 +10,7 @@ import '../../services/link_navigator.dart';
 import '../../services/link_service.dart';
 import '../../services/settings_service.dart';
 import '../../theme/app_theme.dart';
+import '../../utils/app_toast.dart';
 import '../../widgets/color_wheel_picker.dart';
 import '../../widgets/connections_sheet.dart';
 
@@ -173,10 +174,7 @@ Future<void> _promptSaveShape(BuildContext context, CanvasController c) async {
   if (name == null) return;
   await c.saveSelectionAsShape(name);
   if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Text('Saved to your shapes — pick it in the Shapes tool'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToast(context, 'Saved to your shapes — pick it in the Shapes tool');
   }
 }
 

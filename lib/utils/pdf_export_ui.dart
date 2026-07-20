@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../services/pdf_export_isolate.dart';
 import '../services/pdf_exporter.dart';
+import 'app_toast.dart';
 import 'progress_overlay.dart';
 
 /// Runs a multi-level PDF export ([items]) with a progress dialog and a save
@@ -13,14 +14,9 @@ Future<void> runTreeExport(
   required List<PdfExportItem> items,
   required String fileName,
 }) async {
-  final messenger = ScaffoldMessenger.of(context);
+  final overlay = Overlay.of(context, rootOverlay: true);
   if (items.isEmpty) {
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Nothing to export'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    showAppToastOverlay(overlay, 'Nothing to export');
     return;
   }
 
@@ -54,19 +50,9 @@ Future<void> runTreeExport(
     if (!await f.exists() || await f.length() == 0) {
       await f.writeAsBytes(bytes);
     }
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('Exported to $savedPath'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    showAppToastOverlay(overlay, 'Exported to $savedPath');
   } catch (err) {
     banner.close();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('Export failed: $err'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    showAppToastOverlay(overlay, 'Export failed: $err', error: true);
   }
 }

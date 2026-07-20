@@ -10,6 +10,7 @@ import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../utils/app_toast.dart';
 import '../utils/clipboard_images.dart';
 import '../utils/ink_contrast.dart';
 import '../utils/progress_overlay.dart';
@@ -227,16 +228,14 @@ class _CanvasScreenState extends State<CanvasScreen>
     // screens beneath this canvas are stale too — pop all the way back to the
     // notebooks list, not just one level.
     final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    // Capture the root overlay before popping — after popUntil this context is
+    // gone, but the toast lives in the root overlay and survives.
+    final overlay = Overlay.of(context, rootOverlay: true);
     if (navigator.canPop()) {
       navigator.popUntil((route) => route.isFirst);
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text(
-            'This notebook was moved or deleted on another device.',
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showAppToastOverlay(
+        overlay,
+        'This notebook was moved or deleted on another device.',
       );
     }
   }
@@ -2974,9 +2973,7 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   void _toast(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
-    );
+    showAppToast(context, message);
   }
 
   // ── Voice recording ────────────────────────────────────────────────────
@@ -4286,9 +4283,7 @@ class _ReaderBar extends StatelessWidget {
     final voices = await controller.tts.availableVoices();
     if (!context.mounted) return;
     if (voices.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No selectable voices on this system')),
-      );
+      showAppToast(context, 'No selectable voices on this system');
       return;
     }
     final palette = Theme.of(context).extension<AppPalette>()!;

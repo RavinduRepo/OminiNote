@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/notebook_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/app_toast.dart';
 
 /// The recycle bin: soft-deleted notebooks/sections/canvases, restorable for
 /// 30 days (then the GC sweep removes them permanently). Restore clears the
@@ -85,12 +86,7 @@ class _BinScreenState extends State<BinScreen> {
       await _service.restoreBinItem(item); // bumps dataVersion internally now
     });
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Restored "${item.name}"'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      showAppToast(context, 'Restored "${item.name}"');
     }
   }
 

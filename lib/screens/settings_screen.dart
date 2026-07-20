@@ -6,6 +6,7 @@ import '../services/multi_window_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/app_toast.dart';
 import '../widgets/action_sheet.dart';
 import '../widgets/sync_status_icon.dart';
 
@@ -289,10 +290,7 @@ class _AddAccountTile extends StatelessWidget {
                 final added = await AuthService().addAccount();
                 if (added == null && context.mounted) {
                   final err = AuthService().lastError.value ?? 'Sign-in failed';
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content: Text(err),
-                    behavior: SnackBarBehavior.floating,
-                  ));
+                  showAppToast(context, err, error: true);
                 }
               },
       ),
@@ -431,9 +429,7 @@ class _SignedOutRow extends StatelessWidget {
                       if (acct == null && context.mounted) {
                         final err =
                             AuthService().lastError.value ?? 'Sign-in failed';
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text(err), behavior: SnackBarBehavior.floating),
-                        );
+                        showAppToast(context, err, error: true);
                       }
                     },
                     icon: const Icon(Icons.login, size: 18),
@@ -539,12 +535,7 @@ class _StorageSection extends StatelessWidget {
                 selected: false,
                 onTap: () {
                   SyncService().repair();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Repairing sync…'),
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
+                  showAppToast(context, 'Repairing sync…');
                 },
               ),
             ],
