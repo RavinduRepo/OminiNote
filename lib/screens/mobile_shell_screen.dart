@@ -37,9 +37,13 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
 
   // A PageView so tabs slide horizontally — tapping a tab animates in that
   // tab's direction, and (at a tab root) a horizontal swipe moves between tabs.
-  // Not final: a reveal recreates it (see _jumpToNotebooksTab) to force a clean
-  // landing on the Notebooks tab.
-  PageController _pageController = PageController();
+  final PageController _pageController = PageController();
+
+  // A reveal pins the PageView to the Notebooks tab for a short window so a
+  // stray settle (the off-stage-jump / post-pop layout churn) can't land on an
+  // adjacent tab. See _jumpToNotebooksTab + onPageChanged.
+  bool _revealing = false;
+  Timer? _revealTimer;
 
   // Bumped each time the Bin tab is opened, so the kept-alive BinScreen
   // reloads (something deleted elsewhere must appear when you switch back to it).
@@ -90,26 +94,32 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   ///
   /// A reveal is often triggered from *inside* a full-bleed canvas that covers
   /// this shell on the root navigator. On the frame the canvas is popped, the
-  /// shell's `PageView` is still off-stage and its `PageController` has no
-  /// viewport metrics — a `jumpToPage` there doesn't commit and the controller
-  /// later settles onto the adjacent page (Bin): the "reveal also swipes me
-  /// into the Bin" bug. Deferring the jump wasn't enough, so we sidestep the
-  /// class of timing bugs entirely: **recreate the PageController** at
-  /// `initialPage: _kNotebooks`. A fresh controller starts pinned on Notebooks
-  /// with no stale pixels to settle from. The tab navigators survive because
-  /// they're kept alive by their `GlobalKey`s, independent of this controller.
+  /// shell's `PageView` is off-stage with no viewport metrics, and the pushes
+  /// that follow (for a section/canvas target) churn its layout — so the
+  /// controller can spuriously settle onto the adjacent page (Bin): the "reveal
+  /// also swipes me into the Bin" bug. Jump-timing tricks weren't reliable, so
+  /// we *pin* the tab for a short window instead: while `_revealing`, any
+  /// `onPageChanged` that reports a non-Notebooks page is snapped straight back.
   void _jumpToNotebooksTab() {
-    final old = _pageController;
-    setState(() {
-      _index = _kNotebooks;
-      _pageController = PageController(initialPage: _kNotebooks);
-    });
-    // Dispose the detached old controller after this frame's rebuild swaps in
-    // the new one (disposing it synchronously while still attached throws).
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      old.dispose();
+    _revealing = true;
+    _revealTimer?.cancel();
+    _revealTimer = Timer(const Duration(milliseconds: 550), () {
+      if (!mounted) return;
+      _revealing = false;
       _scheduleSwipeRecheck();
     });
+    setState(() => _index = _kNotebooks);
+    void tryJump() {
+      if (!mounted || !_revealing) return;
+      if (_pageController.hasClients &&
+          _pageController.position.hasContentDimensions) {
+        _pageController.jumpToPage(_kNotebooks);
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) => tryJump());
+      }
+    }
+
+    tryJump();
   }
 
   @override
@@ -174,6 +184,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   void dispose() {
     LinkNavigator().unregister(_revealFromLink);
     LinkNavigator().unregisterOpenCanvas(_revealSearchResult);
+    _revealTimer?.cancel();
     _binReloadTimer?.cancel();
     _pageController.dispose();
     _binRefresh.dispose();
@@ -293,6 +304,14 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
               ? const ClampingScrollPhysics()
               : const NeverScrollableScrollPhysics(),
           onPageChanged: (i) {
+            // While revealing, the PageView may spuriously settle onto an
+            // adjacent tab — snap it back to Notebooks and ignore the report.
+            if (_revealing && i != _kNotebooks) {
+              if (_pageController.hasClients) {
+                _pageController.jumpToPage(_kNotebooks);
+              }
+              return;
+            }
             setState(() => _index = i);
             _scheduleSwipeRecheck(); // the new tab may be drilled in
             _onEnterTab(i); // reload bin / focus search on entry
