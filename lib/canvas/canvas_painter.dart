@@ -69,6 +69,27 @@ class CanvasPainter extends CustomPainter {
       _paintPageNumber(canvas, l.rect, i + 1);
     }
 
+    // In-progress freehand stroke / shape / template preview. Drawn here,
+    // OUTSIDE any per-page clip, translated by the origin page's top-left, so a
+    // stroke that crosses onto a neighbouring page previews as one continuous
+    // line (it commits split into per-page strokes on lift). Its points are in
+    // the origin page's local space.
+    final activeId = controller.activeStrokePageId;
+    if (activeId != null) {
+      final al = controller.layout.layoutOf(activeId);
+      if (al != null) {
+        canvas.save();
+        canvas.translate(al.rect.left, al.rect.top);
+        if (controller.activeStroke != null) {
+          _paintStroke(canvas, controller.activeStroke!);
+        }
+        for (final s in controller.previewStrokes) {
+          _paintStroke(canvas, s);
+        }
+        canvas.restore();
+      }
+    }
+
     canvas.restore();
 
     _paintSelectionOverlay(canvas);
@@ -204,17 +225,6 @@ class CanvasPainter extends CustomPainter {
           RRect.fromRectAndRadius(r.inflate(1), Radius.circular(2 / controller.zoom)),
           paint,
         );
-      }
-    }
-
-    // In-progress stroke on this page (predefined shape / freehand), or a
-    // template's multi-stroke preview.
-    if (controller.activeStrokePageId == page.id) {
-      if (controller.activeStroke != null) {
-        _paintStroke(canvas, controller.activeStroke!);
-      }
-      for (final s in controller.previewStrokes) {
-        _paintStroke(canvas, s);
       }
     }
 
