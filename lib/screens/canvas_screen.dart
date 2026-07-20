@@ -3944,7 +3944,7 @@ class _CanvasToolbar extends StatelessWidget {
             color: theme.colorScheme.surface,
             border: Border(bottom: BorderSide(color: palette.border)),
           ),
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          padding: const EdgeInsets.fromLTRB(12, 3, 12, 3),
           // Fixed height: just the tool icon row. Pen/highlighter/shape/
           // eraser options drop down under the active tool (ToolOptionsPopover
           // in the canvas Stack); lasso/text use their own floating menu / bar.
