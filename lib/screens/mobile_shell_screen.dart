@@ -84,6 +84,32 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     });
   }
 
+  /// Switches the PageView to the Notebooks tab safely.
+  ///
+  /// A reveal is often triggered from *inside* a full-bleed canvas that covers
+  /// this shell on the root navigator. On the frame the canvas is popped, the
+  /// shell's `PageView` is still off-stage and its `PageController` has no
+  /// viewport metrics yet — a synchronous `jumpToPage` there does not commit
+  /// and the controller later settles to an adjacent page (Bin), which is the
+  /// "reveal also swipes me into the Bin" bug. So we set the model index now
+  /// but defer the actual `jumpToPage` until the PageView is laid out (retry
+  /// post-frame until the position has dimensions).
+  void _jumpToNotebooksTab() {
+    setState(() => _index = _kNotebooks);
+    void tryJump() {
+      if (!mounted) return;
+      if (_pageController.hasClients &&
+          _pageController.position.hasContentDimensions) {
+        _pageController.jumpToPage(_kNotebooks);
+        _scheduleSwipeRecheck();
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) => tryJump());
+      }
+    }
+
+    tryJump();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -111,8 +137,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
       _revealSearchResult(r); // in-canvas target: open + flash/jump
       return;
     }
-    _pageController.jumpToPage(_kNotebooks);
-    setState(() => _index = _kNotebooks);
+    _jumpToNotebooksTab();
     final nav = _navKeys[_kNotebooks].currentState;
     if (nav == null) return;
     nav.popUntil((route) => route.isFirst);
@@ -183,8 +208,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   /// Reveals a search result: switch to the Notebooks tab, rebuild its drill-in
   /// stack (so Back walks up the hierarchy), and open a canvas above the shell.
   void _revealSearchResult(SearchResult r) {
-    _pageController.jumpToPage(_kNotebooks);
-    setState(() => _index = _kNotebooks);
+    _jumpToNotebooksTab();
     final nav = _navKeys[_kNotebooks].currentState;
     if (nav == null) return;
     nav.popUntil((route) => route.isFirst);
