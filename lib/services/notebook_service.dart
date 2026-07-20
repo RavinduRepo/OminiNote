@@ -639,6 +639,7 @@ class NotebookService {
     String notebookId,
     String name, {
     String? parentFolderId,
+    String? afterSectionId,
   }) async {
     final section = Section(
       id: newId(),
@@ -655,10 +656,16 @@ class NotebookService {
 
     final nb = await getNotebook(notebookId);
     if (nb != null) {
-      final target = parentFolderId == null
-          ? nb.nodes
-          : TreeOps.findFolder(nb.nodes, parentFolderId)?.children ?? nb.nodes;
-      target.add(LeafNode(section.id));
+      final leaf = LeafNode(section.id);
+      final inserted = afterSectionId != null &&
+          TreeOps.insertLeafAfter(nb.nodes, afterSectionId, leaf);
+      if (!inserted) {
+        final target = parentFolderId == null
+            ? nb.nodes
+            : TreeOps.findFolder(nb.nodes, parentFolderId)?.children ??
+                nb.nodes;
+        target.add(leaf);
+      }
       await saveNotebook(nb);
     }
     SyncService().notifyDataChanged(); // reindex search + refresh lists
@@ -776,14 +783,11 @@ class NotebookService {
     Section section,
     String name, {
     String? parentFolderId,
+    String? afterCanvasId,
   }) async {
     final canvas = _newCanvas(section.notebookId, section.id, name);
     await _writeCanvasWithDefaultPage(canvas);
-    final target = parentFolderId == null
-        ? section.nodes
-        : TreeOps.findFolder(section.nodes, parentFolderId)?.children ??
-              section.nodes;
-    target.add(LeafNode(canvas.id));
+    _addCanvasLeaf(section, canvas.id, parentFolderId, afterCanvasId);
     await saveSection(section);
     SyncService().notifyDataChanged(); // reindex search + refresh lists
     return canvas;
@@ -799,6 +803,7 @@ class NotebookService {
     String name,
     List<int> pdfBytes, {
     String? parentFolderId,
+    String? afterCanvasId,
     void Function(double fraction, String label)? onProgress,
   }) async {
     onProgress?.call(0.03, 'Reading PDF…');
@@ -841,14 +846,31 @@ class NotebookService {
       await saveCanvas(canvas);
     }
 
+    _addCanvasLeaf(section, canvas.id, parentFolderId, afterCanvasId);
+    await saveSection(section);
+    SyncService().notifyDataChanged();
+    return canvas;
+  }
+
+  /// Places a new canvas leaf in [section]'s tree: after [afterCanvasId] (if
+  /// given and found — so a new canvas lands just below the selected one),
+  /// else at the end of [parentFolderId]'s children (or the top level).
+  void _addCanvasLeaf(
+    Section section,
+    String canvasId,
+    String? parentFolderId,
+    String? afterCanvasId,
+  ) {
+    final leaf = LeafNode(canvasId);
+    if (afterCanvasId != null &&
+        TreeOps.insertLeafAfter(section.nodes, afterCanvasId, leaf)) {
+      return;
+    }
     final target = parentFolderId == null
         ? section.nodes
         : TreeOps.findFolder(section.nodes, parentFolderId)?.children ??
               section.nodes;
-    target.add(LeafNode(canvas.id));
-    await saveSection(section);
-    SyncService().notifyDataChanged();
-    return canvas;
+    target.add(leaf);
   }
 
   Future<void> renameCanvas(Canvas canvas, String name) async {

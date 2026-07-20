@@ -484,6 +484,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       notebook.id,
       name,
       parentFolderId: folderId,
+      // Drop the new section just below the selected one (top-level add only).
+      afterSectionId: folderId == null ? _selectedSection?.id : null,
     );
     await _reloadNotebook(notebook.id);
     await _selectSection(section);
@@ -602,12 +604,16 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (section == null) return;
     final kind = await pickNewCanvasKind(context);
     if (kind == null || !mounted) return;
+    // Adding from the list header drops the new canvas just below the selected
+    // one; adding into a folder (folderId set) appends inside it.
+    final afterCanvasId = folderId == null ? _selectedCanvas?.id : null;
     final Canvas canvas;
     if (kind == NewCanvasKind.pdf) {
       final c = await pickAndCreatePdfCanvas(
         context,
         section,
         parentFolderId: folderId,
+        afterCanvasId: afterCanvasId,
       );
       if (c == null) return;
       canvas = c;
@@ -618,6 +624,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         section,
         name,
         parentFolderId: folderId,
+        afterCanvasId: afterCanvasId,
       );
     }
     await _reloadSelectedSection();

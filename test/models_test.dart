@@ -673,6 +673,36 @@ void main() {
       expect(decoded.nodes.length, 3);
       expect(decoded.nodes.every((n) => n is LeafNode), isTrue);
     });
+
+    test('insertLeafAfter drops a new leaf right below the target (top level)',
+        () {
+      final nodes = <TreeNode>[LeafNode('a'), LeafNode('b'), LeafNode('c')];
+      final ok = TreeOps.insertLeafAfter(nodes, 'b', LeafNode('new'));
+      expect(ok, isTrue);
+      expect(nodes.map((n) => (n as LeafNode).refId).toList(),
+          ['a', 'b', 'new', 'c']);
+    });
+
+    test('insertLeafAfter finds the target inside a folder', () {
+      final folder = FolderNode(id: 'g', name: 'G', children: [
+        LeafNode('p1'),
+        LeafNode('p2'),
+      ]);
+      final nodes = <TreeNode>[LeafNode('top'), folder];
+      final ok = TreeOps.insertLeafAfter(nodes, 'p1', LeafNode('new'));
+      expect(ok, isTrue);
+      expect(folder.children.map((n) => (n as LeafNode).refId).toList(),
+          ['p1', 'new', 'p2']);
+      // Top level untouched.
+      expect(nodes.length, 2);
+    });
+
+    test('insertLeafAfter returns false when the target is missing', () {
+      final nodes = <TreeNode>[LeafNode('a'), LeafNode('b')];
+      final ok = TreeOps.insertLeafAfter(nodes, 'zzz', LeafNode('new'));
+      expect(ok, isFalse);
+      expect(nodes.length, 2);
+    });
   });
 
   group('Element transforms', () {
