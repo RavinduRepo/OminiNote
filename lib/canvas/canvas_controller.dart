@@ -2698,18 +2698,50 @@ class CanvasController extends ChangeNotifier {
       return;
     }
 
-    // Group the polyline into per-page runs of canvas-space samples, inserting
-    // a shared edge point at each page transition so adjacent runs meet flush.
+    // Densify ONLY the segments that change page. A fast stroke samples
+    // sparsely, so a single segment can jump far past a boundary (or skip a
+    // whole page); interpolating canvas points across just those segments
+    // guarantees a sample near each edge (no gap at the join) and that every
+    // crossed page gets ink. In-page segments (the vast majority) are left
+    // untouched, so the overhead is negligible.
+    final canvasPts = <StrokePoint>[];
+    final raw = stroke.points;
+    for (var i = 0; i < raw.length; i++) {
+      final c = Offset(raw[i].x + origin.dx, raw[i].y + origin.dy);
+      canvasPts.add(StrokePoint(c.dx, c.dy, raw[i].p));
+      if (i + 1 >= raw.length) break;
+      final n = Offset(raw[i + 1].x + origin.dx, raw[i + 1].y + origin.dy);
+      if (layout.pageAt(c)?.pageId != layout.pageAt(n)?.pageId) {
+        final steps = ((n - c).distance / 12).clamp(1, 400).floor();
+        for (var s = 1; s < steps; s++) {
+          final t = s / steps;
+          canvasPts.add(StrokePoint(
+            c.dx + (n.dx - c.dx) * t,
+            c.dy + (n.dy - c.dy) * t,
+            raw[i].p + (raw[i + 1].p - raw[i].p) * t,
+          ));
+        }
+      }
+    }
+
+    // Group the (densified) polyline into per-page runs, inserting a shared edge
+    // point at each page transition so adjacent runs meet flush.
     final runs = <({String pageId, Offset tl, List<StrokePoint> points})>[];
     ({String pageId, Offset tl, List<StrokePoint> points})? cur;
     Rect? curRect;
     Offset? prevC;
-    for (final sp in stroke.points) {
-      final c = Offset(sp.x + origin.dx, sp.y + origin.dy);
+    for (final sp in canvasPts) {
+      final c = Offset(sp.x, sp.y);
       final l = layout.pageAt(c);
       if (l == null) {
-        // A gap / past the last page — end the current run; a later sample
-        // that lands back on a page starts a fresh one.
+        // Left the pages (a gap / past the last page). Close the current run at
+        // the page edge so the line reaches the boundary instead of stopping at
+        // the last on-page sample, then end it.
+        if (cur != null && curRect != null && prevC != null) {
+          final edge = _exitPoint(curRect, prevC, c);
+          cur.points
+              .add(StrokePoint(edge.dx - cur.tl.dx, edge.dy - cur.tl.dy, sp.p));
+        }
         cur = null;
         curRect = null;
         prevC = c;
