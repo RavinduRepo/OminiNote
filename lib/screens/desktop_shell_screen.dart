@@ -20,6 +20,7 @@ import '../widgets/location_picker.dart';
 import '../widgets/notebook_account_badge.dart';
 import '../widgets/scroll_into_view.dart';
 import '../utils/pdf_export_ui.dart';
+import '../utils/quick_note_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
 import '../utils/new_canvas_ui.dart';
@@ -912,6 +913,16 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             ),
           ),
           const SizedBox(height: 20),
+          // Quick note: tap creates an empty canvas at the default target and
+          // opens it; hold to choose empty vs PDF.
+          _railButton(
+            palette,
+            Icons.bolt_outlined,
+            'Quick note (hold for options)',
+            onTap: () => createQuickNote(context),
+            onLongPress: () => chooseAndCreateQuickNote(context),
+          ),
+          const SizedBox(height: 8),
           // Notebooks: return to the canvas view (re-expanding the panes) if a
           // full-pane mode is open, else toggle the left panes collapsed.
           // Filled while the panes are expanded (the mobile nav's selected
@@ -975,6 +986,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     String tooltip, {
     bool active = false,
     required VoidCallback onTap,
+    VoidCallback? onLongPress,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -982,6 +994,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
         message: tooltip,
         child: InkWell(
           onTap: onTap,
+          onLongPress: onLongPress,
           borderRadius: BorderRadius.circular(11),
           child: Container(
             width: 44,

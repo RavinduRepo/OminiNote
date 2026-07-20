@@ -16,6 +16,7 @@ import '../widgets/refreshable_empty.dart';
 import '../widgets/scroll_into_view.dart';
 import '../widgets/sync_status_icon.dart';
 import '../utils/pdf_export_ui.dart';
+import '../utils/quick_note_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
 import 'notebook_screen.dart';
@@ -221,6 +222,7 @@ class _HomeScreenState extends State<HomeScreen> {
           // Search and Settings now live in the bottom navigation bar. The
           // app bar keeps the sync status + add, consistent with the desktop
           // notebooks-pane header.
+          const QuickNoteButton(),
           const SyncStatusIcon(),
           PopupMenuButton<String>(
             icon: const Icon(Icons.add),
