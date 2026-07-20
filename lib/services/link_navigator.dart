@@ -12,6 +12,7 @@ class LinkNavigator {
   LinkNavigator._internal();
 
   void Function(SearchResult r)? _reveal;
+  void Function(SearchResult r)? _openCanvas;
 
   /// Called by the active shell on init. The shell must [unregister] with the
   /// same handler on dispose (guarded, so a stale dispose can't clear a newer
@@ -25,6 +26,28 @@ class LinkNavigator {
   /// Reveals [r] via the active shell; false when no shell is registered.
   bool reveal(SearchResult r) {
     final h = _reveal;
+    if (h == null) return false;
+    h(r);
+    return true;
+  }
+
+  /// Registers a shell's "navigate to + actually OPEN this canvas" handler,
+  /// distinct from [reveal] because mobile's link-reveal deliberately stops one
+  /// level up (at the list) for container targets. Used by the quick-note flow,
+  /// which must land in the canvas. Desktop needs no separate handler — its
+  /// reveal already opens the canvas embedded — so it leaves this null and
+  /// [openCanvas] falls back to [reveal].
+  void registerOpenCanvas(void Function(SearchResult r) open) =>
+      _openCanvas = open;
+
+  void unregisterOpenCanvas(void Function(SearchResult r) open) {
+    if (identical(_openCanvas, open)) _openCanvas = null;
+  }
+
+  /// Navigates to [r]'s location AND opens the canvas (mobile full-bleed /
+  /// desktop embedded). Falls back to [reveal] when no open handler is set.
+  bool openCanvas(SearchResult r) {
+    final h = _openCanvas ?? _reveal;
     if (h == null) return false;
     h(r);
     return true;

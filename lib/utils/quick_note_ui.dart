@@ -1,17 +1,22 @@
 import 'package:flutter/material.dart';
 
 import '../models/canvas.dart';
+import '../models/notebook.dart';
+import '../models/section.dart';
 import '../screens/canvas_workspace_screen.dart';
+import '../services/link_navigator.dart';
 import '../services/notebook_service.dart';
+import '../services/search_service.dart';
 import '../theme/app_theme.dart';
 import 'formatting.dart';
 import 'new_canvas_ui.dart';
 
 /// Creates a canvas at this device's default target — the notebook marked
-/// default (its landing section), else a local-only "Quick Notes" — and opens
-/// it. This is the one-tap "quick note" flow; all the plumbing already exists
-/// (`resolveDefaultTarget`), so it's just wiring. [kind] chooses empty vs a
-/// PDF-backed canvas.
+/// default (its landing section), else a local-only "Quick Notes" — then
+/// **navigates there and opens it the way the active shell opens a canvas**
+/// (desktop: selected + embedded in the panes; mobile: full-bleed with the
+/// section list behind it). This mirrors the OS "open PDF with" flow, minus
+/// the location prompt. [kind] chooses empty vs a PDF-backed canvas.
 Future<void> createQuickNote(
   BuildContext context, {
   NewCanvasKind kind = NewCanvasKind.empty,
@@ -31,9 +36,31 @@ Future<void> createQuickNote(
     );
   }
   if (!context.mounted) return;
-  Navigator.of(context, rootNavigator: true).push(
-    slideRoute(CanvasWorkspaceScreen(initialCanvas: canvas)),
+  _openNewCanvas(context, target.notebook, target.section, canvas);
+}
+
+void _openNewCanvas(
+  BuildContext context,
+  Notebook notebook,
+  Section section,
+  Canvas canvas,
+) {
+  final result = SearchResult(
+    kind: SearchKind.canvas,
+    title: canvas.name,
+    path: '${notebook.name} › ${section.name}',
+    notebook: notebook,
+    section: section,
+    canvas: canvas,
   );
+  // Route through the active shell so it lands at the default location and
+  // opens the canvas in that shell's native way. Fall back to a direct push
+  // if no shell is registered (shouldn't happen in normal use).
+  if (!LinkNavigator().openCanvas(result)) {
+    Navigator.of(context, rootNavigator: true).push(
+      slideRoute(CanvasWorkspaceScreen(initialCanvas: canvas)),
+    );
+  }
 }
 
 /// Press-and-hold the quick-note control to choose empty vs PDF, then create.

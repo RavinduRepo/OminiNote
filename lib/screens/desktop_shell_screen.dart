@@ -117,11 +117,27 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     // Internal links ("Connections") navigate through the same reveal path as
     // search results, whichever shell is active.
     LinkNavigator().register(_revealFromLink);
+    // Quick-note "open this canvas" — reveal already opens embedded here, but a
+    // just-created canvas's notebook may not be loaded yet, so reload first.
+    LinkNavigator().registerOpenCanvas(_openCanvasFromResult);
+  }
+
+  Future<void> _openCanvasFromResult(SearchResult r) async {
+    if (_notebooks?.any((n) => n.id == r.notebook.id) != true) {
+      await _loadAll();
+    }
+    if (!mounted) return;
+    setState(() {
+      _mainMode = _MainMode.canvas;
+      _sidebarCollapsed = false;
+    });
+    await _revealSearchResult(r);
   }
 
   @override
   void dispose() {
     LinkNavigator().unregister(_revealFromLink);
+    LinkNavigator().unregisterOpenCanvas(_openCanvasFromResult);
     SyncService().dataVersion.removeListener(_onSyncData);
     _glowTimer?.cancel();
     _binRefresh.dispose();
@@ -913,20 +929,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             ),
           ),
           const SizedBox(height: 20),
-          // Quick note: tap creates an empty canvas at the default target and
-          // opens it; hold to choose empty vs PDF.
-          _railButton(
-            palette,
-            Icons.bolt_outlined,
-            'Quick note (hold for options)',
-            onTap: () => createQuickNote(context),
-            onLongPress: () => chooseAndCreateQuickNote(context),
-          ),
-          const SizedBox(height: 8),
           // Notebooks: return to the canvas view (re-expanding the panes) if a
           // full-pane mode is open, else toggle the left panes collapsed.
-          // Filled while the panes are expanded (the mobile nav's selected
-          // look), outlined while collapsed.
+          // Filled while viewing the lists (panes expanded), just outlined while
+          // still in the notebooks/canvases area but collapsed — so there's
+          // always an indication you're "in" that area.
           _railButton(
             palette,
             _mainMode == _MainMode.canvas && !_sidebarCollapsed
@@ -934,6 +941,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 : Icons.book_outlined,
             'Notebooks',
             active: _mainMode == _MainMode.canvas && !_sidebarCollapsed,
+            outlined: _mainMode == _MainMode.canvas && _sidebarCollapsed,
             onTap: () => setState(() {
               // Returning from a full-pane mode just restores the canvas view
               // with the sidebar in whatever collapse state the user left it;
@@ -945,8 +953,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               }
             }),
           ),
-          // Search / Bin / Settings take over the main area — the notebooks +
-          // canvas-list columns collapse, leaving just this nav rail.
+          // Search takes over the main area — the notebooks + canvas-list
+          // columns hide, leaving just this nav rail.
           _railButton(
             palette,
             Icons.search,
@@ -954,6 +962,17 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             active: _mainMode == _MainMode.search,
             onTap: () => _openMainMode(_MainMode.search),
           ),
+          // Quick note (below Search): tap creates an empty canvas at the
+          // default target and opens it; hold to choose empty vs PDF.
+          _railButton(
+            palette,
+            Icons.bolt_outlined,
+            'Quick note (hold for options)',
+            onTap: () => createQuickNote(context),
+            onLongPress: () => chooseAndCreateQuickNote(context),
+          ),
+          const Spacer(),
+          // Bin sits just above Settings at the bottom.
           _railButton(
             palette,
             Icons.delete_outline,
@@ -964,9 +983,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
               _openMainMode(_MainMode.bin);
             },
           ),
-          const Spacer(),
-          // Settings also opens as a full pane (no account avatar — multiple
-          // accounts are managed inside Settings, so one avatar would mislead).
+          // Settings (no account avatar — multiple accounts are managed inside
+          // Settings, so one avatar would mislead).
           _railButton(
             palette,
             Icons.settings_outlined,
@@ -985,6 +1003,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     IconData icon,
     String tooltip, {
     bool active = false,
+    bool outlined = false,
     required VoidCallback onTap,
     VoidCallback? onLongPress,
   }) {
@@ -1003,11 +1022,17 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             decoration: BoxDecoration(
               color: active ? palette.accentSoft : Colors.transparent,
               borderRadius: BorderRadius.circular(11),
+              // Outline-only state (e.g. Notebooks while the panes are
+              // collapsed): shows you're still "in" that area without the full
+              // fill of the expanded/active look.
+              border: outlined && !active
+                  ? Border.all(color: palette.accent.withValues(alpha: 0.7))
+                  : null,
             ),
             child: Icon(
               icon,
               size: 20,
-              color: active ? palette.accent : palette.textDim,
+              color: active || outlined ? palette.accent : palette.textDim,
             ),
           ),
         ),

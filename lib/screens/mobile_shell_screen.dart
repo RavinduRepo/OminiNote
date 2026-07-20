@@ -37,7 +37,9 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
 
   // A PageView so tabs slide horizontally — tapping a tab animates in that
   // tab's direction, and (at a tab root) a horizontal swipe moves between tabs.
-  final PageController _pageController = PageController();
+  // Not final: a reveal recreates it (see _jumpToNotebooksTab) to force a clean
+  // landing on the Notebooks tab.
+  PageController _pageController = PageController();
 
   // Bumped each time the Bin tab is opened, so the kept-alive BinScreen
   // reloads (something deleted elsewhere must appear when you switch back to it).
@@ -89,25 +91,25 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   /// A reveal is often triggered from *inside* a full-bleed canvas that covers
   /// this shell on the root navigator. On the frame the canvas is popped, the
   /// shell's `PageView` is still off-stage and its `PageController` has no
-  /// viewport metrics yet — a synchronous `jumpToPage` there does not commit
-  /// and the controller later settles to an adjacent page (Bin), which is the
-  /// "reveal also swipes me into the Bin" bug. So we set the model index now
-  /// but defer the actual `jumpToPage` until the PageView is laid out (retry
-  /// post-frame until the position has dimensions).
+  /// viewport metrics — a `jumpToPage` there doesn't commit and the controller
+  /// later settles onto the adjacent page (Bin): the "reveal also swipes me
+  /// into the Bin" bug. Deferring the jump wasn't enough, so we sidestep the
+  /// class of timing bugs entirely: **recreate the PageController** at
+  /// `initialPage: _kNotebooks`. A fresh controller starts pinned on Notebooks
+  /// with no stale pixels to settle from. The tab navigators survive because
+  /// they're kept alive by their `GlobalKey`s, independent of this controller.
   void _jumpToNotebooksTab() {
-    setState(() => _index = _kNotebooks);
-    void tryJump() {
-      if (!mounted) return;
-      if (_pageController.hasClients &&
-          _pageController.position.hasContentDimensions) {
-        _pageController.jumpToPage(_kNotebooks);
-        _scheduleSwipeRecheck();
-      } else {
-        WidgetsBinding.instance.addPostFrameCallback((_) => tryJump());
-      }
-    }
-
-    tryJump();
+    final old = _pageController;
+    setState(() {
+      _index = _kNotebooks;
+      _pageController = PageController(initialPage: _kNotebooks);
+    });
+    // Dispose the detached old controller after this frame's rebuild swaps in
+    // the new one (disposing it synchronously while still attached throws).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      old.dispose();
+      _scheduleSwipeRecheck();
+    });
   }
 
   @override
@@ -116,6 +118,9 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     // Internal links ("Connections") navigate through the same reveal path as
     // search results, whichever shell is active.
     LinkNavigator().register(_revealFromLink);
+    // Quick-note (and any "open this canvas") lands IN the canvas — mobile's
+    // link-reveal stops at the list for containers, so it needs the open path.
+    LinkNavigator().registerOpenCanvas(_revealSearchResult);
   }
 
   /// A tapped internal link can come from *inside* a full-bleed canvas, which
@@ -168,6 +173,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   @override
   void dispose() {
     LinkNavigator().unregister(_revealFromLink);
+    LinkNavigator().unregisterOpenCanvas(_revealSearchResult);
     _binReloadTimer?.cancel();
     _pageController.dispose();
     _binRefresh.dispose();
