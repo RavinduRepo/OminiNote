@@ -1918,9 +1918,9 @@ class _CanvasScreenState extends State<CanvasScreen>
         ? SettingsService().promotedToolbarMobile
         : SettingsService().promotedToolbarDesktop;
     bool shown(String id) => !promoted.contains(id);
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
+    final action = await showAdaptiveMenu<String>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => scrollableSheetBody(
         context,
         child: Column(
@@ -2085,9 +2085,9 @@ class _CanvasScreenState extends State<CanvasScreen>
   }
 
   Future<InsertPosition?> _pickInsertPosition({bool includeTop = true}) {
-    return showModalBottomSheet<InsertPosition>(
-      context: context,
-      isScrollControlled: true,
+    return showAdaptiveMenu<InsertPosition>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => scrollableSheetBody(
         context,
         child: Column(
@@ -2125,9 +2125,9 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Future<void> _insertPdfFlow() async {
     final c = _controller!;
-    final mode = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
+    final mode = await showAdaptiveMenu<String>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => scrollableSheetBody(
         context,
         child: Column(
@@ -2393,9 +2393,9 @@ class _CanvasScreenState extends State<CanvasScreen>
       Color(0xFF17171A), // near black
     ];
 
-    final apply = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
+    final apply = await showAdaptiveMenu<bool>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => StatefulBuilder(
         builder: (context, setSheetState) {
           // Offer the ink-visibility adjustment only when the picked colour
@@ -2591,9 +2591,9 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Future<void> _showBookmarks() async {
     final c = _controller!;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
+    await showAdaptiveMenu<void>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => cappedSheetBody(
         context,
         child: ListenableBuilder(
@@ -2715,9 +2715,9 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Future<void> _showAttachments() async {
     final c = _controller!;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
+    await showAdaptiveMenu<void>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => cappedSheetBody(
         context,
         child: ListenableBuilder(

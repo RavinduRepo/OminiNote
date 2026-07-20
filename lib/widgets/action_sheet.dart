@@ -34,6 +34,73 @@ Widget cappedSheetBody(BuildContext context, {required Widget child}) {
   );
 }
 
+/// Shows [builder]'s content as a **bottom sheet on mobile**, or a **top-right
+/// dropdown panel on desktop** — so desktop menus "drop" from the top like the
+/// ⋯ overflow menu instead of sliding up from the bottom (the bottom-sheet look
+/// felt out of place with a mouse). [desktop] defaults to a width heuristic
+/// (≥840, matching the app's auto-layout breakpoint); pass it explicitly where
+/// a more precise signal exists (e.g. `CanvasScreen.embedded`). Mirrors
+/// [showModalBottomSheet]'s `Future<T?>` — the builder's context is under the
+/// route either way, so its `Navigator.pop(context, value)` works unchanged.
+Future<T?> showAdaptiveMenu<T>(
+  BuildContext context, {
+  required WidgetBuilder builder,
+  bool? desktop,
+}) {
+  final isDesktop = desktop ?? MediaQuery.of(context).size.width >= 840;
+  if (!isDesktop) {
+    return showModalBottomSheet<T>(
+      context: context,
+      isScrollControlled: true,
+      builder: builder,
+    );
+  }
+  final theme = Theme.of(context);
+  final palette = theme.extension<AppPalette>()!;
+  return showGeneralDialog<T>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+    barrierColor: Colors.black.withValues(alpha: 0.06),
+    transitionDuration: const Duration(milliseconds: 150),
+    pageBuilder: (ctx, _, _) {
+      final h = MediaQuery.of(ctx).size.height;
+      return SafeArea(
+        child: Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 54, right: 12),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: 380, maxHeight: h * 0.82),
+              child: Material(
+                color: theme.colorScheme.surface,
+                elevation: 8,
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(kRadius + 2),
+                  side: BorderSide(color: palette.border),
+                ),
+                child: builder(ctx),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+    transitionBuilder: (ctx, anim, _, child) {
+      final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          alignment: Alignment.topRight,
+          scale: Tween<double>(begin: 0.97, end: 1.0).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
 /// A [PopupMenuItem] with a leading icon (desktop menus, to match the mobile
 /// action sheets). Pass [color] (e.g. the theme error color) to tint a
 /// destructive item.

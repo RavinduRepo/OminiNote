@@ -603,7 +603,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   Future<void> _addCanvas({String? folderId}) async {
     final section = _selectedSection;
     if (section == null) return;
-    final kind = await pickNewCanvasKind(context);
+    final kind = await pickNewCanvasKind(context, desktop: true);
     if (kind == null || !mounted) return;
     // Adding from the list header drops the new canvas just below the selected
     // one; adding into a folder (folderId set) appends inside it.

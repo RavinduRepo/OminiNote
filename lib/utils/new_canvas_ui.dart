@@ -12,10 +12,10 @@ enum NewCanvasKind { empty, pdf }
 
 /// Asks whether the new canvas should be an empty one or a PDF opened as a
 /// canvas. Returns null if dismissed.
-Future<NewCanvasKind?> pickNewCanvasKind(BuildContext context) {
-  return showModalBottomSheet<NewCanvasKind>(
-    context: context,
-    isScrollControlled: true,
+Future<NewCanvasKind?> pickNewCanvasKind(BuildContext context, {bool? desktop}) {
+  return showAdaptiveMenu<NewCanvasKind>(
+    context,
+    desktop: desktop,
     builder: (context) => scrollableSheetBody(
       context,
       child: Column(

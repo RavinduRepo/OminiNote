@@ -44,12 +44,13 @@ Future<void> showConnectionsSheet(
   void Function(String? pageId)? onJumpInSameCanvas,
   Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
       onAddTarget,
+  bool? desktop,
 }) {
   assert((endpoint == null) != (aggregateCanvasId == null),
       'pass exactly one of endpoint / aggregateCanvasId');
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
+  return showAdaptiveMenu<void>(
+    context,
+    desktop: desktop,
     builder: (sheetContext) => cappedSheetBody(
       sheetContext,
       child: _ConnectionsList(
