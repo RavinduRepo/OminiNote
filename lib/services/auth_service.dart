@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:path_provider/path_provider.dart';
 import 'desktop_oauth.dart';
 
 /// Drive file scope — read/write only files this app created.
@@ -374,8 +375,23 @@ class AuthService {
   // ── Persistence (secure storage) ────────────────────────────────────────────
 
   Future<void> _load() async {
-    final raw = await _secure.read(key: _kAccountsKey);
+    String? raw;
+    try {
+      raw = await _secure.read(key: _kAccountsKey);
+    } catch (e) {
+      // A locked/unavailable keyring (common on Linux — see _writeBackstop)
+      // throws here; fall through to the backstop rather than losing the session.
+      debugPrint('Auth secure read failed, trying backstop: $e');
+      raw = null;
+    }
+    final fromSecure = raw != null && raw.isNotEmpty;
+    if (!fromSecure && Platform.isLinux) {
+      raw = await _readBackstop();
+    }
     if (raw == null || raw.isEmpty) return;
+    // A successful keyring read seeds/refreshes the Linux backstop so a later
+    // locked-keyring startup can still restore this same session (no re-login).
+    if (fromSecure && Platform.isLinux) await _writeBackstop(raw);
     final data = jsonDecode(raw) as Map<String, dynamic>;
     _defaultId = data['default'] as String?;
     final rawAccts = (data['accounts'] as List? ?? const []);
@@ -408,10 +424,71 @@ class AuthService {
             })
         .where((m) => m['refresh'] != null)
         .toList();
-    await _secure.write(
-      key: _kAccountsKey,
-      value: jsonEncode({'default': _defaultId, 'accounts': list}),
-    );
+    final blob = jsonEncode({'default': _defaultId, 'accounts': list});
+    try {
+      await _secure.write(key: _kAccountsKey, value: blob);
+    } catch (e) {
+      // A locked keyring can also reject writes; the backstop below still
+      // captures the session so it survives regardless.
+      debugPrint('Auth secure write failed: $e');
+    }
+    if (Platform.isLinux) {
+      if (list.isEmpty) {
+        await _deleteBackstop();
+      } else {
+        await _writeBackstop(blob);
+      }
+    }
+  }
+
+  // ── Linux keyring backstop ───────────────────────────────────────────────
+  // gnome-keyring on some Linux setups (e.g. a socket-activated daemon whose
+  // keyring isn't the PAM-unlocked "login" keyring, as on Hyprland/Omarchy)
+  // boots LOCKED with no prompter, so flutter_secure_storage reads return
+  // nothing at startup — the session looks signed-out even though the refresh
+  // token is safely on disk in the (locked) keyring. To stop that from dropping
+  // the login every restart, on Linux we mirror the accounts blob to a private
+  // 0600 file in the app-support dir. Secure storage stays the PRIMARY store on
+  // every platform; this file is written only on Linux and read only when the
+  // keyring yields nothing. Other platforms never touch it.
+
+  File? _backstopFileCached;
+  Future<File> _backstopFile() async {
+    if (_backstopFileCached != null) return _backstopFileCached!;
+    final dir = await getApplicationSupportDirectory();
+    return _backstopFileCached = File('${dir.path}/.auth_accounts.json');
+  }
+
+  Future<String?> _readBackstop() async {
+    try {
+      final f = await _backstopFile();
+      if (!await f.exists()) return null;
+      final s = await f.readAsString();
+      return s.isEmpty ? null : s;
+    } catch (e) {
+      debugPrint('Auth backstop read failed: $e');
+      return null;
+    }
+  }
+
+  Future<void> _writeBackstop(String blob) async {
+    try {
+      final f = await _backstopFile();
+      await f.writeAsString(blob, flush: true);
+      // Best-effort: keep the token file owner-only.
+      try {
+        await Process.run('chmod', ['600', f.path]);
+      } catch (_) {}
+    } catch (e) {
+      debugPrint('Auth backstop write failed: $e');
+    }
+  }
+
+  Future<void> _deleteBackstop() async {
+    try {
+      final f = await _backstopFile();
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
   }
 
   /// One-time migration of the pre-multi-account desktop refresh token into the
