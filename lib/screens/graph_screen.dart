@@ -168,6 +168,8 @@ class GraphController extends ChangeNotifier {
 
   GraphSimNode? _pinned; // node currently being dragged (excluded from integration)
   String? hoverKey; // node under the cursor (desktop hover highlight)
+  // Whether the one-shot crossing-reduction has run since the last rebuild.
+  bool _untangled = false;
 
   // Camera tween (animated Fit / focus): lerps pan+zoom toward a target while
   // the ticker runs, so the framing glides instead of snapping.
@@ -378,6 +380,7 @@ class GraphController extends ChangeNotifier {
       _byKey[e.bKey]?.activeDegree++;
     }
 
+    _untangled = false; // let the layout re-untangle for the new content
     notifyListeners();
     _bumpUi();
     onWake?.call();
@@ -604,8 +607,87 @@ class GraphController extends ChangeNotifier {
       maxSpeed = math.max(maxSpeed, a.vel.distance);
     }
     final camMoving = _stepCamera();
+    final settled =
+        _pinned == null && !camMoving && maxSpeed <= _kSettleSpeed;
+    // On first settle after a change, run a cheap crossing-reduction pass
+    // (small graphs only) so links don't cross unless they must.
+    if (settled && !_untangled) {
+      _untangled = true;
+      _reduceCrossings();
+      notifyListeners();
+      return true; // one more pass to redraw + let springs smooth
+    }
     notifyListeners();
-    return _pinned != null || camMoving || maxSpeed > _kSettleSpeed;
+    return !settled;
+  }
+
+  /// Greedy crossing reduction for SMALL graphs: repeatedly swap the positions
+  /// of two nodes when doing so lowers the total number of edge crossings. The
+  /// sim has already spread the nodes, so this only relabels which node sits
+  /// where. Gated by size (O(rounds·n²·edges²)) so it never costs on big graphs.
+  void _reduceCrossings() {
+    final n = _nodes.length;
+    final m = _edges.length;
+    if (n < 4 || n > 30 || m == 0 || m > 40) return;
+    final idx = <String, int>{
+      for (var i = 0; i < n; i++) _nodes[i].data.key: i
+    };
+    final ea = <int>[], eb = <int>[];
+    for (final e in _edges) {
+      final a = idx[e.aKey], b = idx[e.bKey];
+      if (a != null && b != null && a != b) {
+        ea.add(a);
+        eb.add(b);
+      }
+    }
+    final ec = ea.length;
+    int crossings() {
+      var x = 0;
+      for (var p = 0; p < ec; p++) {
+        for (var q = p + 1; q < ec; q++) {
+          final a1 = ea[p], b1 = eb[p], a2 = ea[q], b2 = eb[q];
+          if (a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2) continue;
+          if (_segIntersect(_nodes[a1].pos, _nodes[b1].pos, _nodes[a2].pos,
+              _nodes[b2].pos)) {
+            x++;
+          }
+        }
+      }
+      return x;
+    }
+
+    var best = crossings();
+    for (var round = 0; round < 4 && best > 0; round++) {
+      var improved = false;
+      for (var i = 0; i < n; i++) {
+        for (var j = i + 1; j < n; j++) {
+          final pi = _nodes[i].pos, pj = _nodes[j].pos;
+          _nodes[i].pos = pj;
+          _nodes[j].pos = pi;
+          final c2 = crossings();
+          if (c2 < best) {
+            best = c2;
+            improved = true;
+          } else {
+            _nodes[i].pos = pi;
+            _nodes[j].pos = pj;
+          }
+        }
+      }
+      if (!improved) break;
+    }
+  }
+
+  /// True when segments p1p2 and p3p4 properly cross.
+  static bool _segIntersect(Offset p1, Offset p2, Offset p3, Offset p4) {
+    double cross(Offset o, Offset a, Offset b) =>
+        (a.dx - o.dx) * (b.dy - o.dy) - (a.dy - o.dy) * (b.dx - o.dx);
+    final d1 = cross(p3, p4, p1),
+        d2 = cross(p3, p4, p2),
+        d3 = cross(p1, p2, p3),
+        d4 = cross(p1, p2, p4);
+    return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+        ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
   }
 
   /// Lerps the camera toward its target; returns true while still animating.
@@ -1327,7 +1409,6 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   bool _projectsOpen = false;
   bool _linkMode = false;
   GraphContainer? _linkFrom; // link-mode source (null until first pick)
-  String _linkQuery = ''; // flat link-browser search
 
   // Project build/edit mode (null = not editing).
   String? _peId; // null = creating a new project
@@ -1504,108 +1585,6 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       }
     }
     return out;
-  }
-
-  // ── Flat link browser (link mode) ──────────────────────────────────────────
-
-  List<GraphContainer> _flatContainers() {
-    final out = <GraphContainer>[];
-    void walk(GraphContainer g) {
-      out.add(g);
-      for (final ch in g.children) {
-        walk(ch);
-      }
-    }
-
-    final s = c.structure;
-    if (s != null) {
-      for (final nb in s.notebooks) {
-        walk(nb);
-      }
-    }
-    out.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return out;
-  }
-
-  Widget _linkBrowserBody(AppPalette palette) {
-    final q = _linkQuery.trim().toLowerCase();
-    final all = _flatContainers();
-    final list = q.isEmpty
-        ? all
-        : all.where((g) {
-            final path = g.reveal?.path ?? '';
-            return g.name.toLowerCase().contains(q) ||
-                path.toLowerCase().contains(q);
-          }).toList();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
-          child: TextField(
-            onChanged: (v) => setState(() => _linkQuery = v),
-            decoration: InputDecoration(
-              isDense: true,
-              prefixIcon: const Icon(Icons.search, size: 18),
-              hintText: 'Search items to link',
-              hintStyle: TextStyle(color: palette.textDim, fontSize: 13),
-            ),
-          ),
-        ),
-        Expanded(
-          child: list.isEmpty
-              ? Center(
-                  child: Text('No matches',
-                      style: TextStyle(fontSize: 12, color: palette.textDim)))
-              : ListView.builder(
-                  padding: EdgeInsets.zero,
-                  itemCount: list.length,
-                  itemBuilder: (_, i) => _linkBrowserRow(palette, list[i]),
-                ),
-        ),
-      ],
-    );
-  }
-
-  Widget _linkBrowserRow(AppPalette palette, GraphContainer g) {
-    final isSource = _linkFrom?.id == g.id;
-    final onSurface = Theme.of(context).colorScheme.onSurface;
-    final path = g.reveal?.path ?? '';
-    return InkWell(
-      onTap: () => _pickForLink(g),
-      child: Container(
-        color: isSource ? palette.accent.withValues(alpha: 0.28) : null,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        child: Row(
-          children: [
-            _ShapeIcon(
-                shape: _shapeForContainer(g.kind),
-                color: AppPalette.identityColor(g.id),
-                size: 13),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(g.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 13, color: onSurface)),
-                  if (path.isNotEmpty)
-                    Text(path,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style:
-                            TextStyle(fontSize: 11, color: palette.textDim)),
-                ],
-              ),
-            ),
-            Icon(Icons.add_link,
-                size: 16, color: isSource ? palette.accent : palette.textDim),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _projectsBody(AppPalette palette) {
@@ -1960,27 +1939,24 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               }),
               if (_projectsOpen) _projectsBody(palette),
               Divider(height: 1, color: palette.border),
-              // Link mode swaps the tree for a flat, searchable list of every
-              // container (fast to pick two and connect); else the tree tucked
-              // under a dropdown so it isn't always on screen.
-              if (_linkMode)
-                Expanded(child: _linkBrowserBody(palette))
-              else ...[
-                _sectionHeader(palette, 'Filter items', _filterOpen, () {
-                  setState(() => _filterOpen = !_filterOpen);
-                  _savePanelUi();
-                }),
-                Expanded(
-                  child: !_filterOpen
-                      ? const SizedBox.shrink()
-                      : (rows.isEmpty
-                          ? Center(
-                              child: Text('Nothing to show',
-                                  style: TextStyle(
-                                      fontSize: 12, color: palette.textDim)))
-                          : ListView(padding: EdgeInsets.zero, children: rows)),
-                ),
-              ],
+              // The notebook → section → canvas tree (scoped by the active
+              // project), tucked under a dropdown; link mode forces it visible
+              // so you pick two of the currently-shown items to connect — the
+              // checkboxes still toggle visibility while you work.
+              _sectionHeader(palette, 'Filter items', _filterOpen, () {
+                setState(() => _filterOpen = !_filterOpen);
+                _savePanelUi();
+              }),
+              Expanded(
+                child: (_filterOpen || _linkMode)
+                    ? (rows.isEmpty
+                        ? Center(
+                            child: Text('Nothing to show',
+                                style: TextStyle(
+                                    fontSize: 12, color: palette.textDim)))
+                        : ListView(padding: EdgeInsets.zero, children: rows))
+                    : const SizedBox.shrink(),
+              ),
               Divider(height: 1, color: palette.border),
               _appearanceSection(palette),
               _legend(palette),
@@ -2149,6 +2125,15 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               if (!editMode && count > 0)
                 Text('$count',
                     style: TextStyle(fontSize: 11, color: palette.textDim)),
+              // A tiny link glyph hints that tapping the row picks it (the
+              // checkbox still toggles visibility while linking).
+              if (_linkMode && !editMode)
+                Padding(
+                  padding: const EdgeInsets.only(left: 2),
+                  child: Icon(Icons.add_link,
+                      size: 14,
+                      color: isLinkSource ? palette.accent : palette.textDim),
+                ),
               if (editMode)
                 SizedBox(
                   width: 34,
@@ -2158,13 +2143,6 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                )
-              else if (_linkMode)
-                Padding(
-                  padding: const EdgeInsets.only(left: 4),
-                  child: Icon(Icons.add_link,
-                      size: 15,
-                      color: isLinkSource ? palette.accent : palette.textDim),
                 )
               else
                 SizedBox(
