@@ -307,15 +307,15 @@ class GraphController extends ChangeNotifier {
       return key;
     }
 
-    // When a project is active it defines the scope: container checkboxes are
-    // ignored (the project IS the selection), and its members show even if
-    // unlinked. External + tag filters still apply.
+    // A project scopes the graph to its members; the container checkboxes then
+    // apply ON TOP (uncheck to hide within the project). Members show even if
+    // unlinked. External + tag filters always apply.
     final projectActive = activeProjectId != null;
 
     // Final visible node keys (post-filter, post-abstraction).
     final visibleKeys = <String>{};
     for (final n in _all.nodes) {
-      if (!_passesFilter(n, ignoreContainers: projectActive)) continue;
+      if (!_passesFilter(n)) continue;
       if (projectActive && !_inActiveProject(n)) continue;
       visibleKeys.add(remap(n.key));
     }
@@ -324,7 +324,7 @@ class GraphController extends ChangeNotifier {
     if (showUnlinked || projectActive) {
       for (final n in _unlinkedCandidates) {
         if (visibleKeys.contains(n.key)) continue;
-        if (!_passesFilter(n, ignoreContainers: projectActive)) continue;
+        if (!_passesFilter(n)) continue;
         if (projectActive && !_inActiveProject(n)) continue;
         visibleKeys.add(n.key);
       }
@@ -487,8 +487,12 @@ class GraphController extends ChangeNotifier {
   /// Activates [id] with its member leaf ids (the graph scopes to them); pass a
   /// null [id] to deactivate.
   void setActiveProject(String? id, Set<String> memberIds) {
+    final changed = id != activeProjectId;
     activeProjectId = id;
     _activeProjectMemberIds = id == null ? {} : memberIds;
+    // Switching INTO a project starts with all its items shown (checked); a
+    // plain refresh (same id, e.g. on reload) preserves the user's unchecks.
+    if (id != null && changed) hiddenContainers.clear();
     _rebuildActive();
     _saveView();
   }
@@ -1087,7 +1091,9 @@ class _GraphScreenState extends State<GraphScreen>
   Widget _topBar(AppPalette palette, bool wide) {
     final panelShown = wide && _panelOpen;
     return Positioned(
-      top: 12,
+      // Keep the floating controls below the status-bar / notch inset so they
+      // don't cover the top nodes (e.g. desktop layout shown in a mobile tab).
+      top: MediaQuery.of(context).padding.top + 12,
       left: 16,
       right: 16,
       child: Row(

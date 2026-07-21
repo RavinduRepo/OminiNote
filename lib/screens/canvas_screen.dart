@@ -1776,7 +1776,7 @@ class _CanvasScreenState extends State<CanvasScreen>
             if (shown('connections'))
               ActionSheetItem(
                 icon: Icons.hub_outlined,
-                label: 'Connections',
+                label: 'All connections',
                 onTap: _showCanvasConnections,
               ),
             if (shown('shape_snap'))
@@ -1884,7 +1884,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         if (shown('read_aloud'))
           iconMenuItem('read_aloud', Icons.volume_up_outlined, 'Read aloud'),
         if (shown('connections'))
-          iconMenuItem('connections', Icons.hub_outlined, 'Connections'),
+          iconMenuItem('connections', Icons.hub_outlined, 'All connections'),
         // Checkbox glyphs reflect toggle state, matching the mobile sheet.
         if (shown('shape_snap'))
           iconMenuItem(
@@ -2566,20 +2566,21 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
-  /// The canvas's Connections menu — the SAME per-item sheet the three-dot menu
-  /// opens elsewhere (its own connections + Tags + Copy link + Add + edit/
-  /// remove), with the canvas as the subject. A target inside this same canvas
-  /// jumps in place (the split-view rule).
+  /// The canvas's "All connections": every link touching anything inside this
+  /// canvas (its pages, elements, bookmarks, or the canvas itself) — the
+  /// aggregate, as before — plus Copy link / Add / Tags for the canvas itself
+  /// (via selfEndpoint). A target inside this same canvas jumps in place.
   void _showCanvasConnections() {
     showConnectionsSheet(
       context,
       title: widget.canvas.name,
-      endpoint: LinkEndpoint(
+      aggregateCanvasId: widget.canvas.id,
+      selfEndpoint: LinkEndpoint(
         notebookId: widget.canvas.notebookId,
         sectionId: widget.canvas.sectionId,
         canvasId: widget.canvas.id,
       ),
-      endpointName: widget.canvas.name,
+      selfName: widget.canvas.name,
       insideCanvasId: widget.canvas.id,
       onJumpInSameCanvas: _jumpInThisCanvas,
     );
@@ -3132,7 +3133,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         return tbBtn(Icons.volume_up_outlined, 'Read aloud', _openReadAloud);
       case 'connections':
         return tbBtn(
-            Icons.hub_outlined, 'Connections', _showCanvasConnections);
+            Icons.hub_outlined, 'All connections', _showCanvasConnections);
       case 'split':
         // Only meaningful inside a workspace (split host); empty elsewhere.
         if (widget.onSplitRequested == null) return const SizedBox.shrink();

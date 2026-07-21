@@ -43,6 +43,10 @@ Future<void> showConnectionsSheet(
   LinkEndpoint? endpoint,
   String endpointName = '',
   String? aggregateCanvasId,
+  // In aggregate mode, the container the sheet is "about" (the canvas) — enables
+  // Copy link / Add / Tags for it while the LIST still shows the aggregate.
+  LinkEndpoint? selfEndpoint,
+  String selfName = '',
   String? insideCanvasId,
   void Function(String? pageId)? onJumpInSameCanvas,
   Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
@@ -61,6 +65,8 @@ Future<void> showConnectionsSheet(
         endpoint: endpoint,
         endpointName: endpointName,
         aggregateCanvasId: aggregateCanvasId,
+        selfEndpoint: selfEndpoint,
+        selfName: selfName,
         insideCanvasId: insideCanvasId,
         onJumpInSameCanvas: onJumpInSameCanvas,
         onAddTarget: onAddTarget,
@@ -76,6 +82,8 @@ class _ConnectionsList extends StatefulWidget {
   final LinkEndpoint? endpoint;
   final String endpointName;
   final String? aggregateCanvasId;
+  final LinkEndpoint? selfEndpoint;
+  final String selfName;
   final String? insideCanvasId;
   final void Function(String? pageId)? onJumpInSameCanvas;
 
@@ -92,6 +100,8 @@ class _ConnectionsList extends StatefulWidget {
     required this.endpoint,
     required this.endpointName,
     required this.aggregateCanvasId,
+    this.selfEndpoint,
+    this.selfName = '',
     this.insideCanvasId,
     this.onJumpInSameCanvas,
     this.onAddTarget,
@@ -112,6 +122,12 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   List<_Row>? _rows;
   List<TagDef> _tags = const [];
 
+  /// The endpoint the header actions (Copy link / Add / Tags) operate on: the
+  /// concrete item, or — in the canvas aggregate — the canvas itself.
+  LinkEndpoint? get _actionEndpoint => widget.endpoint ?? widget.selfEndpoint;
+  String get _actionName =>
+      widget.endpoint != null ? widget.endpointName : widget.selfName;
+
   @override
   void initState() {
     super.initState();
@@ -120,21 +136,21 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   Future<void> _loadTags() async {
-    final ep = widget.endpoint;
-    if (ep == null) return; // tags only on a concrete item, not the aggregate
+    final ep = _actionEndpoint;
+    if (ep == null) return;
     final tags = await TagService().tagsOf(ep.leafId);
     if (mounted) setState(() => _tags = tags);
   }
 
   Future<void> _manageTags() async {
-    final ep = widget.endpoint;
+    final ep = _actionEndpoint;
     if (ep == null) return;
     await showTagManagerSheet(context, endpoint: ep);
     await _loadTags();
   }
 
   Future<void> _removeTag(TagDef t) async {
-    final ep = widget.endpoint;
+    final ep = _actionEndpoint;
     if (ep == null) return;
     await TagService().unassign(t.id, ep);
     await _loadTags();
@@ -209,7 +225,7 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   Future<void> _addTarget(LinkEndpoint target) async {
-    final ep = widget.endpoint!;
+    final ep = _actionEndpoint!;
     if (target.sameAs(ep)) {
       _toast('That link points at this very item.');
       return;
@@ -224,7 +240,7 @@ class _ConnectionsListState extends State<_ConnectionsList> {
       await LinkService().addLinkWithReciprocalMarker(
         from: ep,
         to: target,
-        fromName: widget.endpointName,
+        fromName: _actionName,
         toName: resolved.title,
       );
     }
@@ -358,12 +374,12 @@ class _ConnectionsListState extends State<_ConnectionsList> {
                     ),
                   ),
                 ),
-                if (widget.endpoint != null) ...[
+                if (_actionEndpoint != null) ...[
                   IconButton(
                     tooltip: 'Copy link to this item',
                     icon: const Icon(Icons.link, size: 20),
                     onPressed: () =>
-                        copyLinkToClipboard(context, widget.endpoint!),
+                        copyLinkToClipboard(context, _actionEndpoint!),
                   ),
                   PopupMenuButton<String>(
                     tooltip: 'Add a connection',
@@ -379,7 +395,7 @@ class _ConnectionsListState extends State<_ConnectionsList> {
               ],
             ),
           ),
-          if (widget.endpoint != null) _buildTagsStrip(palette),
+          if (_actionEndpoint != null) _buildTagsStrip(palette),
           if (rows == null)
             const Padding(
               padding: EdgeInsets.all(24),
