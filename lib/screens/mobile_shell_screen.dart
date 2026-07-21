@@ -77,7 +77,10 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _recheckScheduled = false;
       if (!mounted) return;
-      final enabled = !(_navKeys[_index].currentState?.canPop() ?? false);
+      // The Graph tab owns horizontal drags (pan), so never let a swipe switch
+      // tabs while it's showing — same as when a tab is drilled in.
+      final enabled = _index != _kGraph &&
+          !(_navKeys[_index].currentState?.canPop() ?? false);
       if (enabled != _swipeEnabled) setState(() => _swipeEnabled = enabled);
     });
   }

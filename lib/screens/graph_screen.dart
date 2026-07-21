@@ -319,9 +319,9 @@ class GraphController extends ChangeNotifier {
       if (projectActive && !_inActiveProject(n)) continue;
       visibleKeys.add(remap(n.key));
     }
-    // Unlinked containers as isolated nodes — when showing unlinked (normal), or
-    // project members that happen to be unlinked (project mode).
-    if (showUnlinked || projectActive) {
+    // Unlinked containers as isolated nodes — gated by "show items without
+    // links" (in project mode this hides/shows the project's unlinked members).
+    if (showUnlinked) {
       for (final n in _unlinkedCandidates) {
         if (visibleKeys.contains(n.key)) continue;
         if (!_passesFilter(n)) continue;
@@ -845,7 +845,9 @@ class _GraphScreenState extends State<GraphScreen>
   bool _loading = true;
   bool _empty = false;
   bool _panelOpen = true; // filter/navigator tree panel (wide layout)
-  double _mobileSheet = 0.4; // mobile bottom-panel height fraction
+  double _mobileSheet = 0.14; // mobile bottom-panel height fraction (peek)
+  // Snap resting points for the mobile sheet: peek / half / tall.
+  static const _kSheetStops = [0.14, 0.5, 0.88];
   Timer? _fitDebounce; // auto-fit after a filter/data change settles
 
   // Drag/pan bookkeeping.
@@ -1052,16 +1054,23 @@ class _GraphScreenState extends State<GraphScreen>
         color: palette.surface2,
         child: Column(
           children: [
-            // Drag handle — pull up to see more options, down to see the graph.
+            // Drag handle — pull up for more options, down to retract; it snaps
+            // to peek / half / tall on release, and a tap toggles peek↔half.
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onVerticalDragUpdate: (d) => setState(() {
                 _mobileSheet = (_mobileSheet -
                         d.primaryDelta! / constraints.maxHeight)
-                    .clamp(0.12, 0.9);
+                    .clamp(0.1, 0.9);
               }),
+              onVerticalDragEnd: (_) => setState(() {
+                _mobileSheet = _kSheetStops.reduce((a, b) =>
+                    (a - _mobileSheet).abs() < (b - _mobileSheet).abs() ? a : b);
+              }),
+              onTap: () => setState(
+                  () => _mobileSheet = _mobileSheet <= 0.2 ? 0.5 : 0.14),
               child: Container(
-                height: 22,
+                height: 24,
                 alignment: Alignment.center,
                 child: Container(
                   width: 40,
@@ -1642,9 +1651,12 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (active != null)
+          if (active != null) ...[
             _toggle(palette, 'Include linked neighbors', c.projectPlusLinks,
                 (v) => c.setProjectPlusLinks(v)),
+            _toggle(palette, 'Show items without links', c.showUnlinked,
+                (v) => c.setShowUnlinked(v)),
+          ],
           for (final p in c.projects)
             _projectRow(palette, onSurface, p, p.id == active),
           Align(
