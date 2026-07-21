@@ -11,6 +11,7 @@ import '../services/link_service.dart';
 import '../services/tag_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
+import '../screens/graph_screen.dart' show LocalGraphController;
 import 'action_sheet.dart';
 import 'edit_link_sheet.dart';
 import 'link_target_picker.dart';
@@ -70,6 +71,7 @@ Future<void> showConnectionsSheet(
         insideCanvasId: insideCanvasId,
         onJumpInSameCanvas: onJumpInSameCanvas,
         onAddTarget: onAddTarget,
+        desktop: desktop,
         // Navigation must outlive the sheet; snackbars anchor to the host.
         hostContext: context,
       ),
@@ -85,6 +87,7 @@ class _ConnectionsList extends StatefulWidget {
   final LinkEndpoint? selfEndpoint;
   final String selfName;
   final String? insideCanvasId;
+  final bool? desktop;
   final void Function(String? pageId)? onJumpInSameCanvas;
 
   /// When set (the lasso-selection host), adding a target routes here instead
@@ -103,6 +106,7 @@ class _ConnectionsList extends StatefulWidget {
     this.selfEndpoint,
     this.selfName = '',
     this.insideCanvasId,
+    this.desktop,
     this.onJumpInSameCanvas,
     this.onAddTarget,
     required this.hostContext,
@@ -375,6 +379,18 @@ class _ConnectionsListState extends State<_ConnectionsList> {
                   ),
                 ),
                 if (_actionEndpoint != null) ...[
+                  // Desktop: open the floating local graph centered on this item.
+                  if (widget.desktop ??
+                      (MediaQuery.of(context).size.width >= 840))
+                    IconButton(
+                      tooltip: 'Open local graph',
+                      icon: const Icon(Icons.hub_outlined, size: 20),
+                      onPressed: () {
+                        LocalGraphController()
+                            .openAt(_actionEndpoint!, _actionName);
+                        Navigator.of(context).pop();
+                      },
+                    ),
                   IconButton(
                     tooltip: 'Copy link to this item',
                     icon: const Icon(Icons.link, size: 20),

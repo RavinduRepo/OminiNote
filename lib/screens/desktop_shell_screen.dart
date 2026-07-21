@@ -839,7 +839,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          body: LayoutBuilder(
+          body: Stack(children: [
+            Positioned.fill(
+              child: LayoutBuilder(
             builder: (context, constraints) {
               // The left icon nav rail is a fixed strip; the pane width math works
               // off the space that remains beside it.
@@ -898,7 +900,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 ],
               );
             },
-          ),
+              ),
+            ),
+            // Floating local-graph card — persists across pane navigation until
+            // closed; opened from any Connections menu.
+            const LocalGraphPanel(),
+          ]),
         ),
       ),
     );
@@ -1311,11 +1318,22 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     // No leaf icon — the colored identity pill is enough.
                     selectedId: _selectedCanvas?.id,
                     glowId: _glowId,
-                    onOpen: (c) => setState(() {
-                      _selectedCanvas = c;
-                      _mainMode = _MainMode.canvas; // leave Search/Bin
-                      _pendingJumpPageId = null; // manual open: don't re-jump
-                    }),
+                    onOpen: (c) {
+                      setState(() {
+                        _selectedCanvas = c;
+                        _mainMode = _MainMode.canvas; // leave Search/Bin
+                        _pendingJumpPageId = null; // manual open: don't re-jump
+                      });
+                      // Tell the floating local graph where we are (for its
+                      // recenter / follow).
+                      LocalGraphController().setCurrentLocation(
+                        LinkEndpoint(
+                            notebookId: section.notebookId,
+                            sectionId: section.id,
+                            canvasId: c.id),
+                        c.name,
+                      );
+                    },
                     onConnectionsLeaf: (c) => showConnectionsSheet(
                       context,
                       title: c.name,

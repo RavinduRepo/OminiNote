@@ -2424,3 +2424,428 @@ class _ShapeIconPainter extends CustomPainter {
   bool shouldRepaint(covariant _ShapeIconPainter old) =>
       old.shape != shape || old.color != color;
 }
+
+/// State for the desktop floating **local graph** — a small draggable card that
+/// shows the current item + its connections out to a chosen depth, persists
+/// across navigation (until closed), and stacks a back/forward history as you
+/// hop between nodes. Singleton so the Connections menus can open it and the
+/// desktop shell can host one instance + publish the current location.
+class LocalGraphController extends ChangeNotifier {
+  static final LocalGraphController _i = LocalGraphController._();
+  factory LocalGraphController() => _i;
+  LocalGraphController._();
+
+  bool open = false;
+  bool follow = false; // pin: auto-recenter to wherever you navigate
+  int depth = 1; // hops from the center
+  Offset position = const Offset(96, 96);
+  Size size = const Size(360, 340);
+
+  final List<({LinkEndpoint ep, String name})> _history = [];
+  int _hi = -1;
+  int _rev = 0; // bumped when the subgraph must rebuild
+  int get revision => _rev;
+
+  /// The app's current location (published by the shell) — the recenter target.
+  ({LinkEndpoint ep, String name})? currentLocation;
+
+  ({LinkEndpoint ep, String name})? get center =>
+      (_hi >= 0 && _hi < _history.length) ? _history[_hi] : null;
+  bool get canBack => _hi > 0;
+  bool get canForward => _hi < _history.length - 1;
+
+  void _bump() {
+    _rev++;
+    notifyListeners();
+  }
+
+  void openAt(LinkEndpoint ep, String name) {
+    open = true;
+    _history
+      ..clear()
+      ..add((ep: ep, name: name));
+    _hi = 0;
+    _bump();
+  }
+
+  void _push(LinkEndpoint ep, String name) {
+    if (center?.ep.toUri() == ep.toUri()) return; // already here
+    if (_hi < _history.length - 1) {
+      _history.removeRange(_hi + 1, _history.length);
+    }
+    _history.add((ep: ep, name: name));
+    _hi = _history.length - 1;
+    _bump();
+  }
+
+  void navigateTo(LinkEndpoint ep, String name) => _push(ep, name);
+  void back() {
+    if (canBack) {
+      _hi--;
+      _bump();
+    }
+  }
+
+  void forward() {
+    if (canForward) {
+      _hi++;
+      _bump();
+    }
+  }
+
+  void setDepth(int d) {
+    final n = d.clamp(1, 4);
+    if (n != depth) {
+      depth = n;
+      _bump();
+    }
+  }
+
+  void close() {
+    open = false;
+    notifyListeners();
+  }
+
+  void toggleFollow() {
+    follow = !follow;
+    if (follow) recenter();
+    notifyListeners();
+  }
+
+  /// The shell calls this as the user navigates; when following, the card keeps
+  /// up automatically, else it stays put until [recenter].
+  void setCurrentLocation(LinkEndpoint ep, String name) {
+    currentLocation = (ep: ep, name: name);
+    if (follow && open) _push(ep, name);
+  }
+
+  void recenter() {
+    final l = currentLocation;
+    if (l != null) _push(l.ep, l.name);
+  }
+
+  void move(Offset d) {
+    position += d;
+    notifyListeners();
+  }
+
+  void resize(Offset d) {
+    size = Size((size.width + d.dx).clamp(280.0, 680.0),
+        (size.height + d.dy).clamp(240.0, 680.0));
+    notifyListeners();
+  }
+}
+
+/// The floating local-graph card (desktop). Include one instance in the shell's
+/// top-level Stack; it shows only while [LocalGraphController.open].
+class LocalGraphPanel extends StatefulWidget {
+  const LocalGraphPanel({super.key});
+
+  @override
+  State<LocalGraphPanel> createState() => _LocalGraphPanelState();
+}
+
+class _LocalGraphPanelState extends State<LocalGraphPanel>
+    with SingleTickerProviderStateMixin {
+  final _lgc = LocalGraphController();
+  late final GraphController _g;
+  late final Ticker _ticker;
+  Timer? _fit;
+  int _builtRev = -1;
+
+  GraphSimNode? _dragNode;
+  bool _moved = false;
+  double _lastScale = 1.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _g = GraphController();
+    // A local graph ignores the main view's filters.
+    _g.hiddenContainers.clear();
+    _g.tagInclude.clear();
+    _g.tagExclude.clear();
+    _g.activeProjectId = null;
+    _ticker = createTicker((_) {
+      if (!_g.step()) _ticker.stop();
+    });
+    _g.onWake = () {
+      if (mounted && !_ticker.isActive) _ticker.start();
+    };
+    _g.onContentChanged = () {
+      _fit?.cancel();
+      _fit = Timer(const Duration(milliseconds: 500), () {
+        if (mounted) _g.fitToScreen();
+      });
+    };
+    _lgc.addListener(_onLgc);
+    _maybeRebuild();
+  }
+
+  @override
+  void dispose() {
+    _lgc.removeListener(_onLgc);
+    _fit?.cancel();
+    _ticker.dispose();
+    _g.dispose();
+    super.dispose();
+  }
+
+  void _onLgc() {
+    if (mounted) setState(() {});
+    _maybeRebuild();
+  }
+
+  Future<void> _maybeRebuild() async {
+    if (!_lgc.open || _lgc.revision == _builtRev) return;
+    _builtRev = _lgc.revision;
+    final center = _lgc.center;
+    if (center == null) return;
+    final data = await GraphService().buildGraph();
+    if (!mounted || _lgc.revision != _builtRev) return; // superseded
+    final byKey = {for (final n in data.nodes) n.key: n};
+    final centerKey = center.ep.toUri();
+    // The center always appears, even with no connections.
+    if (!byKey.containsKey(centerKey)) {
+      final ep = center.ep;
+      final ext = ep.externalUrl != null;
+      byKey[centerKey] = GraphNode(
+        key: centerKey,
+        title: center.name.isEmpty ? 'Item' : center.name,
+        kind: ep.kind,
+        alive: true,
+        degree: 0,
+        leafId: ep.leafId,
+        externalUrl: ep.externalUrl,
+        color: ext ? null : AppPalette.identityColor(ep.leafId),
+        notebookId: ext ? null : ep.notebookId,
+        sectionId: ep.sectionId,
+        canvasId: ep.canvasId,
+        folderId: ep.folderId,
+      );
+    }
+    // BFS out to depth over the full link graph.
+    final adj = <String, Set<String>>{};
+    for (final e in data.edges) {
+      adj.putIfAbsent(e.aKey, () => {}).add(e.bKey);
+      adj.putIfAbsent(e.bKey, () => {}).add(e.aKey);
+    }
+    final keep = <String>{centerKey};
+    var frontier = <String>{centerKey};
+    for (var d = 0; d < _lgc.depth && frontier.isNotEmpty; d++) {
+      final next = <String>{};
+      for (final k in frontier) {
+        for (final nb in adj[k] ?? const <String>{}) {
+          if (keep.add(nb)) next.add(nb);
+        }
+      }
+      frontier = next;
+    }
+    final nodes = [for (final k in keep) if (byKey[k] != null) byKey[k]!];
+    final edges = [
+      for (final e in data.edges)
+        if (keep.contains(e.aKey) && keep.contains(e.bKey)) e
+    ];
+    _g.setData(GraphData(nodes: nodes, edges: edges));
+    _g.setHover(centerKey); // emphasize the center + its neighbors
+  }
+
+  void _onScaleStart(ScaleStartDetails d) {
+    _lastScale = 1.0;
+    _moved = false;
+    _dragNode = _g.hitTest(d.localFocalPoint);
+    if (_dragNode != null) _g.beginDrag(_dragNode!);
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    _moved = true;
+    if (_dragNode != null && d.pointerCount == 1) {
+      _g.dragTo(d.localFocalPoint);
+      return;
+    }
+    if (d.scale != 1.0) {
+      _g.zoomAt(d.localFocalPoint, d.scale / _lastScale);
+      _lastScale = d.scale;
+    }
+    _g.panBy(d.focalPointDelta);
+  }
+
+  void _onScaleEnd(ScaleEndDetails d) {
+    if (_dragNode != null) _g.endDrag();
+    _dragNode = null;
+  }
+
+  void _onTapUp(TapUpDetails d) {
+    if (_moved) return;
+    final node = _g.hitTest(d.localPosition);
+    if (node != null) _activate(node);
+  }
+
+  Future<void> _activate(GraphSimNode node) async {
+    final data = node.data;
+    if (data.externalUrl != null) {
+      await launchUrl(Uri.parse(data.externalUrl!),
+          mode: LaunchMode.externalApplication);
+      return;
+    }
+    if (!data.alive || data.reveal == null) return;
+    LinkNavigator().reveal(data.reveal!);
+    final ep = LinkEndpoint.sideFrom(data.key);
+    if (ep != null) _lgc.navigateTo(ep, data.title); // stack the hop
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_lgc.open) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final palette = theme.extension<AppPalette>()!;
+    final center = _lgc.center;
+    return Positioned(
+      left: _lgc.position.dx,
+      top: _lgc.position.dy,
+      width: _lgc.size.width,
+      height: _lgc.size.height,
+      child: Material(
+        elevation: 12,
+        borderRadius: BorderRadius.circular(kRadius),
+        color: palette.canvas,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(kRadius),
+            border: Border.all(color: palette.border),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              _titleBar(palette, center?.name ?? 'Local graph'),
+              Expanded(
+                child: Listener(
+                  onPointerSignal: (e) {
+                    if (e is PointerScrollEvent) {
+                      _g.zoomAt(e.localPosition,
+                          e.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12);
+                    }
+                  },
+                  child: RawGestureDetector(
+                    gestures: {
+                      ScaleGestureRecognizer:
+                          GestureRecognizerFactoryWithHandlers<
+                              ScaleGestureRecognizer>(
+                        () => ScaleGestureRecognizer(),
+                        (r) => r
+                          ..onStart = _onScaleStart
+                          ..onUpdate = _onScaleUpdate
+                          ..onEnd = _onScaleEnd,
+                      ),
+                      TapGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+                          TapGestureRecognizer>(
+                        () => TapGestureRecognizer(),
+                        (r) => r..onTapUp = _onTapUp,
+                      ),
+                    },
+                    child: CustomPaint(
+                      painter: _GraphPainter(_g, palette, theme),
+                      size: Size.infinite,
+                    ),
+                  ),
+                ),
+              ),
+              _bottomBar(palette),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _titleBar(AppPalette palette, String name) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onPanUpdate: (d) => _lgc.move(d.delta),
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.only(left: 10, right: 4),
+        decoration: BoxDecoration(
+          color: palette.surface2,
+          border: Border(bottom: BorderSide(color: palette.border)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.hub_outlined, size: 15, color: palette.textDim),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: onSurface)),
+            ),
+            _tinyBtn(palette, Icons.arrow_back, 'Back',
+                _lgc.canBack ? _lgc.back : null),
+            _tinyBtn(palette, Icons.arrow_forward, 'Forward',
+                _lgc.canForward ? _lgc.forward : null),
+            _tinyBtn(
+              palette,
+              _lgc.follow ? Icons.push_pin : Icons.push_pin_outlined,
+              _lgc.follow ? 'Following location' : 'Pin to follow location',
+              _lgc.toggleFollow,
+              active: _lgc.follow,
+            ),
+            _tinyBtn(palette, Icons.close, 'Close', _lgc.close),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _bottomBar(AppPalette palette) {
+    return Container(
+      height: 34,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: palette.surface2,
+        border: Border(top: BorderSide(color: palette.border)),
+      ),
+      child: Row(
+        children: [
+          _tinyBtn(palette, Icons.my_location, 'Recenter on current location',
+              _lgc.recenter),
+          const Spacer(),
+          Text('Depth', style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+          _tinyBtn(palette, Icons.remove, 'Fewer hops',
+              _lgc.depth > 1 ? () => _lgc.setDepth(_lgc.depth - 1) : null),
+          Text('${_lgc.depth}',
+              style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: palette.accent)),
+          _tinyBtn(palette, Icons.add, 'More hops',
+              _lgc.depth < 4 ? () => _lgc.setDepth(_lgc.depth + 1) : null),
+          const SizedBox(width: 6),
+          // Resize grip (drag to size the card).
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onPanUpdate: (d) => _lgc.resize(d.delta),
+            child: Icon(Icons.open_in_full, size: 14, color: palette.textDim),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tinyBtn(AppPalette palette, IconData icon, String tip, VoidCallback? onTap,
+      {bool active = false}) {
+    return IconButton(
+      icon: Icon(icon, size: 16),
+      color: active ? palette.accent : palette.textDim,
+      tooltip: tip,
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.all(4),
+      constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+      onPressed: onTap,
+    );
+  }
+}
