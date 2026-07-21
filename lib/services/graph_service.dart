@@ -82,6 +82,9 @@ class GraphNode {
   String? get deepestContainerId =>
       canvasId ?? folderId ?? sectionId ?? notebookId;
 
+  /// The endpoint leaf id (matches tag/link assignments), for tag filtering.
+  final String leafId;
+
   /// Ancestor display names (from the live reveal target); null when unknown
   /// (dead / external), so the filter tree can group them under a fallback.
   final String? notebookName;
@@ -99,6 +102,7 @@ class GraphNode {
     required this.kind,
     required this.alive,
     required this.degree,
+    required this.leafId,
     this.reveal,
     this.externalUrl,
     this.color,
@@ -206,6 +210,7 @@ class GraphService {
         kind: r.kind,
         alive: r.alive,
         degree: degree[key] ?? 0,
+        leafId: ep.leafId,
         reveal: r.reveal,
         externalUrl: ep.externalUrl,
         color: (!isExternal && r.alive)
@@ -246,6 +251,7 @@ class GraphService {
         kind: LinkTargetKind.canvas,
         alive: r.alive,
         degree: 0,
+        leafId: ep.leafId,
         reveal: r.reveal,
         color: r.alive ? AppPalette.identityColor(_colorId(ep)) : null,
         notebookId: ep.notebookId,

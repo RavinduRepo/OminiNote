@@ -7,11 +7,13 @@ import 'package:flutter/scheduler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/link.dart';
+import '../models/tag.dart';
 import '../services/graph_service.dart';
 import '../services/link_navigator.dart';
 import '../services/link_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
+import '../services/tag_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
 
@@ -65,6 +67,19 @@ class GraphController extends ChangeNotifier {
   /// Every container as an isolated GraphNode (from [structure]) — added to the
   /// graph when [showUnlinked] is on, for containers not already linked.
   List<GraphNode> _unlinkedCandidates = [];
+
+  // ── Tag filter (AND / OR / NOT) ──
+  List<TagDef> tags = const []; // all defined tags (for the filter chips)
+  Map<String, Set<String>> _tagsByLeaf = const {}; // leaf id → its tag ids
+  final Set<String> tagInclude = {}; // must match (per [tagMatchAll])
+  final Set<String> tagExclude = {}; // must NOT be present
+  bool tagMatchAll = false; // includes combine as ALL (true) or ANY (false)
+
+  bool get hasTagFilter => tagInclude.isNotEmpty || tagExclude.isNotEmpty;
+
+  /// 0 = off, 1 = include, 2 = exclude.
+  int tagState(String id) =>
+      tagInclude.contains(id) ? 1 : (tagExclude.contains(id) ? 2 : 0);
 
   // ── Appearance (Obsidian-style sliders) ──
   double nodeSizeScale = 1.0; // 0.5–2.5
@@ -176,6 +191,7 @@ class GraphController extends ChangeNotifier {
         kind: _kindOf(c.kind),
         alive: true,
         degree: 0,
+        leafId: c.endpoint.leafId,
         reveal: c.reveal,
         color: AppPalette.identityColor(c.id),
         notebookId: c.endpoint.notebookId,
@@ -201,9 +217,21 @@ class GraphController extends ChangeNotifier {
   /// ancestor), so unchecking a section still lets you re-check individual
   /// canvases inside it — the tree checkboxes are independent, with a cascade.
   bool _passesFilter(GraphNode n) {
-    if (n.externalUrl != null) return showExternal;
+    if (n.externalUrl != null && !showExternal) return false;
     final id = n.deepestContainerId;
-    return id == null || !hiddenContainers.contains(id);
+    if (id != null && hiddenContainers.contains(id)) return false;
+    // Tag filter: excludes always remove; includes must match per ALL/ANY.
+    if (hasTagFilter) {
+      final nt = _tagsByLeaf[n.leafId] ?? const <String>{};
+      if (tagExclude.any(nt.contains)) return false;
+      if (tagInclude.isNotEmpty) {
+        final ok = tagMatchAll
+            ? tagInclude.every(nt.contains)
+            : tagInclude.any(nt.contains);
+        if (!ok) return false;
+      }
+    }
+    return true;
   }
 
   /// Rebuilds [_nodes]/[_edges] from [_all] under the current filter, applying
@@ -334,6 +362,39 @@ class GraphController extends ChangeNotifier {
     showUnlinked = show;
     _rebuildActive();
     SettingsService().saveGraphSettings(showUnlinked: show);
+  }
+
+  /// Refreshes the tag list + per-item tag lookup (from TagService).
+  void setTagData(List<TagDef> t, Map<String, Set<String>> byLeaf) {
+    tags = t;
+    _tagsByLeaf = byLeaf;
+    final ids = t.map((x) => x.id).toSet();
+    tagInclude.retainAll(ids);
+    tagExclude.retainAll(ids);
+    _rebuildActive();
+  }
+
+  /// Cycles a tag chip off → include → exclude → off.
+  void cycleTag(String id) {
+    if (tagInclude.remove(id)) {
+      tagExclude.add(id);
+    } else if (!tagExclude.remove(id)) {
+      tagInclude.add(id);
+    }
+    _rebuildActive();
+  }
+
+  void setTagMatchAll(bool v) {
+    if (tagMatchAll == v) return;
+    tagMatchAll = v;
+    _rebuildActive();
+  }
+
+  void clearTagFilter() {
+    if (!hasTagFilter) return;
+    tagInclude.clear();
+    tagExclude.clear();
+    _rebuildActive();
   }
 
   void setAlwaysShowLabels(bool v) {
@@ -647,6 +708,10 @@ class _GraphScreenState extends State<GraphScreen>
     });
     _controller.setStructure(structure);
     _controller.setData(data);
+    // Tags (for the AND/OR/NOT filter chips + per-node lookup).
+    final tags = await TagService().allTags();
+    final tagsByLeaf = await TagService().tagIdsByLeaf();
+    if (mounted) _controller.setTagData(tags, tagsByLeaf);
     // Frame the whole graph once the first layout has had a moment to spread.
     if (!_didInitialFit && !data.isEmpty) {
       _didInitialFit = true;
@@ -1141,6 +1206,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   final Set<String> _expanded = {};
   bool _appearanceOpen = false;
   bool _filterOpen = false; // the notebook/section/canvas tree, collapsed by default
+  bool _tagsOpen = false;
   bool _linkMode = false;
   GraphContainer? _linkFrom; // link-mode source (null until first pick)
   GraphController get c => widget.controller;
@@ -1153,6 +1219,119 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       out.addAll(_subtreeIds(ch));
     }
     return out;
+  }
+
+  /// The tag filter: each chip cycles off → include → exclude, plus an
+  /// ANY/ALL switch governing how the includes combine (excludes always remove).
+  Widget _tagsFilterBody(AppPalette palette) {
+    final error = Theme.of(context).colorScheme.error;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 12, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('Match', style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+              const SizedBox(width: 8),
+              _matchOption(palette, 'Any', !c.tagMatchAll,
+                  () => c.setTagMatchAll(false)),
+              const SizedBox(width: 4),
+              _matchOption(palette, 'All', c.tagMatchAll,
+                  () => c.setTagMatchAll(true)),
+              const Spacer(),
+              if (c.hasTagFilter)
+                InkWell(
+                  onTap: c.clearTagFilter,
+                  child: Text('Clear',
+                      style: TextStyle(fontSize: 11.5, color: palette.accent)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final t in c.tags)
+                _tagChip(palette, error, t, c.tagState(t.id)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _matchOption(
+      AppPalette palette, String label, bool active, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: active ? palette.accentSoft : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+              color: active ? palette.accent : palette.border),
+        ),
+        child: Text(label,
+            style: TextStyle(
+                fontSize: 11.5,
+                color: active ? palette.accent : palette.textDim)),
+      ),
+    );
+  }
+
+  Widget _tagChip(AppPalette palette, Color error, TagDef t, int state) {
+    final Color bg, fg, border;
+    switch (state) {
+      case 1: // include
+        bg = palette.accentSoft;
+        fg = palette.accent;
+        border = palette.accent;
+      case 2: // exclude
+        bg = error.withValues(alpha: 0.12);
+        fg = error;
+        border = error;
+      default: // off
+        bg = palette.surface2;
+        fg = palette.textDim;
+        border = palette.border;
+    }
+    return InkWell(
+      onTap: () => c.cycleTag(t.id),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (state == 1)
+              Padding(
+                padding: const EdgeInsets.only(right: 3),
+                child: Icon(Icons.check, size: 12, color: fg),
+              )
+            else if (state == 2)
+              Padding(
+                padding: const EdgeInsets.only(right: 3),
+                child: Icon(Icons.block, size: 12, color: fg),
+              ),
+            Text(t.name,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: fg,
+                    decoration:
+                        state == 2 ? TextDecoration.lineThrough : null)),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _sectionHeader(
@@ -1281,6 +1460,12 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               _toggle(palette, 'Show items without links', c.showUnlinked,
                   (v) => c.setShowUnlinked(v)),
               Divider(height: 1, color: palette.border),
+              if (c.tags.isNotEmpty) ...[
+                _sectionHeader(palette, 'Tags', _tagsOpen,
+                    () => setState(() => _tagsOpen = !_tagsOpen)),
+                if (_tagsOpen) _tagsFilterBody(palette),
+                Divider(height: 1, color: palette.border),
+              ],
               // The notebook → section → canvas tree, tucked under a dropdown so
               // it isn't in your face all the time.
               _sectionHeader(palette, 'Filter items', _filterOpen,

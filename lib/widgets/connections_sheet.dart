@@ -3,15 +3,18 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/link.dart';
+import '../models/tag.dart';
 import '../utils/url_text.dart';
 import '../services/link_navigator.dart';
 import '../services/link_resolver.dart';
 import '../services/link_service.dart';
+import '../services/tag_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
 import 'action_sheet.dart';
 import 'edit_link_sheet.dart';
 import 'link_target_picker.dart';
+import 'tag_manager_sheet.dart';
 
 /// Copies [endpoint]'s `omninote://link/...` URI to the OS clipboard — the
 /// "Copy link" action every linkable item's menu offers.
@@ -107,11 +110,34 @@ class _Row {
 
 class _ConnectionsListState extends State<_ConnectionsList> {
   List<_Row>? _rows;
+  List<TagDef> _tags = const [];
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadTags();
+  }
+
+  Future<void> _loadTags() async {
+    final ep = widget.endpoint;
+    if (ep == null) return; // tags only on a concrete item, not the aggregate
+    final tags = await TagService().tagsOf(ep.leafId);
+    if (mounted) setState(() => _tags = tags);
+  }
+
+  Future<void> _manageTags() async {
+    final ep = widget.endpoint;
+    if (ep == null) return;
+    await showTagManagerSheet(context, endpoint: ep);
+    await _loadTags();
+  }
+
+  Future<void> _removeTag(TagDef t) async {
+    final ep = widget.endpoint;
+    if (ep == null) return;
+    await TagService().unassign(t.id, ep);
+    await _loadTags();
   }
 
   Future<void> _load() async {
@@ -353,6 +379,7 @@ class _ConnectionsListState extends State<_ConnectionsList> {
               ],
             ),
           ),
+          if (widget.endpoint != null) _buildTagsStrip(palette),
           if (rows == null)
             const Padding(
               padding: EdgeInsets.all(24),
@@ -378,6 +405,53 @@ class _ConnectionsListState extends State<_ConnectionsList> {
                 itemBuilder: (_, i) => _buildRow(palette, rows[i]),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  /// The small "Tags" strip: the item's tag chips (✕ to remove) + a ＋ that
+  /// opens the manager (attach/create/rename/delete). Names only.
+  Widget _buildTagsStrip(AppPalette palette) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 8, 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 6, right: 8),
+            child: Icon(Icons.sell_outlined, size: 15, color: palette.textDim),
+          ),
+          Expanded(
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                for (final t in _tags)
+                  Chip(
+                    label: Text(t.name, style: TextStyle(fontSize: 12, color: onSurface)),
+                    onDeleted: () => _removeTag(t),
+                    deleteIcon: const Icon(Icons.close, size: 14),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    backgroundColor: palette.surface2,
+                    side: BorderSide(color: palette.border),
+                  ),
+                ActionChip(
+                  label: Text(_tags.isEmpty ? 'Add tag' : 'Tag',
+                      style: TextStyle(fontSize: 12, color: palette.textDim)),
+                  avatar: Icon(Icons.add, size: 15, color: palette.textDim),
+                  onPressed: _manageTags,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                  backgroundColor: Colors.transparent,
+                  side: BorderSide(color: palette.border),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
