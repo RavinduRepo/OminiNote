@@ -73,6 +73,15 @@ class GraphNode {
   final String? sectionId;
   final String? canvasId;
 
+  /// The node's own folder id when it *is* a super-section/canvas-folder — so
+  /// its filter checkbox governs it directly.
+  final String? folderId;
+
+  /// The deepest container this node belongs to (canvas ▸ folder ▸ section ▸
+  /// notebook) — the single checkbox that shows/hides it.
+  String? get deepestContainerId =>
+      canvasId ?? folderId ?? sectionId ?? notebookId;
+
   /// Ancestor display names (from the live reveal target); null when unknown
   /// (dead / external), so the filter tree can group them under a fallback.
   final String? notebookName;
@@ -96,6 +105,7 @@ class GraphNode {
     this.notebookId,
     this.sectionId,
     this.canvasId,
+    this.folderId,
     this.notebookName,
     this.sectionName,
     this.canvasName,
@@ -204,6 +214,7 @@ class GraphService {
         notebookId: isExternal ? null : ep.notebookId,
         sectionId: isExternal ? null : ep.sectionId,
         canvasId: isExternal ? null : ep.canvasId,
+        folderId: isExternal ? null : ep.folderId,
         // Ancestor names come from the live reveal target when resolvable.
         notebookName: r.reveal?.notebook.name,
         sectionName: r.reveal?.section?.name,

@@ -137,24 +137,33 @@ class SettingsService {
   double graphNodeSize = 1.0;
   double graphTextSize = 1.0;
   double graphLinkThickness = 1.0;
-  double graphLinkOpacity = 0.55;
+  double graphLinkOpacity = 0.6;
+  double graphLabelOpacity = 0.95;
+  bool graphAlwaysLabels = false;
   bool graphAbstractItems = true;
   bool graphShowExternal = true;
+  bool graphShowUnlinked = false;
 
   Future<void> saveGraphSettings({
     double? nodeSize,
     double? textSize,
     double? linkThickness,
     double? linkOpacity,
+    double? labelOpacity,
+    bool? alwaysLabels,
     bool? abstractItems,
     bool? showExternal,
+    bool? showUnlinked,
   }) async {
     graphNodeSize = nodeSize ?? graphNodeSize;
     graphTextSize = textSize ?? graphTextSize;
     graphLinkThickness = linkThickness ?? graphLinkThickness;
     graphLinkOpacity = linkOpacity ?? graphLinkOpacity;
+    graphLabelOpacity = labelOpacity ?? graphLabelOpacity;
+    graphAlwaysLabels = alwaysLabels ?? graphAlwaysLabels;
     graphAbstractItems = abstractItems ?? graphAbstractItems;
     graphShowExternal = showExternal ?? graphShowExternal;
+    graphShowUnlinked = showUnlinked ?? graphShowUnlinked;
     await _persist();
   }
 
@@ -445,9 +454,12 @@ class SettingsService {
     graphNodeSize = (data['graphNodeSize'] as num?)?.toDouble() ?? 1.0;
     graphTextSize = (data['graphTextSize'] as num?)?.toDouble() ?? 1.0;
     graphLinkThickness = (data['graphLinkThickness'] as num?)?.toDouble() ?? 1.0;
-    graphLinkOpacity = (data['graphLinkOpacity'] as num?)?.toDouble() ?? 0.55;
+    graphLinkOpacity = (data['graphLinkOpacity'] as num?)?.toDouble() ?? 0.6;
+    graphLabelOpacity = (data['graphLabelOpacity'] as num?)?.toDouble() ?? 0.95;
+    graphAlwaysLabels = data['graphAlwaysLabels'] == true; // default false
     graphAbstractItems = data['graphAbstractItems'] != false; // default true
     graphShowExternal = data['graphShowExternal'] != false; // default true
+    graphShowUnlinked = data['graphShowUnlinked'] == true; // default false
     ttsVoiceName = data['ttsVoiceName'] as String?;
     ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
     shapeToolKind = ShapeToolKind.values.firstWhere(
@@ -652,8 +664,11 @@ class SettingsService {
         'graphTextSize': graphTextSize,
         'graphLinkThickness': graphLinkThickness,
         'graphLinkOpacity': graphLinkOpacity,
+        'graphLabelOpacity': graphLabelOpacity,
+        'graphAlwaysLabels': graphAlwaysLabels,
         'graphAbstractItems': graphAbstractItems,
         'graphShowExternal': graphShowExternal,
+        'graphShowUnlinked': graphShowUnlinked,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,

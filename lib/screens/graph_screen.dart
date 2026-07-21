@@ -70,7 +70,9 @@ class GraphController extends ChangeNotifier {
   double nodeSizeScale = 1.0; // 0.5–2.5
   double textSizeScale = 1.0; // 0.6–2.0
   double linkThickness = 1.0; // 0.4–3.0
-  double linkOpacity = 0.55; // 0.1–1.0
+  double linkOpacity = 0.6; // 0.1–1.0
+  double labelOpacity = 0.95; // 0.15–1.0 (node text transparency)
+  bool alwaysShowLabels = false; // keep labels visible however far you zoom out
 
   GraphController() {
     // Seed appearance + view toggles from device-local settings.
@@ -79,8 +81,11 @@ class GraphController extends ChangeNotifier {
     textSizeScale = s.graphTextSize;
     linkThickness = s.graphLinkThickness;
     linkOpacity = s.graphLinkOpacity;
+    labelOpacity = s.graphLabelOpacity;
+    alwaysShowLabels = s.graphAlwaysLabels;
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
+    showUnlinked = s.graphShowUnlinked;
   }
 
   /// A container id hovered in the filter tree — nodes under it get a halo.
@@ -176,6 +181,7 @@ class GraphController extends ChangeNotifier {
         notebookId: c.endpoint.notebookId,
         sectionId: c.endpoint.sectionId,
         canvasId: c.endpoint.canvasId,
+        folderId: c.endpoint.folderId,
       ));
       for (final ch in c.children) {
         walk(ch);
@@ -190,18 +196,14 @@ class GraphController extends ChangeNotifier {
 
   /// True when [n] passes the container + external filters (NOT the inside-item
   /// handling — that's abstraction, applied separately in [_rebuildActive]).
+  ///
+  /// Visibility keys off the node's *own deepest* container only (not every
+  /// ancestor), so unchecking a section still lets you re-check individual
+  /// canvases inside it — the tree checkboxes are independent, with a cascade.
   bool _passesFilter(GraphNode n) {
     if (n.externalUrl != null) return showExternal;
-    if (n.notebookId != null && hiddenContainers.contains(n.notebookId)) {
-      return false;
-    }
-    if (n.sectionId != null && hiddenContainers.contains(n.sectionId)) {
-      return false;
-    }
-    if (n.canvasId != null && hiddenContainers.contains(n.canvasId)) {
-      return false;
-    }
-    return true;
+    final id = n.deepestContainerId;
+    return id == null || !hiddenContainers.contains(id);
   }
 
   /// Rebuilds [_nodes]/[_edges] from [_all] under the current filter, applying
@@ -298,13 +300,19 @@ class GraphController extends ChangeNotifier {
   /// this so toggled-off containers still list.
   List<GraphNode> get allNodes => _all.nodes;
 
-  void setContainerHidden(String id, bool hidden) {
-    if (hidden) {
-      if (!hiddenContainers.add(id)) return;
-    } else {
-      if (!hiddenContainers.remove(id)) return;
+  /// Shows/hides a set of container ids at once (a checkbox toggles its whole
+  /// subtree — self + descendants — so a parent cascades, but each stays
+  /// independently re-checkable).
+  void setSubtreeHidden(Iterable<String> ids, bool hidden) {
+    var changed = false;
+    for (final id in ids) {
+      if (hidden) {
+        changed |= hiddenContainers.add(id);
+      } else {
+        changed |= hiddenContainers.remove(id);
+      }
     }
-    _rebuildActive();
+    if (changed) _rebuildActive();
   }
 
   void setAbstractInsideItems(bool abstract) {
@@ -325,6 +333,22 @@ class GraphController extends ChangeNotifier {
     if (showUnlinked == show) return;
     showUnlinked = show;
     _rebuildActive();
+    SettingsService().saveGraphSettings(showUnlinked: show);
+  }
+
+  void setAlwaysShowLabels(bool v) {
+    if (alwaysShowLabels == v) return;
+    alwaysShowLabels = v;
+    notifyListeners();
+    _bumpUi();
+    SettingsService().saveGraphSettings(alwaysLabels: v);
+  }
+
+  void setLabelOpacity(double v) {
+    labelOpacity = v;
+    notifyListeners();
+    _bumpUi();
+    SettingsService().saveGraphSettings(labelOpacity: v);
   }
 
   void setNodeSizeScale(double v) {
@@ -994,10 +1018,11 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
-    // Edges (thickness + opacity from the appearance sliders).
+    // Edges (thickness + opacity from the appearance sliders; textDim reads
+    // brighter than dot so the opacity slider can reach clearly-visible links).
     final edgePaint = Paint()
       ..style = PaintingStyle.stroke
-      ..color = palette.dot.withValues(alpha: c.linkOpacity)
+      ..color = palette.textDim.withValues(alpha: c.linkOpacity)
       ..strokeWidth = c.linkThickness;
     final edgeHot = Paint()
       ..style = PaintingStyle.stroke
@@ -1012,7 +1037,7 @@ class _GraphPainter extends CustomPainter {
     }
 
     // Nodes.
-    final showLabels = c.zoom > 0.45;
+    final showLabels = c.alwaysShowLabels || c.zoom > 0.45;
     final hlContainer = c.highlightContainerId;
     for (final node in c.nodes) {
       final d = node.data;
@@ -1081,7 +1106,7 @@ class _GraphPainter extends CustomPainter {
           color: (node.data.alive
                   ? theme.colorScheme.onSurface
                   : palette.textDim)
-              .withValues(alpha: dim ? 0.35 : 0.95),
+              .withValues(alpha: (dim ? 0.35 : 1.0) * c.labelOpacity),
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -1115,9 +1140,42 @@ class _GraphFilterPanel extends StatefulWidget {
 class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   final Set<String> _expanded = {};
   bool _appearanceOpen = false;
+  bool _filterOpen = false; // the notebook/section/canvas tree, collapsed by default
   bool _linkMode = false;
   GraphContainer? _linkFrom; // link-mode source (null until first pick)
   GraphController get c => widget.controller;
+
+  /// A container's own id plus every descendant container id — the set a
+  /// checkbox toggles (cascade), while each stays independently re-checkable.
+  List<String> _subtreeIds(GraphContainer g) {
+    final out = <String>[g.id];
+    for (final ch in g.children) {
+      out.addAll(_subtreeIds(ch));
+    }
+    return out;
+  }
+
+  Widget _sectionHeader(
+      AppPalette palette, String label, bool open, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 6, 14, 6),
+        child: Row(
+          children: [
+            Icon(open ? Icons.expand_more : Icons.chevron_right,
+                size: 16, color: palette.textDim),
+            const SizedBox(width: 4),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: Theme.of(context).colorScheme.onSurface)),
+          ],
+        ),
+      ),
+    );
+  }
 
   // Per-build node-count cache (subtree-inclusive) + the raw by-container maps.
   final Map<String, int> _count = {};
@@ -1181,7 +1239,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
           final roots = [...struct.notebooks]
             ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
           for (final nb in roots) {
-            _appendRows(rows, nb, 0, false, hlIds, palette);
+            _appendRows(rows, nb, 0, hlIds, palette);
           }
         }
         return SafeArea(
@@ -1222,17 +1280,23 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   (v) => c.setShowExternal(v)),
               _toggle(palette, 'Show items without links', c.showUnlinked,
                   (v) => c.setShowUnlinked(v)),
-              _appearanceSection(palette),
               Divider(height: 1, color: palette.border),
+              // The notebook → section → canvas tree, tucked under a dropdown so
+              // it isn't in your face all the time.
+              _sectionHeader(palette, 'Filter items', _filterOpen,
+                  () => setState(() => _filterOpen = !_filterOpen)),
               Expanded(
-                child: rows.isEmpty
-                    ? Center(
-                        child: Text('Nothing to show',
-                            style: TextStyle(
-                                fontSize: 12, color: palette.textDim)))
-                    : ListView(padding: EdgeInsets.zero, children: rows),
+                child: !_filterOpen
+                    ? const SizedBox.shrink()
+                    : (rows.isEmpty
+                        ? Center(
+                            child: Text('Nothing to show',
+                                style: TextStyle(
+                                    fontSize: 12, color: palette.textDim)))
+                        : ListView(padding: EdgeInsets.zero, children: rows)),
               ),
               Divider(height: 1, color: palette.border),
+              _appearanceSection(palette),
               _legend(palette),
             ],
           ),
@@ -1295,39 +1359,30 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   }
 
   void _appendRows(List<Widget> out, GraphContainer g, int depth,
-      bool ancestorHidden, Set<String> hlIds, AppPalette palette) {
+      Set<String> hlIds, AppPalette palette) {
     final count = _countOf(g);
     // Hide zero-link subtrees unless the user wants to see unlinked items.
     if (!c.showUnlinked && count == 0) return;
-    final selfHidden = c.hiddenContainers.contains(g.id);
-    final effectiveHidden = ancestorHidden || selfHidden;
     final renderableChildren = c.showUnlinked
         ? g.children
         : g.children.where((ch) => _countOf(ch) > 0).toList();
     final showChevron = renderableChildren.isNotEmpty;
     final expanded = _expanded.contains(g.id);
-    out.add(_rowTile(g, depth, count, effectiveHidden, ancestorHidden,
-        showChevron, expanded, hlIds, palette));
+    out.add(
+        _rowTile(g, depth, count, showChevron, expanded, hlIds, palette));
     if (showChevron && expanded) {
       final kids = [...renderableChildren]
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       for (final k in kids) {
-        _appendRows(out, k, depth + 1, effectiveHidden, hlIds, palette);
+        _appendRows(out, k, depth + 1, hlIds, palette);
       }
     }
   }
 
-  Widget _rowTile(
-      GraphContainer g,
-      int depth,
-      int count,
-      bool effectiveHidden,
-      bool ancestorHidden,
-      bool hasChildren,
-      bool expanded,
-      Set<String> hlIds,
-      AppPalette palette) {
+  Widget _rowTile(GraphContainer g, int depth, int count, bool hasChildren,
+      bool expanded, Set<String> hlIds, AppPalette palette) {
     final isLinkSource = _linkFrom?.id == g.id;
+    final selfHidden = c.hiddenContainers.contains(g.id);
     final highlighted = hlIds.contains(g.id);
     final color = AppPalette.identityColor(g.id);
     return MouseRegion(
@@ -1371,7 +1426,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12.5,
-                    color: (effectiveHidden || count == 0)
+                    color: (selfHidden || count == 0)
                         ? palette.textDim
                         : Theme.of(context).colorScheme.onSurface,
                     fontWeight: depth == 0 ? FontWeight.w600 : FontWeight.w400,
@@ -1391,11 +1446,12 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               else
                 SizedBox(
                   width: 34,
+                  // Independent + cascading: toggling a row toggles its whole
+                  // subtree, but each child stays re-checkable afterward.
                   child: Checkbox(
-                    value: !effectiveHidden,
-                    onChanged: ancestorHidden
-                        ? null
-                        : (v) => c.setContainerHidden(g.id, !(v ?? true)),
+                    value: !selfHidden,
+                    onChanged: (v) =>
+                        c.setSubtreeHidden(_subtreeIds(g), !(v ?? true)),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -1468,10 +1524,14 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               c.setNodeSizeScale),
           _slider(palette, 'Text size', c.textSizeScale, 0.6, 2.0,
               c.setTextSizeScale),
+          _slider(palette, 'Text opacity', c.labelOpacity, 0.15, 1.0,
+              c.setLabelOpacity),
           _slider(palette, 'Link thickness', c.linkThickness, 0.4, 3.0,
               c.setLinkThickness),
           _slider(palette, 'Link opacity', c.linkOpacity, 0.1, 1.0,
               c.setLinkOpacity),
+          _toggle(palette, 'Always show labels', c.alwaysShowLabels,
+              (v) => c.setAlwaysShowLabels(v)),
           const SizedBox(height: 4),
         ],
       ],
