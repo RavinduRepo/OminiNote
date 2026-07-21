@@ -845,6 +845,7 @@ class _GraphScreenState extends State<GraphScreen>
   bool _loading = true;
   bool _empty = false;
   bool _panelOpen = true; // filter/navigator tree panel (wide layout)
+  double _mobileSheet = 0.4; // mobile bottom-panel height fraction
   Timer? _fitDebounce; // auto-fit after a filter/data change settles
 
   // Drag/pan bookkeeping.
@@ -996,18 +997,6 @@ class _GraphScreenState extends State<GraphScreen>
     _controller.setHover(node?.data.key);
   }
 
-  void _openFilterSheet() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => FractionallySizedBox(
-        heightFactor: 0.8,
-        child: _GraphFilterPanel(controller: _controller, onReload: _load),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1015,23 +1004,82 @@ class _GraphScreenState extends State<GraphScreen>
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 640;
-        final showSidePanel = wide && _panelOpen && !_empty && !_loading;
         final graph = _buildGraphArea(theme, palette, wide);
-        if (!showSidePanel) return graph;
-        return Row(
+        if (wide) {
+          // Desktop: a resizable-width side panel column.
+          if (_panelOpen && !_empty && !_loading) {
+            return Row(
+              children: [
+                Container(
+                  width: 274,
+                  decoration: BoxDecoration(
+                    color: palette.surface2,
+                    border: Border(right: BorderSide(color: palette.border)),
+                  ),
+                  child: _GraphFilterPanel(
+                      controller: _controller, onReload: _load),
+                ),
+                Expanded(child: graph),
+              ],
+            );
+          }
+          return graph;
+        }
+        // Mobile: the panel is a persistent, draggable bottom sheet OVER the
+        // graph — peeks up, drag to expand, scrollable; the graph stays
+        // interactive above it.
+        if (_empty || _loading) return graph;
+        return Stack(
           children: [
-            Container(
-              width: 274,
-              decoration: BoxDecoration(
-                color: palette.surface2,
-                border: Border(right: BorderSide(color: palette.border)),
-              ),
-              child: _GraphFilterPanel(controller: _controller, onReload: _load),
-            ),
-            Expanded(child: graph),
+            Positioned.fill(child: graph),
+            _mobileBottomPanel(constraints, palette),
           ],
         );
       },
+    );
+  }
+
+  Widget _mobileBottomPanel(BoxConstraints constraints, AppPalette palette) {
+    final h = (constraints.maxHeight * _mobileSheet)
+        .clamp(96.0, constraints.maxHeight * 0.9);
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      height: h,
+      child: Material(
+        elevation: 10,
+        color: palette.surface2,
+        child: Column(
+          children: [
+            // Drag handle — pull up to see more options, down to see the graph.
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onVerticalDragUpdate: (d) => setState(() {
+                _mobileSheet = (_mobileSheet -
+                        d.primaryDelta! / constraints.maxHeight)
+                    .clamp(0.12, 0.9);
+              }),
+              child: Container(
+                height: 22,
+                alignment: Alignment.center,
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: palette.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child:
+                  _GraphFilterPanel(controller: _controller, onReload: _load),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1098,22 +1146,15 @@ class _GraphScreenState extends State<GraphScreen>
       right: 16,
       child: Row(
         children: [
-          if (!_empty && !_loading)
+          // Only desktop needs a toggle — mobile always shows the bottom sheet.
+          if (wide && !_empty && !_loading)
             _iconPill(
               palette,
-              wide
-                  ? (panelShown ? Icons.chevron_left : Icons.filter_list)
-                  : Icons.filter_list,
+              panelShown ? Icons.chevron_left : Icons.filter_list,
               'Filter & navigate',
-              () {
-                if (wide) {
-                  setState(() => _panelOpen = !_panelOpen);
-                } else {
-                  _openFilterSheet();
-                }
-              },
+              () => setState(() => _panelOpen = !_panelOpen),
             ),
-          const SizedBox(width: 8),
+          if (wide) const SizedBox(width: 8),
           Icon(Icons.hub_outlined, size: 18, color: palette.textDim),
           const SizedBox(width: 8),
           Text('Connections graph',

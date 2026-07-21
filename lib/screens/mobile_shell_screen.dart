@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import '../services/link_navigator.dart';
 import '../services/search_service.dart';
 import '../theme/app_theme.dart';
-import 'bin_screen.dart';
 import 'canvas_workspace_screen.dart';
+import 'graph_screen.dart';
 import 'home_screen.dart';
 import 'note_search.dart';
 import 'notebook_screen.dart';
@@ -29,7 +29,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // Order: Search sits at the far end (away from Notebooks) so its keyboard
   // never intrudes when you land on Notebooks — and it only focuses on entry.
   static const _kNotebooks = 0;
-  static const _kBin = 1;
+  static const _kGraph = 1; // Connections graph (Bin moved to the home app bar)
   static const _kSettings = 2;
   static const _kSearch = 3;
 
@@ -44,10 +44,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // adjacent tab. See _jumpToNotebooksTab + onPageChanged.
   bool _revealing = false;
   Timer? _revealTimer;
-
-  // Bumped each time the Bin tab is opened, so the kept-alive BinScreen
-  // reloads (something deleted elsewhere must appear when you switch back to it).
-  final ValueNotifier<int> _binRefresh = ValueNotifier(0);
 
   // Bumped when the Search tab is opened, so its field focuses ONLY then — the
   // field never autofocuses on build, which used to pop the keyboard when you
@@ -74,10 +70,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // post-frame and only setState when it actually flips.
   bool _swipeEnabled = true;
   bool _recheckScheduled = false;
-
-  // Defers the (potentially whole-store) Bin reload until the tab slide has
-  // settled, so the scan never competes with the swipe animation for frames.
-  Timer? _binReloadTimer;
 
   void _scheduleSwipeRecheck() {
     if (_recheckScheduled) return;
@@ -185,9 +177,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     LinkNavigator().unregister(_revealFromLink);
     LinkNavigator().unregisterOpenCanvas(_revealSearchResult);
     _revealTimer?.cancel();
-    _binReloadTimer?.cancel();
     _pageController.dispose();
-    _binRefresh.dispose();
     _searchFocus.dispose();
     super.dispose();
   }
@@ -199,12 +189,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // entirely unless the store changed.
   void _onEnterTab(int i) {
     if (i == _kSearch) _searchFocus.value++;
-    if (i == _kBin) {
-      _binReloadTimer?.cancel();
-      _binReloadTimer = Timer(const Duration(milliseconds: 350), () {
-        if (mounted) _binRefresh.value++;
-      });
-    }
   }
 
   void _selectTab(int i) {
@@ -254,7 +238,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
 
   Widget _tabRoot(int i) => switch (i) {
         _kNotebooks => const HomeScreen(),
-        _kBin => BinScreen(refreshSignal: _binRefresh),
+        _kGraph => const GraphScreen(),
         _kSettings => const SettingsScreen(),
         _kSearch => NoteSearchView(
             onReveal: _revealSearchResult,
@@ -398,8 +382,9 @@ class _MobileTabBar extends StatelessWidget {
           height: 60,
           child: Row(
             children: [
-              // Order: Notebooks · Bin · Settings · Search (Search last so its
-              // keyboard is never adjacent to Notebooks).
+              // Order: Notebooks · Graph · Settings · Search (Search last so its
+              // keyboard is never adjacent to Notebooks). Bin moved to the
+              // home-screen app bar.
               _TabItem(
                 icon: Icons.book_outlined,
                 activeIcon: Icons.book,
@@ -408,9 +393,9 @@ class _MobileTabBar extends StatelessWidget {
                 onTap: () => onSelect(0),
               ),
               _TabItem(
-                icon: Icons.delete_outline,
-                activeIcon: Icons.delete,
-                label: 'Bin',
+                icon: Icons.hub_outlined,
+                activeIcon: Icons.hub,
+                label: 'Graph',
                 active: index == 1,
                 onTap: () => onSelect(1),
               ),
