@@ -839,9 +839,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          body: Stack(children: [
-            Positioned.fill(
-              child: LayoutBuilder(
+          // StackFit.expand so the panes fill the body even while the (closed)
+          // LocalGraphPanel is a zero-size child — otherwise the Stack collapses
+          // to 0×0 and nothing renders.
+          body: Stack(fit: StackFit.expand, children: [
+            LayoutBuilder(
             builder: (context, constraints) {
               // The left icon nav rail is a fixed strip; the pane width math works
               // off the space that remains beside it.
@@ -900,7 +902,6 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 ],
               );
             },
-              ),
             ),
             // Floating local-graph card — persists across pane navigation until
             // closed; opened from any Connections menu.

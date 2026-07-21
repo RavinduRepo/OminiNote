@@ -287,7 +287,13 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
           itemCount: 4,
           // Swipe between tabs only at a tab's root; once drilled in, lock it
           // so horizontal drags belong to the content, not tab-switching.
-          physics: _swipeEnabled
+          // Also lock it *hard* during a reveal: revealing a link/search target
+          // pops the full-bleed canvas and pushes into the Notebooks tab, which
+          // churns the PageView layout — without this the controller could
+          // spuriously settle onto the adjacent (Graph) tab, and the Graph tab's
+          // heavy first build would outrun the snap-back window. NeverScrollable
+          // prevents any drift while jumpToPage still positions us correctly.
+          physics: (_swipeEnabled && !_revealing)
               ? const ClampingScrollPhysics()
               : const NeverScrollableScrollPhysics(),
           onPageChanged: (i) {
