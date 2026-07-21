@@ -144,6 +144,16 @@ class SettingsService {
   bool graphShowExternal = true;
   bool graphShowUnlinked = false;
 
+  /// Free-form persisted graph-view state (device-local): selected/hidden
+  /// containers, tag filter, active project, and panel expand states. A blob so
+  /// the controller and panel can each patch their own keys.
+  Map<String, dynamic> graphView = {};
+
+  Future<void> patchGraphView(Map<String, dynamic> partial) async {
+    graphView = {...graphView, ...partial};
+    await _persist();
+  }
+
   Future<void> saveGraphSettings({
     double? nodeSize,
     double? textSize,
@@ -460,6 +470,7 @@ class SettingsService {
     graphAbstractItems = data['graphAbstractItems'] != false; // default true
     graphShowExternal = data['graphShowExternal'] != false; // default true
     graphShowUnlinked = data['graphShowUnlinked'] == true; // default false
+    graphView = (data['graphView'] as Map?)?.cast<String, dynamic>() ?? {};
     ttsVoiceName = data['ttsVoiceName'] as String?;
     ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
     shapeToolKind = ShapeToolKind.values.firstWhere(
@@ -669,6 +680,7 @@ class SettingsService {
         'graphAbstractItems': graphAbstractItems,
         'graphShowExternal': graphShowExternal,
         'graphShowUnlinked': graphShowUnlinked,
+        'graphView': graphView,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,

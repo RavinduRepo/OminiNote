@@ -89,14 +89,12 @@ class GraphController extends ChangeNotifier {
   Set<String> _activeProjectMemberIds = {};
   bool projectPlusLinks = false; // also show members' linked neighbors
 
+  /// Membership keys off the node's OWN deepest container (so the build-mode
+  /// cascade — check a section, then uncheck a canvas — excludes exactly that
+  /// canvas rather than pulling it back via its section).
   bool _inActiveProject(GraphNode n) {
-    final m = _activeProjectMemberIds;
-    if (m.isEmpty) return false;
-    return m.contains(n.notebookId) ||
-        m.contains(n.sectionId) ||
-        m.contains(n.canvasId) ||
-        m.contains(n.folderId) ||
-        m.contains(n.leafId);
+    final id = n.deepestContainerId;
+    return id != null && _activeProjectMemberIds.contains(id);
   }
 
   // ── Appearance (Obsidian-style sliders) ──
@@ -119,7 +117,33 @@ class GraphController extends ChangeNotifier {
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
     showUnlinked = s.graphShowUnlinked;
+    // Restore selection / filter / project (device-local).
+    final gv = s.graphView;
+    hiddenContainers.addAll(
+        (gv['hidden'] as List?)?.whereType<String>() ?? const []);
+    tagInclude.addAll((gv['tagInc'] as List?)?.whereType<String>() ?? const []);
+    tagExclude.addAll((gv['tagExc'] as List?)?.whereType<String>() ?? const []);
+    tagMatchAll = gv['tagAll'] == true;
+    activeProjectId = gv['project'] as String?;
+    projectPlusLinks = gv['projLinks'] == true;
   }
+
+  /// Persists the selection/filter/project state to the device-local blob.
+  void _saveView() => SettingsService().patchGraphView({
+        'hidden': hiddenContainers.toList(),
+        'tagInc': tagInclude.toList(),
+        'tagExc': tagExclude.toList(),
+        'tagAll': tagMatchAll,
+        'project': activeProjectId,
+        'projLinks': projectPlusLinks,
+      });
+
+  bool get hasActiveProject => activeProjectId != null;
+  bool isProjectMember(String id) => _activeProjectMemberIds.contains(id);
+
+  /// Fired at the end of every filter/data rebuild — the screen uses it to
+  /// auto-fit the graph after the change settles.
+  VoidCallback? onContentChanged;
 
   /// A container id hovered in the filter tree — nodes under it get a halo.
   String? highlightContainerId;
@@ -357,6 +381,7 @@ class GraphController extends ChangeNotifier {
     notifyListeners();
     _bumpUi();
     onWake?.call();
+    onContentChanged?.call();
   }
 
   /// Screen-space radius of a node — grows with its active degree, scaled by the
@@ -382,7 +407,10 @@ class GraphController extends ChangeNotifier {
         changed |= hiddenContainers.remove(id);
       }
     }
-    if (changed) _rebuildActive();
+    if (changed) {
+      _rebuildActive();
+      _saveView();
+    }
   }
 
   void setAbstractInsideItems(bool abstract) {
@@ -424,12 +452,14 @@ class GraphController extends ChangeNotifier {
       tagInclude.add(id);
     }
     _rebuildActive();
+    _saveView();
   }
 
   void setTagMatchAll(bool v) {
     if (tagMatchAll == v) return;
     tagMatchAll = v;
     _rebuildActive();
+    _saveView();
   }
 
   void clearTagFilter() {
@@ -437,6 +467,7 @@ class GraphController extends ChangeNotifier {
     tagInclude.clear();
     tagExclude.clear();
     _rebuildActive();
+    _saveView();
   }
 
   void setProjects(List<ProjectDef> p) {
@@ -456,12 +487,14 @@ class GraphController extends ChangeNotifier {
     activeProjectId = id;
     _activeProjectMemberIds = id == null ? {} : memberIds;
     _rebuildActive();
+    _saveView();
   }
 
   void setProjectPlusLinks(bool v) {
     if (projectPlusLinks == v) return;
     projectPlusLinks = v;
     _rebuildActive();
+    _saveView();
   }
 
   void setAlwaysShowLabels(bool v) {
@@ -725,8 +758,8 @@ class _GraphScreenState extends State<GraphScreen>
 
   bool _loading = true;
   bool _empty = false;
-  bool _didInitialFit = false;
   bool _panelOpen = true; // filter/navigator tree panel (wide layout)
+  Timer? _fitDebounce; // auto-fit after a filter/data change settles
 
   // Drag/pan bookkeeping.
   GraphSimNode? _dragCandidate;
@@ -740,6 +773,8 @@ class _GraphScreenState extends State<GraphScreen>
     _controller.onWake = () {
       if (mounted && !_ticker.isActive) _ticker.start();
     };
+    // Auto-fit the graph after any filter/data change (once the layout settles).
+    _controller.onContentChanged = _scheduleAutoFit;
     _load();
     SyncService().dataVersion.addListener(_onData);
   }
@@ -748,9 +783,19 @@ class _GraphScreenState extends State<GraphScreen>
   void dispose() {
     SyncService().dataVersion.removeListener(_onData);
     _reloadDebounce?.cancel();
+    _fitDebounce?.cancel();
     _ticker.dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  /// Fit the graph once the sim has had a moment to settle after a change
+  /// (debounced, so a burst of filter toggles coalesces into one fit).
+  void _scheduleAutoFit() {
+    _fitDebounce?.cancel();
+    _fitDebounce = Timer(const Duration(milliseconds: 700), () {
+      if (mounted) _controller.fitToScreen();
+    });
   }
 
   void _onData() {
@@ -790,13 +835,7 @@ class _GraphScreenState extends State<GraphScreen>
           (await ProjectService().itemsOf(active)).map((e) => e.leafId).toSet();
       if (mounted) _controller.setActiveProject(active, ids);
     }
-    // Frame the whole graph once the first layout has had a moment to spread.
-    if (!_didInitialFit && !data.isEmpty) {
-      _didInitialFit = true;
-      Future.delayed(const Duration(milliseconds: 650), () {
-        if (mounted) _controller.fitToScreen();
-      });
-    }
+    // Auto-fit fires via onContentChanged (setData/setStructure/etc. above).
   }
 
   void _onTick(Duration _) {
@@ -1297,6 +1336,26 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   bool _editingProject = false;
 
   GraphController get c => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    // Restore panel expand states (device-local).
+    final gv = SettingsService().graphView;
+    _filterOpen = gv['pFilter'] == true;
+    _tagsOpen = gv['pTags'] == true;
+    _projectsOpen = gv['pProjects'] == true;
+    _appearanceOpen = gv['pAppearance'] == true;
+    _expanded.addAll((gv['pExpanded'] as List?)?.whereType<String>() ?? const []);
+  }
+
+  void _savePanelUi() => SettingsService().patchGraphView({
+        'pFilter': _filterOpen,
+        'pTags': _tagsOpen,
+        'pProjects': _projectsOpen,
+        'pAppearance': _appearanceOpen,
+        'pExpanded': _expanded.toList(),
+      });
 
   @override
   void dispose() {
@@ -1888,13 +1947,17 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   (v) => c.setShowUnlinked(v)),
               Divider(height: 1, color: palette.border),
               if (c.tags.isNotEmpty) ...[
-                _sectionHeader(palette, 'Tags', _tagsOpen,
-                    () => setState(() => _tagsOpen = !_tagsOpen)),
+                _sectionHeader(palette, 'Tags', _tagsOpen, () {
+                  setState(() => _tagsOpen = !_tagsOpen);
+                  _savePanelUi();
+                }),
                 if (_tagsOpen) _tagsFilterBody(palette),
                 Divider(height: 1, color: palette.border),
               ],
-              _sectionHeader(palette, 'Projects', _projectsOpen,
-                  () => setState(() => _projectsOpen = !_projectsOpen)),
+              _sectionHeader(palette, 'Projects', _projectsOpen, () {
+                setState(() => _projectsOpen = !_projectsOpen);
+                _savePanelUi();
+              }),
               if (_projectsOpen) _projectsBody(palette),
               Divider(height: 1, color: palette.border),
               // Link mode swaps the tree for a flat, searchable list of every
@@ -1903,8 +1966,10 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               if (_linkMode)
                 Expanded(child: _linkBrowserBody(palette))
               else ...[
-                _sectionHeader(palette, 'Filter items', _filterOpen,
-                    () => setState(() => _filterOpen = !_filterOpen)),
+                _sectionHeader(palette, 'Filter items', _filterOpen, () {
+                  setState(() => _filterOpen = !_filterOpen);
+                  _savePanelUi();
+                }),
                 Expanded(
                   child: !_filterOpen
                       ? const SizedBox.shrink()
@@ -1979,16 +2044,34 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     widget.onReload?.call();
   }
 
+  /// Whether [g] (or any descendant) is a member of the active project — used
+  /// to scope the Filter-items tree to the selected project.
+  bool _inProjectSubtree(GraphContainer g) {
+    if (!c.hasActiveProject) return true;
+    if (c.isProjectMember(g.id)) return true;
+    for (final ch in g.children) {
+      if (_inProjectSubtree(ch)) return true;
+    }
+    return false;
+  }
+
   void _appendRows(List<Widget> out, GraphContainer g, int depth,
       Set<String> hlIds, AppPalette palette,
       {bool editMode = false}) {
     final count = _countOf(g);
-    // In edit mode show every container; else hide zero-link subtrees unless
-    // "show unlinked" is on.
-    if (!editMode && !c.showUnlinked && count == 0) return;
-    final renderableChildren = (editMode || c.showUnlinked)
+    if (!editMode) {
+      // A selected project scopes the tree to just its items; otherwise hide
+      // zero-link subtrees unless "show unlinked" is on.
+      if (!_inProjectSubtree(g)) return;
+      if (!c.hasActiveProject && !c.showUnlinked && count == 0) return;
+    }
+    final renderableChildren = editMode
         ? g.children
-        : g.children.where((ch) => _countOf(ch) > 0).toList();
+        : c.hasActiveProject
+            ? g.children.where(_inProjectSubtree).toList()
+            : (c.showUnlinked
+                ? g.children
+                : g.children.where((ch) => _countOf(ch) > 0).toList());
     final showChevron = renderableChildren.isNotEmpty;
     final expanded = _expanded.contains(g.id);
     out.add(_rowTile(g, depth, count, showChevron, expanded, hlIds, palette,
@@ -2017,7 +2100,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       },
       child: InkWell(
         onTap: () => editMode
-            ? _toggleMember(g.id)
+            ? _toggleMemberCascade(g)
             : (_linkMode ? _pickForLink(g) : c.focusContainer(g.id)),
         child: Container(
           color: isLinkSource
@@ -2031,9 +2114,12 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                 width: 18,
                 child: hasChildren
                     ? InkWell(
-                        onTap: () => setState(() {
-                          if (!_expanded.remove(g.id)) _expanded.add(g.id);
-                        }),
+                        onTap: () {
+                          setState(() {
+                            if (!_expanded.remove(g.id)) _expanded.add(g.id);
+                          });
+                          _savePanelUi();
+                        },
                         child: Icon(
                             expanded ? Icons.expand_more : Icons.chevron_right,
                             size: 16,
@@ -2068,7 +2154,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   width: 34,
                   child: Checkbox(
                     value: member,
-                    onChanged: (_) => _toggleMember(g.id),
+                    onChanged: (_) => _toggleMemberCascade(g),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -2100,9 +2186,19 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     );
   }
 
-  void _toggleMember(String id) => setState(() {
-        if (!_peMembers.remove(id)) _peMembers.add(id);
-      });
+  /// Build-mode selection cascades: checking a container selects its whole
+  /// subtree; you can then uncheck individual descendants.
+  void _toggleMemberCascade(GraphContainer g) {
+    final ids = _subtreeIds(g);
+    final adding = !_peMembers.contains(g.id);
+    setState(() {
+      if (adding) {
+        _peMembers.addAll(ids);
+      } else {
+        _peMembers.removeAll(ids);
+      }
+    });
+  }
 
   Widget _toggle(
       AppPalette palette, String label, bool value, ValueChanged<bool> onChanged) {
@@ -2139,7 +2235,10 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         InkWell(
-          onTap: () => setState(() => _appearanceOpen = !_appearanceOpen),
+          onTap: () {
+            setState(() => _appearanceOpen = !_appearanceOpen);
+            _savePanelUi();
+          },
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 4, 14, 4),
             child: Row(
