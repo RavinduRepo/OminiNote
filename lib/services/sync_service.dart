@@ -445,8 +445,10 @@ class SyncService {
           await batchedSave();
           continue;
         }
-        if (rel == 'links.json' || rel == 'tags.json') {
-          // Connections + tag registries: uploaded whole to every account
+        if (rel == 'links.json' ||
+            rel == 'tags.json' ||
+            rel == 'projects.json') {
+          // Connections + tag + project registries: uploaded whole to every account
           // (records are tiny id tuples; the union merge makes any account's
           // copy safe to reconcile against, and endpoints an account lacks
           // resolve as dead).
@@ -636,7 +638,8 @@ class SyncService {
         if (remote.containsKey(rel)) continue;
         if (rel == 'notebooks.json' ||
             rel == 'links.json' ||
-            rel == 'tags.json') {
+            rel == 'tags.json' ||
+            rel == 'projects.json') {
           _dirty.add(rel); // uploaded per-account by the push drain
           continue;
         }

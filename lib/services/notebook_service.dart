@@ -88,6 +88,23 @@ class NotebookService {
   Future<void> saveTagsJson(Map<String, dynamic> data) =>
       _writeAtomic(tagsFile, jsonEncode(data));
 
+  /// The project registry (`projects.json`, store root — synced + merged like
+  /// `tags.json`).
+  File get projectsFile => File('${appDir.path}/projects.json');
+
+  Future<Map<String, dynamic>> readProjectsJson() async {
+    try {
+      if (!await projectsFile.exists()) return {};
+      return jsonDecode(await projectsFile.readAsString())
+          as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> saveProjectsJson(Map<String, dynamic> data) =>
+      _writeAtomic(projectsFile, jsonEncode(data));
+
   /// Rewrites Connections endpoints per [idMap] (old→new container ids) after
   /// a notebook re-key, so links **follow a moved notebook** instead of dying
   /// against the tombstoned old ids. Raw-json based (LinkService depends on
@@ -1698,6 +1715,7 @@ class NotebookService {
     if (rel == 'notebooks.json') return true;
     if (rel == 'links.json') return true; // Connections registry
     if (rel == 'tags.json') return true; // Tag registry
+    if (rel == 'projects.json') return true; // Project registry
     if (!rel.startsWith('notebooks/')) return false;
     // Only structural JSON, page JSON, and asset blobs are synced.
     return true;
@@ -1789,6 +1807,7 @@ class NotebookService {
     if (await nb.exists()) out.add('notebooks.json');
     if (await linksFile.exists()) out.add('links.json');
     if (await tagsFile.exists()) out.add('tags.json');
+    if (await projectsFile.exists()) out.add('projects.json');
     final dir = Directory('${appDir.path}/notebooks');
     if (await dir.exists()) {
       await for (final e in dir.list(recursive: true, followLinks: false)) {

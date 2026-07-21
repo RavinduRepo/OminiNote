@@ -94,7 +94,9 @@ class MergeEngine {
     if (relPath == 'notebooks.json') {
       return mergeNotebooksIndex(local, remote);
     }
-    if (relPath == 'links.json' || relPath == 'tags.json') {
+    if (relPath == 'links.json' ||
+        relPath == 'tags.json' ||
+        relPath == 'projects.json') {
       // Same shape as notebooks.json: an id-keyed map of enveloped records —
       // union by id + per-record LWW + tombstone deletes, so a link/tag created
       // concurrently on two devices survives and a delete propagates. (tags.json

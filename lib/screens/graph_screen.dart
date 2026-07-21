@@ -7,10 +7,12 @@ import 'package:flutter/scheduler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/link.dart';
+import '../models/project.dart';
 import '../models/tag.dart';
 import '../services/graph_service.dart';
 import '../services/link_navigator.dart';
 import '../services/link_service.dart';
+import '../services/project_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../services/tag_service.dart';
@@ -80,6 +82,22 @@ class GraphController extends ChangeNotifier {
   /// 0 = off, 1 = include, 2 = exclude.
   int tagState(String id) =>
       tagInclude.contains(id) ? 1 : (tagExclude.contains(id) ? 2 : 0);
+
+  // ── Projects (named saved selections; activating one scopes the graph) ──
+  List<ProjectDef> projects = const [];
+  String? activeProjectId;
+  Set<String> _activeProjectMemberIds = {};
+  bool projectPlusLinks = false; // also show members' linked neighbors
+
+  bool _inActiveProject(GraphNode n) {
+    final m = _activeProjectMemberIds;
+    if (m.isEmpty) return false;
+    return m.contains(n.notebookId) ||
+        m.contains(n.sectionId) ||
+        m.contains(n.canvasId) ||
+        m.contains(n.folderId) ||
+        m.contains(n.leafId);
+  }
 
   // ── Appearance (Obsidian-style sliders) ──
   double nodeSizeScale = 1.0; // 0.5–2.5
@@ -216,10 +234,12 @@ class GraphController extends ChangeNotifier {
   /// Visibility keys off the node's *own deepest* container only (not every
   /// ancestor), so unchecking a section still lets you re-check individual
   /// canvases inside it — the tree checkboxes are independent, with a cascade.
-  bool _passesFilter(GraphNode n) {
+  bool _passesFilter(GraphNode n, {bool ignoreContainers = false}) {
     if (n.externalUrl != null && !showExternal) return false;
     final id = n.deepestContainerId;
-    if (id != null && hiddenContainers.contains(id)) return false;
+    if (!ignoreContainers && id != null && hiddenContainers.contains(id)) {
+      return false;
+    }
     // Tag filter: excludes always remove; includes must match per ALL/ANY.
     if (hasTagFilter) {
       final nt = _tagsByLeaf[n.leafId] ?? const <String>{};
@@ -261,18 +281,40 @@ class GraphController extends ChangeNotifier {
       return key;
     }
 
+    // When a project is active it defines the scope: container checkboxes are
+    // ignored (the project IS the selection), and its members show even if
+    // unlinked. External + tag filters still apply.
+    final projectActive = activeProjectId != null;
+
     // Final visible node keys (post-filter, post-abstraction).
     final visibleKeys = <String>{};
     for (final n in _all.nodes) {
-      if (!_passesFilter(n)) continue;
+      if (!_passesFilter(n, ignoreContainers: projectActive)) continue;
+      if (projectActive && !_inActiveProject(n)) continue;
       visibleKeys.add(remap(n.key));
     }
-    // Unlinked containers as isolated nodes, when enabled.
-    if (showUnlinked) {
+    // Unlinked containers as isolated nodes — when showing unlinked (normal), or
+    // project members that happen to be unlinked (project mode).
+    if (showUnlinked || projectActive) {
       for (final n in _unlinkedCandidates) {
         if (visibleKeys.contains(n.key)) continue;
-        if (!_passesFilter(n)) continue;
+        if (!_passesFilter(n, ignoreContainers: projectActive)) continue;
+        if (projectActive && !_inActiveProject(n)) continue;
         visibleKeys.add(n.key);
+      }
+    }
+    // "Project + links": also pull in members' linked neighbors (one hop).
+    if (projectActive && projectPlusLinks) {
+      final members = {...visibleKeys};
+      for (final e in _all.edges) {
+        final a = remap(e.aKey), b = remap(e.bKey);
+        final aIn = members.contains(a), bIn = members.contains(b);
+        if (aIn == bIn) continue;
+        final add = aIn ? b : a;
+        final data = lookup[add];
+        if (data != null && _passesFilter(data, ignoreContainers: true)) {
+          visibleKeys.add(add);
+        }
       }
     }
 
@@ -394,6 +436,31 @@ class GraphController extends ChangeNotifier {
     if (!hasTagFilter) return;
     tagInclude.clear();
     tagExclude.clear();
+    _rebuildActive();
+  }
+
+  void setProjects(List<ProjectDef> p) {
+    projects = p;
+    // Deactivate if the active project was deleted elsewhere.
+    if (activeProjectId != null &&
+        !p.any((d) => d.id == activeProjectId)) {
+      activeProjectId = null;
+      _activeProjectMemberIds = {};
+    }
+    _bumpUi();
+  }
+
+  /// Activates [id] with its member leaf ids (the graph scopes to them); pass a
+  /// null [id] to deactivate.
+  void setActiveProject(String? id, Set<String> memberIds) {
+    activeProjectId = id;
+    _activeProjectMemberIds = id == null ? {} : memberIds;
+    _rebuildActive();
+  }
+
+  void setProjectPlusLinks(bool v) {
+    if (projectPlusLinks == v) return;
+    projectPlusLinks = v;
     _rebuildActive();
   }
 
@@ -711,7 +778,18 @@ class _GraphScreenState extends State<GraphScreen>
     // Tags (for the AND/OR/NOT filter chips + per-node lookup).
     final tags = await TagService().allTags();
     final tagsByLeaf = await TagService().tagIdsByLeaf();
-    if (mounted) _controller.setTagData(tags, tagsByLeaf);
+    if (!mounted) return;
+    _controller.setTagData(tags, tagsByLeaf);
+    // Projects (list for the section; refresh the active one's members).
+    final projs = await ProjectService().allProjects();
+    if (!mounted) return;
+    _controller.setProjects(projs);
+    final active = _controller.activeProjectId;
+    if (active != null) {
+      final ids =
+          (await ProjectService().itemsOf(active)).map((e) => e.leafId).toSet();
+      if (mounted) _controller.setActiveProject(active, ids);
+    }
     // Frame the whole graph once the first layout has had a moment to spread.
     if (!_didInitialFit && !data.isEmpty) {
       _didInitialFit = true;
@@ -1207,9 +1285,23 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   bool _appearanceOpen = false;
   bool _filterOpen = false; // the notebook/section/canvas tree, collapsed by default
   bool _tagsOpen = false;
+  bool _projectsOpen = false;
   bool _linkMode = false;
   GraphContainer? _linkFrom; // link-mode source (null until first pick)
+
+  // Project build/edit mode (null = not editing).
+  String? _peId; // null = creating a new project
+  final TextEditingController _peName = TextEditingController();
+  final Set<String> _peMembers = {};
+  bool _editingProject = false;
+
   GraphController get c => widget.controller;
+
+  @override
+  void dispose() {
+    _peName.dispose();
+    super.dispose();
+  }
 
   /// A container's own id plus every descendant container id — the set a
   /// checkbox toggles (cascade), while each stays independently re-checkable.
@@ -1334,6 +1426,233 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     );
   }
 
+  // ── Projects ──────────────────────────────────────────────────────────────
+
+  Map<String, GraphContainer> _containersById() {
+    final out = <String, GraphContainer>{};
+    void walk(GraphContainer g) {
+      out[g.id] = g;
+      for (final ch in g.children) {
+        walk(ch);
+      }
+    }
+
+    final s = c.structure;
+    if (s != null) {
+      for (final nb in s.notebooks) {
+        walk(nb);
+      }
+    }
+    return out;
+  }
+
+  Widget _projectsBody(AppPalette palette) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final active = c.activeProjectId;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 0, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (active != null)
+            _toggle(palette, 'Include linked neighbors', c.projectPlusLinks,
+                (v) => c.setProjectPlusLinks(v)),
+          for (final p in c.projects)
+            _projectRow(palette, onSurface, p, p.id == active),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _startNewProject,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('New project', style: TextStyle(fontSize: 12.5)),
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 6)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _projectRow(
+      AppPalette palette, Color onSurface, ProjectDef p, bool active) {
+    return InkWell(
+      onTap: () => _activate(p),
+      child: Container(
+        color: active ? palette.accentSoft : null,
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Row(
+          children: [
+            Icon(active ? Icons.folder_open : Icons.folder_outlined,
+                size: 15, color: active ? palette.accent : palette.textDim),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(p.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      color: active ? palette.accent : onSurface,
+                      fontWeight: active ? FontWeight.w600 : FontWeight.w400)),
+            ),
+            IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 15),
+              color: palette.textDim,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Edit project',
+              onPressed: () => _editProject(p),
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline, size: 15),
+              color: palette.textDim,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Delete project',
+              onPressed: () => _deleteProject(p),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _activate(ProjectDef p) async {
+    if (c.activeProjectId == p.id) {
+      c.setActiveProject(null, {});
+      return;
+    }
+    final ids =
+        (await ProjectService().itemsOf(p.id)).map((e) => e.leafId).toSet();
+    c.setActiveProject(p.id, ids);
+  }
+
+  void _startNewProject() => setState(() {
+        _peId = null;
+        _peName.text = '';
+        _peMembers.clear();
+        _editingProject = true;
+      });
+
+  Future<void> _editProject(ProjectDef p) async {
+    final ids =
+        (await ProjectService().itemsOf(p.id)).map((e) => e.leafId).toSet();
+    if (!mounted) return;
+    setState(() {
+      _peId = p.id;
+      _peName.text = p.name;
+      _peMembers
+        ..clear()
+        ..addAll(ids);
+      _editingProject = true;
+    });
+  }
+
+  Future<void> _deleteProject(ProjectDef p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete project “${p.name}”?'),
+        content: const Text('The items themselves are not affected.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (c.activeProjectId == p.id) c.setActiveProject(null, {});
+    await ProjectService().deleteProject(p.id);
+    widget.onReload?.call();
+  }
+
+  Future<void> _saveProject() async {
+    final name = _peName.text.trim();
+    if (name.isEmpty) return;
+    String pid;
+    if (_peId == null) {
+      pid = (await ProjectService().createProject(name)).id;
+    } else {
+      await ProjectService().renameProject(_peId!, name);
+      pid = _peId!;
+    }
+    final byId = _containersById();
+    final members = _peMembers
+        .map((id) => byId[id]?.endpoint)
+        .whereType<LinkEndpoint>()
+        .toList();
+    await ProjectService().setMembers(pid, members);
+    if (!mounted) return;
+    setState(() => _editingProject = false);
+    widget.onReload?.call();
+  }
+
+  Widget _buildProjectEditor(AppPalette palette) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    _computeCounts();
+    final rows = <Widget>[];
+    final struct = c.structure;
+    if (struct != null) {
+      final roots = [...struct.notebooks]
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      for (final nb in roots) {
+        _appendRows(rows, nb, 0, const <String>{}, palette, editMode: true);
+      }
+    }
+    return SafeArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 8, 8, 4),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.chevron_left, size: 22),
+                  tooltip: 'Cancel',
+                  onPressed: () => setState(() => _editingProject = false),
+                ),
+                Text(_peId == null ? 'New project' : 'Edit project',
+                    style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: onSurface)),
+                const Spacer(),
+                FilledButton(
+                    onPressed: _saveProject, child: const Text('Save')),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+            child: TextField(
+              controller: _peName,
+              decoration: const InputDecoration(
+                  isDense: true, hintText: 'Project name'),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+            child: Text('Check the items to include (${_peMembers.length})',
+                style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+          ),
+          Divider(height: 1, color: palette.border),
+          Expanded(
+            child: rows.isEmpty
+                ? Center(
+                    child: Text('No items in the store yet',
+                        style:
+                            TextStyle(fontSize: 12, color: palette.textDim)))
+                : ListView(padding: EdgeInsets.zero, children: rows),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _sectionHeader(
       AppPalette palette, String label, bool open, VoidCallback onTap) {
     return InkWell(
@@ -1362,6 +1681,28 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   Map<String, int> _bySec = const {};
   Map<String, int> _byCanvas = const {};
 
+  /// Recomputes per-container node counts (subtree-inclusive via [_countOf])
+  /// from the link graph — used for the tree's counts + shape coloring.
+  void _computeCounts() {
+    _count.clear();
+    final byNb = <String, int>{}, bySec = <String, int>{},
+        byCanvas = <String, int>{};
+    for (final n in c.allNodes) {
+      if (n.notebookId != null) {
+        byNb[n.notebookId!] = (byNb[n.notebookId!] ?? 0) + 1;
+      }
+      if (n.sectionId != null) {
+        bySec[n.sectionId!] = (bySec[n.sectionId!] ?? 0) + 1;
+      }
+      if (n.canvasId != null) {
+        byCanvas[n.canvasId!] = (byCanvas[n.canvasId!] ?? 0) + 1;
+      }
+    }
+    _byNb = byNb;
+    _bySec = bySec;
+    _byCanvas = byCanvas;
+  }
+
   int _countOf(GraphContainer g) => _count.putIfAbsent(g.id, () {
         switch (g.kind) {
           case GraphContainerKind.notebook:
@@ -1387,25 +1728,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     return ValueListenableBuilder<int>(
       valueListenable: c.uiVersion,
       builder: (context, _, _) {
-        // Recompute node counts per container from the link graph.
-        _count.clear();
-        final byNb = <String, int>{}, bySec = <String, int>{},
-            byCanvas = <String, int>{};
-        for (final n in c.allNodes) {
-          if (n.notebookId != null) {
-            byNb[n.notebookId!] = (byNb[n.notebookId!] ?? 0) + 1;
-          }
-          if (n.sectionId != null) {
-            bySec[n.sectionId!] = (bySec[n.sectionId!] ?? 0) + 1;
-          }
-          if (n.canvasId != null) {
-            byCanvas[n.canvasId!] = (byCanvas[n.canvasId!] ?? 0) + 1;
-          }
-        }
-        _byNb = byNb;
-        _bySec = bySec;
-        _byCanvas = byCanvas;
-
+        _computeCounts();
+        if (_editingProject) return _buildProjectEditor(palette);
         final hn = c.nodeByKey(c.hoverKey);
         final hlIds = <String>{
           if (hn?.notebookId != null) hn!.notebookId!,
@@ -1466,6 +1790,10 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                 if (_tagsOpen) _tagsFilterBody(palette),
                 Divider(height: 1, color: palette.border),
               ],
+              _sectionHeader(palette, 'Projects', _projectsOpen,
+                  () => setState(() => _projectsOpen = !_projectsOpen)),
+              if (_projectsOpen) _projectsBody(palette),
+              Divider(height: 1, color: palette.border),
               // The notebook → section → canvas tree, tucked under a dropdown so
               // it isn't in your face all the time.
               _sectionHeader(palette, 'Filter items', _filterOpen,
@@ -1544,30 +1872,34 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   }
 
   void _appendRows(List<Widget> out, GraphContainer g, int depth,
-      Set<String> hlIds, AppPalette palette) {
+      Set<String> hlIds, AppPalette palette,
+      {bool editMode = false}) {
     final count = _countOf(g);
-    // Hide zero-link subtrees unless the user wants to see unlinked items.
-    if (!c.showUnlinked && count == 0) return;
-    final renderableChildren = c.showUnlinked
+    // In edit mode show every container; else hide zero-link subtrees unless
+    // "show unlinked" is on.
+    if (!editMode && !c.showUnlinked && count == 0) return;
+    final renderableChildren = (editMode || c.showUnlinked)
         ? g.children
         : g.children.where((ch) => _countOf(ch) > 0).toList();
     final showChevron = renderableChildren.isNotEmpty;
     final expanded = _expanded.contains(g.id);
-    out.add(
-        _rowTile(g, depth, count, showChevron, expanded, hlIds, palette));
+    out.add(_rowTile(g, depth, count, showChevron, expanded, hlIds, palette,
+        editMode: editMode));
     if (showChevron && expanded) {
       final kids = [...renderableChildren]
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       for (final k in kids) {
-        _appendRows(out, k, depth + 1, hlIds, palette);
+        _appendRows(out, k, depth + 1, hlIds, palette, editMode: editMode);
       }
     }
   }
 
   Widget _rowTile(GraphContainer g, int depth, int count, bool hasChildren,
-      bool expanded, Set<String> hlIds, AppPalette palette) {
+      bool expanded, Set<String> hlIds, AppPalette palette,
+      {bool editMode = false}) {
     final isLinkSource = _linkFrom?.id == g.id;
     final selfHidden = c.hiddenContainers.contains(g.id);
+    final member = _peMembers.contains(g.id);
     final highlighted = hlIds.contains(g.id);
     final color = AppPalette.identityColor(g.id);
     return MouseRegion(
@@ -1576,7 +1908,9 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
         if (c.highlightContainerId == g.id) c.setHighlightContainer(null);
       },
       child: InkWell(
-        onTap: () => _linkMode ? _pickForLink(g) : c.focusContainer(g.id),
+        onTap: () => editMode
+            ? _toggleMember(g.id)
+            : (_linkMode ? _pickForLink(g) : c.focusContainer(g.id)),
         child: Container(
           color: isLinkSource
               ? palette.accent.withValues(alpha: 0.28)
@@ -1611,17 +1945,27 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12.5,
-                    color: (selfHidden || count == 0)
+                    color: (!editMode && (selfHidden || count == 0))
                         ? palette.textDim
                         : Theme.of(context).colorScheme.onSurface,
                     fontWeight: depth == 0 ? FontWeight.w600 : FontWeight.w400,
                   ),
                 ),
               ),
-              if (count > 0)
+              if (!editMode && count > 0)
                 Text('$count',
                     style: TextStyle(fontSize: 11, color: palette.textDim)),
-              if (_linkMode)
+              if (editMode)
+                SizedBox(
+                  width: 34,
+                  child: Checkbox(
+                    value: member,
+                    onChanged: (_) => _toggleMember(g.id),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                )
+              else if (_linkMode)
                 Padding(
                   padding: const EdgeInsets.only(left: 4),
                   child: Icon(Icons.add_link,
@@ -1647,6 +1991,10 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       ),
     );
   }
+
+  void _toggleMember(String id) => setState(() {
+        if (!_peMembers.remove(id)) _peMembers.add(id);
+      });
 
   Widget _toggle(
       AppPalette palette, String label, bool value, ValueChanged<bool> onChanged) {

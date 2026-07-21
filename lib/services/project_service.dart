@@ -1,0 +1,136 @@
+import '../models/link.dart';
+import '../models/project.dart';
+import 'notebook_service.dart';
+import 'settings_service.dart';
+import 'sync_service.dart';
+
+/// In-memory view over the project registry (`projects.json`) — lazy,
+/// dataVersion-gated, mirroring [TagService]/[LinkService]. A project is a
+/// named set of item endpoints (containers); membership is stored as separate
+/// records so concurrent edits on two devices union rather than clobber.
+class ProjectService {
+  static final ProjectService _instance = ProjectService._();
+  factory ProjectService() => _instance;
+  ProjectService._();
+
+  final Map<String, ProjectDef> _defs = {};
+  final Map<String, ProjectItem> _items = {};
+  int _loadedAtVersion = -1;
+
+  Future<void> _ensureLoaded() async {
+    final v = SyncService().dataVersion.value;
+    if (_loadedAtVersion == v) return;
+    _defs.clear();
+    _items.clear();
+    final raw = await NotebookService().readProjectsJson();
+    for (final e in raw.entries) {
+      final val = e.value;
+      if (val is! Map<String, dynamic>) continue;
+      if (val['t'] == 'pi') {
+        final i = ProjectItem.tryFromJson(val);
+        if (i != null) _items[i.id] = i;
+      } else {
+        final d = ProjectDef.tryFromJson(val);
+        if (d != null) _defs[d.id] = d;
+      }
+    }
+    _loadedAtVersion = v;
+  }
+
+  Future<void> _persist() async {
+    final raw = await NotebookService().readProjectsJson();
+    for (final d in _defs.values) {
+      raw[d.id] = d.toJson();
+    }
+    for (final i in _items.values) {
+      raw[i.id] = i.toJson();
+    }
+    await NotebookService().saveProjectsJson(raw);
+  }
+
+  String get _dev => SettingsService().deviceId;
+
+  Future<List<ProjectDef>> allProjects() async {
+    await _ensureLoaded();
+    return _defs.values.where((d) => d.deletedAt == null).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+  }
+
+  /// The alive member endpoints of [projectId].
+  Future<List<LinkEndpoint>> itemsOf(String projectId) async {
+    await _ensureLoaded();
+    return _items.values
+        .where((i) => i.deletedAt == null && i.projectId == projectId)
+        .map((i) => i.endpoint)
+        .toList();
+  }
+
+  Future<ProjectDef> createProject(String name) async {
+    await _ensureLoaded();
+    final def = ProjectDef(
+        id: NotebookService().newId(), deviceId: _dev, name: name.trim());
+    _defs[def.id] = def;
+    await _persist();
+    return def;
+  }
+
+  Future<void> renameProject(String id, String name) async {
+    await _ensureLoaded();
+    final d = _defs[id];
+    if (d == null) return;
+    d.name = name.trim();
+    d.bumpRev(_dev);
+    await _persist();
+  }
+
+  /// Tombstones the project + all its memberships.
+  Future<void> deleteProject(String id) async {
+    await _ensureLoaded();
+    final d = _defs[id];
+    if (d == null) return;
+    d.deletedAt = DateTime.now();
+    d.bumpRev(_dev);
+    for (final i in _items.values) {
+      if (i.projectId == id && i.deletedAt == null) {
+        i.deletedAt = DateTime.now();
+        i.bumpRev(_dev);
+      }
+    }
+    await _persist();
+  }
+
+  /// Replaces [projectId]'s membership with the given container endpoints
+  /// (keyed by [LinkEndpoint.leafId]) — adds new ones, tombstones removed ones,
+  /// revives previously-removed matches. Used by the build-mode save.
+  Future<void> setMembers(String projectId, List<LinkEndpoint> members) async {
+    await _ensureLoaded();
+    final wanted = {for (final e in members) e.leafId: e};
+    // Tombstone / revive existing.
+    final seen = <String>{};
+    for (final i in _items.values) {
+      if (i.projectId != projectId) continue;
+      final key = i.endpoint.leafId;
+      if (wanted.containsKey(key)) {
+        seen.add(key);
+        if (i.deletedAt != null) {
+          i.deletedAt = null;
+          i.bumpRev(_dev);
+        }
+      } else if (i.deletedAt == null) {
+        i.deletedAt = DateTime.now();
+        i.bumpRev(_dev);
+      }
+    }
+    // Add brand-new.
+    for (final entry in wanted.entries) {
+      if (seen.contains(entry.key)) continue;
+      final item = ProjectItem(
+          id: NotebookService().newId(),
+          deviceId: _dev,
+          projectId: projectId,
+          endpoint: entry.value);
+      _items[item.id] = item;
+    }
+    await _persist();
+  }
+}
