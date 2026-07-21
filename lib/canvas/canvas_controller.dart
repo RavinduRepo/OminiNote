@@ -1183,7 +1183,11 @@ class CanvasController extends ChangeNotifier {
         final l = layout.layoutOf(activeStrokePageId!);
         final page = pages[activeStrokePageId!];
         if (l != null && page != null) {
-          final p = _clampToPage(canvasPos - l.rect.topLeft, page);
+          // Unclamped: the point may travel past the page edge onto a
+          // neighbouring page. endToolGesture splits the committed stroke into
+          // one per page it crosses, so the line looks continuous but stores
+          // (and syncs) as separate per-page strokes.
+          final p = canvasPos - l.rect.topLeft;
           stroke.points.add(StrokePoint(p.dx, p.dy, pressure));
           stroke.invalidateCache();
           // Moving beyond the slop means the pen is still travelling — re-arm
@@ -1259,7 +1263,7 @@ class CanvasController extends ChangeNotifier {
         if (_snapped && pre != null && pre.length > 1) {
           _commitSnappedShape(pageId, stroke, pre);
         } else if (stroke.points.length > 1) {
-          _doOp(_addElementsOp('Draw', pageId, [stroke]));
+          _commitStrokeAcrossPages(pageId, stroke);
         } else {
           notifyListeners();
         }
@@ -2643,6 +2647,175 @@ class CanvasController extends ChangeNotifier {
 
   void addElement(String pageId, CanvasElement element) {
     _doOp(_addElementsOp('Insert', pageId, [element]));
+  }
+
+  /// The point where segment [a]→[b] leaves rect [r] ([a] inside, [b] outside).
+  /// Used to drop a shared boundary point so the two halves of a stroke that
+  /// crosses a page edge meet flush there (pages sit edge-to-edge, gap == 0).
+  Offset _exitPoint(Rect r, Offset a, Offset b) {
+    final dx = b.dx - a.dx, dy = b.dy - a.dy;
+    var t = 1.0;
+    if (dx > 0) {
+      t = math.min(t, (r.right - a.dx) / dx);
+    } else if (dx < 0) {
+      t = math.min(t, (r.left - a.dx) / dx);
+    }
+    if (dy > 0) {
+      t = math.min(t, (r.bottom - a.dy) / dy);
+    } else if (dy < 0) {
+      t = math.min(t, (r.top - a.dy) / dy);
+    }
+    t = t.clamp(0.0, 1.0);
+    return Offset(a.dx + t * dx, a.dy + t * dy);
+  }
+
+  /// Commits a freehand [stroke] whose points are in [originPageId]'s local
+  /// space (unclamped — they may extend onto neighbouring pages). A stroke
+  /// that stays on its page takes the original fast path unchanged; one that
+  /// crosses a boundary is split into a separate [StrokeElement] per page so
+  /// the drawn line stays visually continuous but each half lives on (and
+  /// syncs with) its own page. Cost is a single O(points) scan on lift.
+  void _commitStrokeAcrossPages(String originPageId, StrokeElement stroke) {
+    final originL = layout.layoutOf(originPageId);
+    if (originL == null) {
+      _doOp(_addElementsOp('Draw', originPageId, [stroke]));
+      return;
+    }
+    final origin = originL.rect.topLeft;
+
+    // Fast path: every sample sits on the origin page → commit the original
+    // stroke as-is (preserves its id / undo entry — the overwhelming case).
+    var crosses = false;
+    for (final sp in stroke.points) {
+      final l = layout.pageAt(Offset(sp.x + origin.dx, sp.y + origin.dy));
+      if (l == null || l.pageId != originPageId) {
+        crosses = true;
+        break;
+      }
+    }
+    if (!crosses) {
+      _doOp(_addElementsOp('Draw', originPageId, [stroke]));
+      return;
+    }
+
+    // Densify ONLY the segments that change page. A fast stroke samples
+    // sparsely, so a single segment can jump far past a boundary (or skip a
+    // whole page); interpolating canvas points across just those segments
+    // guarantees a sample near each edge (no gap at the join) and that every
+    // crossed page gets ink. In-page segments (the vast majority) are left
+    // untouched, so the overhead is negligible.
+    final canvasPts = <StrokePoint>[];
+    final raw = stroke.points;
+    for (var i = 0; i < raw.length; i++) {
+      final c = Offset(raw[i].x + origin.dx, raw[i].y + origin.dy);
+      canvasPts.add(StrokePoint(c.dx, c.dy, raw[i].p));
+      if (i + 1 >= raw.length) break;
+      final n = Offset(raw[i + 1].x + origin.dx, raw[i + 1].y + origin.dy);
+      if (layout.pageAt(c)?.pageId != layout.pageAt(n)?.pageId) {
+        final steps = ((n - c).distance / 12).clamp(1, 400).floor();
+        for (var s = 1; s < steps; s++) {
+          final t = s / steps;
+          canvasPts.add(StrokePoint(
+            c.dx + (n.dx - c.dx) * t,
+            c.dy + (n.dy - c.dy) * t,
+            raw[i].p + (raw[i + 1].p - raw[i].p) * t,
+          ));
+        }
+      }
+    }
+
+    // Group the (densified) polyline into per-page runs, inserting a shared edge
+    // point at each page transition so adjacent runs meet flush.
+    final runs = <({String pageId, Offset tl, List<StrokePoint> points})>[];
+    ({String pageId, Offset tl, List<StrokePoint> points})? cur;
+    Rect? curRect;
+    Offset? prevC;
+    for (final sp in canvasPts) {
+      final c = Offset(sp.x, sp.y);
+      final l = layout.pageAt(c);
+      if (l == null) {
+        // Left the pages (a gap / past the last page). Close the current run at
+        // the page edge so the line reaches the boundary instead of stopping at
+        // the last on-page sample, then end it.
+        if (cur != null && curRect != null && prevC != null) {
+          final edge = _exitPoint(curRect, prevC, c);
+          cur.points
+              .add(StrokePoint(edge.dx - cur.tl.dx, edge.dy - cur.tl.dy, sp.p));
+        }
+        cur = null;
+        curRect = null;
+        prevC = c;
+        continue;
+      }
+      if (cur == null || l.pageId != cur.pageId) {
+        if (cur != null && curRect != null && prevC != null) {
+          final edge = _exitPoint(curRect, prevC, c);
+          cur.points
+              .add(StrokePoint(edge.dx - cur.tl.dx, edge.dy - cur.tl.dy, sp.p));
+          final nr =
+              (pageId: l.pageId, tl: l.rect.topLeft, points: <StrokePoint>[]);
+          nr.points
+              .add(StrokePoint(edge.dx - nr.tl.dx, edge.dy - nr.tl.dy, sp.p));
+          runs.add(nr);
+          cur = nr;
+        } else {
+          cur =
+              (pageId: l.pageId, tl: l.rect.topLeft, points: <StrokePoint>[]);
+          runs.add(cur);
+        }
+        curRect = l.rect;
+      }
+      cur.points.add(StrokePoint(c.dx - cur.tl.dx, c.dy - cur.tl.dy, sp.p));
+      prevC = c;
+    }
+
+    // A fresh stroke per run (≥2 points), grouped by page.
+    final byPage = <String, List<CanvasElement>>{};
+    for (final r in runs) {
+      if (r.points.length < 2) continue;
+      final el = StrokeElement(
+        id: newModelId('el'),
+        deviceId: SettingsService().deviceId,
+        z: stroke.z,
+        tool: stroke.tool,
+        color: stroke.color,
+        size: stroke.size,
+        points: r.points,
+      )..zIndex = stroke.zIndex;
+      (byPage[r.pageId] ??= []).add(el);
+    }
+
+    if (byPage.isEmpty) {
+      notifyListeners();
+      return;
+    }
+    if (byPage.length == 1) {
+      final e = byPage.entries.first;
+      _doOp(_addElementsOp('Draw', e.key, e.value));
+      return;
+    }
+    // Spans multiple pages — one op so a single undo removes every segment.
+    final pageIds = byPage.keys.toSet();
+    final slotsByPage = {
+      for (final e in byPage.entries)
+        e.key: [for (final el in e.value) _ElSlot(el)],
+    };
+    _doOp(_CanvasOp(
+      label: 'Draw',
+      dirtyPageIds: pageIds,
+      apply: () {
+        for (final pid in pageIds) {
+          final page = pages[pid];
+          if (page != null) _reviveSlots(page, slotsByPage[pid]!);
+        }
+      },
+      revert: () {
+        for (final pid in pageIds) {
+          final page = pages[pid];
+          if (page != null) _tombstoneSlots(page, slotsByPage[pid]!);
+        }
+      },
+    ));
   }
 
   /// Splices an internal link run into a committed text box at [caret] —

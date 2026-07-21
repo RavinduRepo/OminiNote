@@ -8,6 +8,7 @@ import '../services/link_navigator.dart';
 import '../services/link_resolver.dart';
 import '../services/link_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/app_toast.dart';
 import 'action_sheet.dart';
 import 'edit_link_sheet.dart';
 import 'link_target_picker.dart';
@@ -20,9 +21,7 @@ Future<void> copyLinkToClipboard(
 ) async {
   await Clipboard.setData(ClipboardData(text: endpoint.toUri()));
   if (context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Link copied — paste it in any Connections list')),
-    );
+    showAppToast(context, 'Link copied — paste it in any Connections list');
   }
 }
 
@@ -45,12 +44,13 @@ Future<void> showConnectionsSheet(
   void Function(String? pageId)? onJumpInSameCanvas,
   Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
       onAddTarget,
+  bool? desktop,
 }) {
   assert((endpoint == null) != (aggregateCanvasId == null),
       'pass exactly one of endpoint / aggregateCanvasId');
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
+  return showAdaptiveMenu<void>(
+    context,
+    desktop: desktop,
     builder: (sheetContext) => cappedSheetBody(
       sheetContext,
       child: _ConnectionsList(
@@ -274,16 +274,14 @@ class _ConnectionsListState extends State<_ConnectionsList> {
     }
     if (!LinkNavigator().reveal(reveal)) {
       LinkNavigator().pendingElementFocus = null; // don't fire much later
-      ScaffoldMessenger.of(widget.hostContext).showSnackBar(
-        const SnackBar(content: Text('Couldn\'t navigate to the target.')),
-      );
+      showAppToast(widget.hostContext, "Couldn't navigate to the target.",
+          error: true);
     }
   }
 
   void _toast(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg)));
+    showAppToast(context, msg);
   }
 
   static IconData _kindIcon(LinkTargetKind k) => switch (k) {

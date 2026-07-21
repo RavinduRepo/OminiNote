@@ -39,6 +39,12 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // tab's direction, and (at a tab root) a horizontal swipe moves between tabs.
   final PageController _pageController = PageController();
 
+  // A reveal pins the PageView to the Notebooks tab for a short window so a
+  // stray settle (the off-stage-jump / post-pop layout churn) can't land on an
+  // adjacent tab. See _jumpToNotebooksTab + onPageChanged.
+  bool _revealing = false;
+  Timer? _revealTimer;
+
   // Bumped each time the Bin tab is opened, so the kept-alive BinScreen
   // reloads (something deleted elsewhere must appear when you switch back to it).
   final ValueNotifier<int> _binRefresh = ValueNotifier(0);
@@ -84,12 +90,47 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     });
   }
 
+  /// Switches the PageView to the Notebooks tab safely.
+  ///
+  /// A reveal is often triggered from *inside* a full-bleed canvas that covers
+  /// this shell on the root navigator. On the frame the canvas is popped, the
+  /// shell's `PageView` is off-stage with no viewport metrics, and the pushes
+  /// that follow (for a section/canvas target) churn its layout — so the
+  /// controller can spuriously settle onto the adjacent page (Bin): the "reveal
+  /// also swipes me into the Bin" bug. Jump-timing tricks weren't reliable, so
+  /// we *pin* the tab for a short window instead: while `_revealing`, any
+  /// `onPageChanged` that reports a non-Notebooks page is snapped straight back.
+  void _jumpToNotebooksTab() {
+    _revealing = true;
+    _revealTimer?.cancel();
+    _revealTimer = Timer(const Duration(milliseconds: 550), () {
+      if (!mounted) return;
+      _revealing = false;
+      _scheduleSwipeRecheck();
+    });
+    setState(() => _index = _kNotebooks);
+    void tryJump() {
+      if (!mounted || !_revealing) return;
+      if (_pageController.hasClients &&
+          _pageController.position.hasContentDimensions) {
+        _pageController.jumpToPage(_kNotebooks);
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback((_) => tryJump());
+      }
+    }
+
+    tryJump();
+  }
+
   @override
   void initState() {
     super.initState();
     // Internal links ("Connections") navigate through the same reveal path as
     // search results, whichever shell is active.
     LinkNavigator().register(_revealFromLink);
+    // Quick-note (and any "open this canvas") lands IN the canvas — mobile's
+    // link-reveal stops at the list for containers, so it needs the open path.
+    LinkNavigator().registerOpenCanvas(_revealSearchResult);
   }
 
   /// A tapped internal link can come from *inside* a full-bleed canvas, which
@@ -111,8 +152,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
       _revealSearchResult(r); // in-canvas target: open + flash/jump
       return;
     }
-    _pageController.jumpToPage(_kNotebooks);
-    setState(() => _index = _kNotebooks);
+    _jumpToNotebooksTab();
     final nav = _navKeys[_kNotebooks].currentState;
     if (nav == null) return;
     nav.popUntil((route) => route.isFirst);
@@ -143,6 +183,8 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   @override
   void dispose() {
     LinkNavigator().unregister(_revealFromLink);
+    LinkNavigator().unregisterOpenCanvas(_revealSearchResult);
+    _revealTimer?.cancel();
     _binReloadTimer?.cancel();
     _pageController.dispose();
     _binRefresh.dispose();
@@ -183,8 +225,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   /// Reveals a search result: switch to the Notebooks tab, rebuild its drill-in
   /// stack (so Back walks up the hierarchy), and open a canvas above the shell.
   void _revealSearchResult(SearchResult r) {
-    _pageController.jumpToPage(_kNotebooks);
-    setState(() => _index = _kNotebooks);
+    _jumpToNotebooksTab();
     final nav = _navKeys[_kNotebooks].currentState;
     if (nav == null) return;
     nav.popUntil((route) => route.isFirst);
@@ -263,6 +304,14 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
               ? const ClampingScrollPhysics()
               : const NeverScrollableScrollPhysics(),
           onPageChanged: (i) {
+            // While revealing, the PageView may spuriously settle onto an
+            // adjacent tab — snap it back to Notebooks and ignore the report.
+            if (_revealing && i != _kNotebooks) {
+              if (_pageController.hasClients) {
+                _pageController.jumpToPage(_kNotebooks);
+              }
+              return;
+            }
             setState(() => _index = i);
             _scheduleSwipeRecheck(); // the new tab may be drilled in
             _onEnterTab(i); // reload bin / focus search on entry

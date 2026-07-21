@@ -80,8 +80,8 @@ class ToolIconButton extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(kRadius),
         child: Container(
-          width: 40,
-          height: 40,
+          width: 34,
+          height: 34,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: active ? palette.accentSoft : null,
@@ -89,7 +89,7 @@ class ToolIconButton extends StatelessWidget {
           ),
           child: Icon(
             iconForTool(tool),
-            size: 20,
+            size: 18,
             color: active ? palette.accent : null,
           ),
         ),

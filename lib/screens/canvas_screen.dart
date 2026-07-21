@@ -10,6 +10,7 @@ import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../utils/app_toast.dart';
 import '../utils/clipboard_images.dart';
 import '../utils/ink_contrast.dart';
 import '../utils/progress_overlay.dart';
@@ -227,16 +228,14 @@ class _CanvasScreenState extends State<CanvasScreen>
     // screens beneath this canvas are stale too — pop all the way back to the
     // notebooks list, not just one level.
     final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    // Capture the root overlay before popping — after popUntil this context is
+    // gone, but the toast lives in the root overlay and survives.
+    final overlay = Overlay.of(context, rootOverlay: true);
     if (navigator.canPop()) {
       navigator.popUntil((route) => route.isFirst);
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text(
-            'This notebook was moved or deleted on another device.',
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showAppToastOverlay(
+        overlay,
+        'This notebook was moved or deleted on another device.',
       );
     }
   }
@@ -1919,9 +1918,9 @@ class _CanvasScreenState extends State<CanvasScreen>
         ? SettingsService().promotedToolbarMobile
         : SettingsService().promotedToolbarDesktop;
     bool shown(String id) => !promoted.contains(id);
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
+    final action = await showAdaptiveMenu<String>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => scrollableSheetBody(
         context,
         child: Column(
@@ -2086,9 +2085,9 @@ class _CanvasScreenState extends State<CanvasScreen>
   }
 
   Future<InsertPosition?> _pickInsertPosition({bool includeTop = true}) {
-    return showModalBottomSheet<InsertPosition>(
-      context: context,
-      isScrollControlled: true,
+    return showAdaptiveMenu<InsertPosition>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => scrollableSheetBody(
         context,
         child: Column(
@@ -2126,9 +2125,9 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Future<void> _insertPdfFlow() async {
     final c = _controller!;
-    final mode = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
+    final mode = await showAdaptiveMenu<String>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => scrollableSheetBody(
         context,
         child: Column(
@@ -2394,9 +2393,9 @@ class _CanvasScreenState extends State<CanvasScreen>
       Color(0xFF17171A), // near black
     ];
 
-    final apply = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
+    final apply = await showAdaptiveMenu<bool>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => StatefulBuilder(
         builder: (context, setSheetState) {
           // Offer the ink-visibility adjustment only when the picked colour
@@ -2592,9 +2591,9 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Future<void> _showBookmarks() async {
     final c = _controller!;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
+    await showAdaptiveMenu<void>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => cappedSheetBody(
         context,
         child: ListenableBuilder(
@@ -2716,9 +2715,9 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Future<void> _showAttachments() async {
     final c = _controller!;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
+    await showAdaptiveMenu<void>(
+      context,
+      desktop: widget.embedded,
       builder: (context) => cappedSheetBody(
         context,
         child: ListenableBuilder(
@@ -2974,9 +2973,7 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   void _toast(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
-    );
+    showAppToast(context, message);
   }
 
   // ── Voice recording ────────────────────────────────────────────────────
@@ -3944,7 +3941,7 @@ class _CanvasToolbar extends StatelessWidget {
             color: theme.colorScheme.surface,
             border: Border(bottom: BorderSide(color: palette.border)),
           ),
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          padding: const EdgeInsets.fromLTRB(12, 3, 12, 3),
           // Fixed height: just the tool icon row. Pen/highlighter/shape/
           // eraser options drop down under the active tool (ToolOptionsPopover
           // in the canvas Stack); lasso/text use their own floating menu / bar.
@@ -4286,9 +4283,7 @@ class _ReaderBar extends StatelessWidget {
     final voices = await controller.tts.availableVoices();
     if (!context.mounted) return;
     if (voices.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No selectable voices on this system')),
-      );
+      showAppToast(context, 'No selectable voices on this system');
       return;
     }
     final palette = Theme.of(context).extension<AppPalette>()!;

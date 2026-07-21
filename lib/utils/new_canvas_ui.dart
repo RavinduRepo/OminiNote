@@ -12,10 +12,10 @@ enum NewCanvasKind { empty, pdf }
 
 /// Asks whether the new canvas should be an empty one or a PDF opened as a
 /// canvas. Returns null if dismissed.
-Future<NewCanvasKind?> pickNewCanvasKind(BuildContext context) {
-  return showModalBottomSheet<NewCanvasKind>(
-    context: context,
-    isScrollControlled: true,
+Future<NewCanvasKind?> pickNewCanvasKind(BuildContext context, {bool? desktop}) {
+  return showAdaptiveMenu<NewCanvasKind>(
+    context,
+    desktop: desktop,
     builder: (context) => scrollableSheetBody(
       context,
       child: Column(
@@ -48,6 +48,7 @@ Future<Canvas?> pickAndCreatePdfCanvas(
   BuildContext context,
   Section section, {
   String? parentFolderId,
+  String? afterCanvasId,
 }) async {
   final result = await FilePicker.platform.pickFiles(
     type: FileType.custom,
@@ -69,6 +70,7 @@ Future<Canvas?> pickAndCreatePdfCanvas(
       name.isEmpty ? 'PDF' : name,
       bytes,
       parentFolderId: parentFolderId,
+      afterCanvasId: afterCanvasId,
       onProgress: progress.report,
     );
   } finally {

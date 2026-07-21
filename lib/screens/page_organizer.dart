@@ -3,6 +3,7 @@ import '../canvas/canvas_controller.dart';
 import '../canvas/page_thumbnail.dart';
 import '../models/link.dart';
 import '../theme/app_theme.dart';
+import '../utils/app_toast.dart';
 import '../widgets/connections_sheet.dart';
 
 /// A drag-reorder view of a canvas's pages that mirrors the canvas's exact
@@ -396,12 +397,8 @@ class _CellMenu extends StatelessWidget {
               controller.duplicatePage(pageId);
             case 'copy':
               controller.copyPageToClipboard(pageId);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Page copied — paste from Add ＋ in any canvas'),
-                  behavior: SnackBarBehavior.floating,
-                ),
-              );
+              showAppToast(
+                  context, 'Page copied — paste from Add ＋ in any canvas');
             case 'copylink':
               copyLinkToClipboard(context, _endpoint());
             case 'connections':
@@ -417,12 +414,7 @@ class _CellMenu extends StatelessWidget {
               );
             case 'delete':
               if (!controller.deletePage(pageId)) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text("Can't delete the only page"),
-                    behavior: SnackBarBehavior.floating,
-                  ),
-                );
+                showAppToast(context, "Can't delete the only page", error: true);
               }
           }
         },

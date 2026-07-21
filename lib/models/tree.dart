@@ -147,6 +147,40 @@ class TreeOps {
     return null;
   }
 
+  /// Inserts [node] immediately after the sibling identified by [afterId] —
+  /// matching either a [LeafNode.refId] or a [FolderNode.id] — wherever it
+  /// lives in the tree (top level or inside a folder), so a newly added item
+  /// (leaf OR super-section) lands right below the currently-selected one.
+  /// Returns false if [afterId] isn't found (the caller should then append).
+  static bool insertNodeAfter(
+    List<TreeNode> nodes,
+    String afterId,
+    TreeNode node,
+  ) {
+    for (var i = 0; i < nodes.length; i++) {
+      final n = nodes[i];
+      final matches =
+          (n is LeafNode && n.refId == afterId) ||
+          (n is FolderNode && n.id == afterId);
+      if (matches) {
+        nodes.insert(i + 1, node);
+        return true;
+      }
+      if (n is FolderNode && insertNodeAfter(n.children, afterId, node)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// [insertNodeAfter] specialised to a leaf (kept for existing call sites).
+  static bool insertLeafAfter(
+    List<TreeNode> nodes,
+    String afterRefId,
+    LeafNode leaf,
+  ) =>
+      insertNodeAfter(nodes, afterRefId, leaf);
+
   static bool removeLeaf(List<TreeNode> nodes, String refId) {
     for (var i = 0; i < nodes.length; i++) {
       final node = nodes[i];

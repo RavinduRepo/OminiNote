@@ -683,4 +683,81 @@ void main() {
       expect(rev(), greaterThan(afterUndo));
     });
   });
+
+  group('CanvasController cross-page stroke', () {
+    // Two A4 pages stacked vertically (row per page). Page 'a' spans canvas
+    // y 0..842, page 'b' spans y 842..1684 (kPageGap == 0, so they're flush).
+    CanvasController build() {
+      final pageA = CanvasPage(id: 'a', deviceId: 'test_device');
+      final pageB = CanvasPage(id: 'b', deviceId: 'test_device');
+      final canvas = Canvas(
+        id: 's1',
+        notebookId: 'n1',
+        sectionId: 's1',
+        name: 'Test',
+        createdAt: DateTime(2026, 7, 20),
+        rows: [
+          PageRow(id: 'r1', pageIds: ['a']),
+          PageRow(id: 'r2', pageIds: ['b']),
+        ],
+      );
+      // zoom 1 / pan 0 → screenToCanvas is the identity, so screen == canvas.
+      return CanvasController(canvas: canvas, pages: {'a': pageA, 'b': pageB});
+    }
+
+    test('a stroke that stays on one page commits as a single stroke', () {
+      final c = build()..setTool(CanvasTool.pen);
+      c.startToolGesture(const Offset(100, 100), 0.5);
+      c.updateToolGesture(const Offset(150, 200), 0.5);
+      c.updateToolGesture(const Offset(200, 300), 0.5);
+      c.endToolGesture();
+      expect(c.pages['a']!.strokes.length, 1);
+      expect(c.pages['b']!.strokes, isEmpty);
+    });
+
+    test(
+        'a stroke crossing the page boundary splits into one stroke per page, '
+        'each within its own bounds and meeting flush at the edge', () {
+      final c = build()..setTool(CanvasTool.pen);
+      c.startToolGesture(const Offset(100, 800), 0.5); // page a
+      c.updateToolGesture(const Offset(100, 820), 0.5); // page a
+      c.updateToolGesture(const Offset(100, 900), 0.5); // page b (y>842)
+      c.updateToolGesture(const Offset(100, 950), 0.5); // page b
+      c.endToolGesture();
+
+      final a = c.pages['a']!.strokes;
+      final b = c.pages['b']!.strokes;
+      expect(a.length, 1, reason: 'origin-page half');
+      expect(b.length, 1, reason: 'crossed-onto-page half');
+
+      // Every point stays within its page's height (local space).
+      for (final p in a.single.points) {
+        expect(p.y, lessThanOrEqualTo(842 + 0.001));
+      }
+      for (final p in b.single.points) {
+        expect(p.y, greaterThanOrEqualTo(-0.001));
+      }
+      // Flush join: page a ends at its bottom edge, page b starts at its top.
+      expect(a.single.points.last.y, closeTo(842, 0.5));
+      expect(b.single.points.first.y, closeTo(0, 0.5));
+    });
+
+    test('one undo removes both halves of a cross-page stroke', () {
+      final c = build()..setTool(CanvasTool.pen);
+      c.startToolGesture(const Offset(100, 800), 0.5);
+      c.updateToolGesture(const Offset(100, 900), 0.5);
+      c.updateToolGesture(const Offset(100, 950), 0.5);
+      c.endToolGesture();
+      expect(c.pages['a']!.strokes, isNotEmpty);
+      expect(c.pages['b']!.strokes, isNotEmpty);
+
+      c.undo();
+      expect(c.pages['a']!.strokes, isEmpty);
+      expect(c.pages['b']!.strokes, isEmpty);
+
+      c.redo();
+      expect(c.pages['a']!.strokes, isNotEmpty);
+      expect(c.pages['b']!.strokes, isNotEmpty);
+    });
+  });
 }

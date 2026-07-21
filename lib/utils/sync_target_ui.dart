@@ -5,6 +5,7 @@ import '../services/notebook_service.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
+import 'app_toast.dart';
 
 /// Sentinel for the "Local-only (this device)" choice in the picker.
 const _kLocalOnly = '__local_only__';
@@ -140,10 +141,7 @@ Future<bool> showSyncTargetPicker(
   if (!context.mounted) return false;
   final res = await _runMove(context, notebook.id, accountId);
   if (!res.ok && context.mounted) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(res.error ?? 'Move failed.'),
-      behavior: SnackBarBehavior.floating,
-    ));
+    showAppToast(context, res.error ?? 'Move failed.', error: true);
   }
   return res.ok;
 }
