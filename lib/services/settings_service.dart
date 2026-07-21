@@ -132,6 +132,32 @@ class SettingsService {
     await _persist();
   }
 
+  /// Connections-graph appearance + view toggles. Device-local (never synced —
+  /// how you *view* the graph is per-device, like zoom/pan and layout mode).
+  double graphNodeSize = 1.0;
+  double graphTextSize = 1.0;
+  double graphLinkThickness = 1.0;
+  double graphLinkOpacity = 0.55;
+  bool graphAbstractItems = true;
+  bool graphShowExternal = true;
+
+  Future<void> saveGraphSettings({
+    double? nodeSize,
+    double? textSize,
+    double? linkThickness,
+    double? linkOpacity,
+    bool? abstractItems,
+    bool? showExternal,
+  }) async {
+    graphNodeSize = nodeSize ?? graphNodeSize;
+    graphTextSize = textSize ?? graphTextSize;
+    graphLinkThickness = linkThickness ?? graphLinkThickness;
+    graphLinkOpacity = linkOpacity ?? graphLinkOpacity;
+    graphAbstractItems = abstractItems ?? graphAbstractItems;
+    graphShowExternal = showExternal ?? graphShowExternal;
+    await _persist();
+  }
+
   /// Chosen read-aloud voice (device-local; the engine's default when null).
   String? ttsVoiceName;
   String? ttsVoiceLocale;
@@ -416,6 +442,12 @@ class SettingsService {
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
     readAloudMainColumnOnly = data['readAloudMainColumnOnly'] == true;
+    graphNodeSize = (data['graphNodeSize'] as num?)?.toDouble() ?? 1.0;
+    graphTextSize = (data['graphTextSize'] as num?)?.toDouble() ?? 1.0;
+    graphLinkThickness = (data['graphLinkThickness'] as num?)?.toDouble() ?? 1.0;
+    graphLinkOpacity = (data['graphLinkOpacity'] as num?)?.toDouble() ?? 0.55;
+    graphAbstractItems = data['graphAbstractItems'] != false; // default true
+    graphShowExternal = data['graphShowExternal'] != false; // default true
     ttsVoiceName = data['ttsVoiceName'] as String?;
     ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
     shapeToolKind = ShapeToolKind.values.firstWhere(
@@ -616,6 +648,12 @@ class SettingsService {
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
         'readAloudMainColumnOnly': readAloudMainColumnOnly,
+        'graphNodeSize': graphNodeSize,
+        'graphTextSize': graphTextSize,
+        'graphLinkThickness': graphLinkThickness,
+        'graphLinkOpacity': graphLinkOpacity,
+        'graphAbstractItems': graphAbstractItems,
+        'graphShowExternal': graphShowExternal,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,

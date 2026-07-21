@@ -9,6 +9,8 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/link.dart';
 import '../services/graph_service.dart';
 import '../services/link_navigator.dart';
+import '../services/link_service.dart';
+import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
@@ -52,11 +54,34 @@ class GraphController extends ChangeNotifier {
   /// Show external-URL nodes.
   bool showExternal = true;
 
+  /// Add isolated nodes for containers that have no links (so you can spot —
+  /// and create links for — unlinked notebooks/sections/canvases).
+  bool showUnlinked = false;
+
+  /// The store structure (notebook → group → section → folder → canvas) — the
+  /// filter tree's source (folders included) and the unlinked-node source.
+  GraphStructure? structure;
+
+  /// Every container as an isolated GraphNode (from [structure]) — added to the
+  /// graph when [showUnlinked] is on, for containers not already linked.
+  List<GraphNode> _unlinkedCandidates = [];
+
   // ── Appearance (Obsidian-style sliders) ──
   double nodeSizeScale = 1.0; // 0.5–2.5
   double textSizeScale = 1.0; // 0.6–2.0
   double linkThickness = 1.0; // 0.4–3.0
   double linkOpacity = 0.55; // 0.1–1.0
+
+  GraphController() {
+    // Seed appearance + view toggles from device-local settings.
+    final s = SettingsService();
+    nodeSizeScale = s.graphNodeSize;
+    textSizeScale = s.graphTextSize;
+    linkThickness = s.graphLinkThickness;
+    linkOpacity = s.graphLinkOpacity;
+    abstractInsideItems = s.graphAbstractItems;
+    showExternal = s.graphShowExternal;
+  }
 
   /// A container id hovered in the filter tree — nodes under it get a halo.
   String? highlightContainerId;
@@ -116,6 +141,53 @@ class GraphController extends ChangeNotifier {
     _rebuildActive();
   }
 
+  /// Sets the store structure (drives the filter tree + unlinked nodes).
+  void setStructure(GraphStructure s) {
+    structure = s;
+    _unlinkedCandidates = _flattenStructureNodes(s);
+    _rebuildActive();
+  }
+
+  static LinkTargetKind _kindOf(GraphContainerKind k) {
+    switch (k) {
+      case GraphContainerKind.notebook:
+        return LinkTargetKind.notebook;
+      case GraphContainerKind.sectionGroup:
+      case GraphContainerKind.canvasFolder:
+        return LinkTargetKind.folder;
+      case GraphContainerKind.section:
+        return LinkTargetKind.section;
+      case GraphContainerKind.canvas:
+        return LinkTargetKind.canvas;
+    }
+  }
+
+  List<GraphNode> _flattenStructureNodes(GraphStructure s) {
+    final out = <GraphNode>[];
+    void walk(GraphContainer c) {
+      out.add(GraphNode(
+        key: c.endpoint.toUri(),
+        title: c.name,
+        kind: _kindOf(c.kind),
+        alive: true,
+        degree: 0,
+        reveal: c.reveal,
+        color: AppPalette.identityColor(c.id),
+        notebookId: c.endpoint.notebookId,
+        sectionId: c.endpoint.sectionId,
+        canvasId: c.endpoint.canvasId,
+      ));
+      for (final ch in c.children) {
+        walk(ch);
+      }
+    }
+
+    for (final nb in s.notebooks) {
+      walk(nb);
+    }
+    return out;
+  }
+
   /// True when [n] passes the container + external filters (NOT the inside-item
   /// handling — that's abstraction, applied separately in [_rebuildActive]).
   bool _passesFilter(GraphNode n) {
@@ -140,12 +212,16 @@ class GraphController extends ChangeNotifier {
     _nodes.clear();
     _byKey.clear();
 
-    // Lookup of every candidate GraphNode by key (real + synthesized canvases).
+    // Lookup of every candidate GraphNode by key (real nodes win over
+    // synthesized canvases and unlinked-container placeholders).
     final lookup = <String, GraphNode>{for (final n in _all.nodes) n.key: n};
     if (abstractInsideItems) {
       for (final n in _all.abstractCanvasNodes) {
         lookup.putIfAbsent(n.key, () => n);
       }
+    }
+    for (final n in _unlinkedCandidates) {
+      lookup.putIfAbsent(n.key, () => n);
     }
     // Maps an inside-canvas node's key to its canvas node when abstracting.
     String remap(String key) {
@@ -160,6 +236,14 @@ class GraphController extends ChangeNotifier {
     for (final n in _all.nodes) {
       if (!_passesFilter(n)) continue;
       visibleKeys.add(remap(n.key));
+    }
+    // Unlinked containers as isolated nodes, when enabled.
+    if (showUnlinked) {
+      for (final n in _unlinkedCandidates) {
+        if (visibleKeys.contains(n.key)) continue;
+        if (!_passesFilter(n)) continue;
+        visibleKeys.add(n.key);
+      }
     }
 
     final rnd = math.Random(7);
@@ -227,11 +311,19 @@ class GraphController extends ChangeNotifier {
     if (abstractInsideItems == abstract) return;
     abstractInsideItems = abstract;
     _rebuildActive();
+    SettingsService().saveGraphSettings(abstractItems: abstract);
   }
 
   void setShowExternal(bool show) {
     if (showExternal == show) return;
     showExternal = show;
+    _rebuildActive();
+    SettingsService().saveGraphSettings(showExternal: show);
+  }
+
+  void setShowUnlinked(bool show) {
+    if (showUnlinked == show) return;
+    showUnlinked = show;
     _rebuildActive();
   }
 
@@ -239,24 +331,28 @@ class GraphController extends ChangeNotifier {
     nodeSizeScale = v;
     notifyListeners();
     _bumpUi();
+    SettingsService().saveGraphSettings(nodeSize: v);
   }
 
   void setTextSizeScale(double v) {
     textSizeScale = v;
     notifyListeners();
     _bumpUi();
+    SettingsService().saveGraphSettings(textSize: v);
   }
 
   void setLinkThickness(double v) {
     linkThickness = v;
     notifyListeners();
     _bumpUi();
+    SettingsService().saveGraphSettings(linkThickness: v);
   }
 
   void setLinkOpacity(double v) {
     linkOpacity = v;
     notifyListeners();
     _bumpUi();
+    SettingsService().saveGraphSettings(linkOpacity: v);
   }
 
   void setHighlightContainer(String? id) {
@@ -513,12 +609,19 @@ class _GraphScreenState extends State<GraphScreen>
   }
 
   Future<void> _load() async {
-    final data = await GraphService().buildGraph();
+    final results = await Future.wait([
+      GraphService().buildGraph(),
+      GraphService().buildStructure(),
+    ]);
     if (!mounted) return;
+    final data = results[0] as GraphData;
+    final structure = results[1] as GraphStructure;
     setState(() {
       _loading = false;
-      _empty = data.isEmpty;
+      // Empty only when there are no links AND nothing to show unlinked.
+      _empty = data.isEmpty && structure.notebooks.isEmpty;
     });
+    _controller.setStructure(structure);
     _controller.setData(data);
     // Frame the whole graph once the first layout has had a moment to spread.
     if (!_didInitialFit && !data.isEmpty) {
@@ -608,7 +711,7 @@ class _GraphScreenState extends State<GraphScreen>
       backgroundColor: Colors.transparent,
       builder: (_) => FractionallySizedBox(
         heightFactor: 0.8,
-        child: _GraphFilterPanel(controller: _controller),
+        child: _GraphFilterPanel(controller: _controller, onReload: _load),
       ),
     );
   }
@@ -631,7 +734,7 @@ class _GraphScreenState extends State<GraphScreen>
                 color: palette.surface2,
                 border: Border(right: BorderSide(color: palette.border)),
               ),
-              child: _GraphFilterPanel(controller: _controller),
+              child: _GraphFilterPanel(controller: _controller, onReload: _load),
             ),
             Expanded(child: graph),
           ],
@@ -992,25 +1095,18 @@ class _GraphPainter extends CustomPainter {
   bool shouldRepaint(covariant _GraphPainter old) => false; // repaint: c drives
 }
 
-/// A container in the filter tree (notebook → section → canvas), holding a
-/// count of graph nodes under it.
-class _Ct {
-  final String id;
-  final String name;
-  final LinkTargetKind kind;
-  final Map<String, _Ct> children = {};
-  int count = 0;
-  _Ct(this.id, this.name, this.kind);
-}
-
-/// The graph's filter + navigator panel: a notebook → section → canvas tree of
-/// the containers that appear in the graph. Checkboxes scope which nodes show;
-/// hovering a row highlights its nodes in the graph (and hovering a node
-/// highlights its path here); tapping a row label frames its nodes. Reused as a
-/// side column (wide) and a bottom sheet (narrow).
+/// The graph's filter + navigator panel: the full store tree (notebook →
+/// section-group → section → canvas-folder → canvas). Checkboxes scope which
+/// nodes show; hovering a row highlights its nodes in the graph (and vice
+/// versa); tapping a row frames its nodes; a link mode creates connections by
+/// picking two rows. Reused as a side column (wide) and a bottom sheet (narrow).
 class _GraphFilterPanel extends StatefulWidget {
   final GraphController controller;
-  const _GraphFilterPanel({required this.controller});
+
+  /// Rebuilds the graph after a link is created here (LinkService persists but
+  /// doesn't bump dataVersion).
+  final VoidCallback? onReload;
+  const _GraphFilterPanel({required this.controller, this.onReload});
 
   @override
   State<_GraphFilterPanel> createState() => _GraphFilterPanelState();
@@ -1019,39 +1115,33 @@ class _GraphFilterPanel extends StatefulWidget {
 class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   final Set<String> _expanded = {};
   bool _appearanceOpen = false;
+  bool _linkMode = false;
+  GraphContainer? _linkFrom; // link-mode source (null until first pick)
   GraphController get c => widget.controller;
 
-  ({List<_Ct> roots, int external}) _buildTree() {
-    final roots = <String, _Ct>{};
-    var external = 0;
-    for (final n in c.allNodes) {
-      if (n.notebookId == null) {
-        external++;
-        continue;
-      }
-      final nb = roots.putIfAbsent(n.notebookId!,
-          () => _Ct(n.notebookId!, n.notebookName ?? 'Notebook',
-              LinkTargetKind.notebook));
-      nb.count++;
-      if (n.sectionId != null) {
-        final sec = nb.children.putIfAbsent(n.sectionId!,
-            () => _Ct(n.sectionId!, n.sectionName ?? 'Section',
-                LinkTargetKind.section));
-        sec.count++;
-        if (n.canvasId != null) {
-          sec.children
-              .putIfAbsent(
-                  n.canvasId!,
-                  () => _Ct(n.canvasId!, n.canvasName ?? 'Canvas',
-                      LinkTargetKind.canvas))
-              .count++;
+  // Per-build node-count cache (subtree-inclusive) + the raw by-container maps.
+  final Map<String, int> _count = {};
+  Map<String, int> _byNb = const {};
+  Map<String, int> _bySec = const {};
+  Map<String, int> _byCanvas = const {};
+
+  int _countOf(GraphContainer g) => _count.putIfAbsent(g.id, () {
+        switch (g.kind) {
+          case GraphContainerKind.notebook:
+            return _byNb[g.id] ?? 0;
+          case GraphContainerKind.section:
+            return _bySec[g.id] ?? 0;
+          case GraphContainerKind.canvas:
+            return _byCanvas[g.id] ?? 0;
+          case GraphContainerKind.sectionGroup:
+          case GraphContainerKind.canvasFolder:
+            var s = 0;
+            for (final ch in g.children) {
+              s += _countOf(ch);
+            }
+            return s;
         }
-      }
-    }
-    final list = roots.values.toList()
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    return (roots: list, external: external);
-  }
+      });
 
   @override
   Widget build(BuildContext context) {
@@ -1060,7 +1150,25 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     return ValueListenableBuilder<int>(
       valueListenable: c.uiVersion,
       builder: (context, _, _) {
-        final tree = _buildTree();
+        // Recompute node counts per container from the link graph.
+        _count.clear();
+        final byNb = <String, int>{}, bySec = <String, int>{},
+            byCanvas = <String, int>{};
+        for (final n in c.allNodes) {
+          if (n.notebookId != null) {
+            byNb[n.notebookId!] = (byNb[n.notebookId!] ?? 0) + 1;
+          }
+          if (n.sectionId != null) {
+            bySec[n.sectionId!] = (bySec[n.sectionId!] ?? 0) + 1;
+          }
+          if (n.canvasId != null) {
+            byCanvas[n.canvasId!] = (byCanvas[n.canvasId!] ?? 0) + 1;
+          }
+        }
+        _byNb = byNb;
+        _bySec = bySec;
+        _byCanvas = byCanvas;
+
         final hn = c.nodeByKey(c.hoverKey);
         final hlIds = <String>{
           if (hn?.notebookId != null) hn!.notebookId!,
@@ -1068,15 +1176,20 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
           if (hn?.canvasId != null) hn!.canvasId!,
         };
         final rows = <Widget>[];
-        for (final root in tree.roots) {
-          _appendRows(rows, root, 0, false, hlIds, palette);
+        final struct = c.structure;
+        if (struct != null) {
+          final roots = [...struct.notebooks]
+            ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+          for (final nb in roots) {
+            _appendRows(rows, nb, 0, false, hlIds, palette);
+          }
         }
         return SafeArea(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(14, 14, 8, 8),
+                padding: const EdgeInsets.fromLTRB(14, 14, 6, 6),
                 child: Row(
                   children: [
                     Text('Filter & navigate',
@@ -1085,22 +1198,36 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                             fontWeight: FontWeight.w700,
                             color: theme.colorScheme.onSurface)),
                     const Spacer(),
-                    Text('${c.nodes.length}/${c.allNodes.length}',
+                    Text('${c.nodes.length}',
                         style:
                             TextStyle(fontSize: 11.5, color: palette.textDim)),
+                    IconButton(
+                      icon: Icon(_linkMode ? Icons.close : Icons.add_link,
+                          size: 18),
+                      color: _linkMode ? palette.accent : palette.textDim,
+                      tooltip: _linkMode ? 'Exit link mode' : 'Create a link',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => setState(() {
+                        _linkMode = !_linkMode;
+                        _linkFrom = null;
+                      }),
+                    ),
                   ],
                 ),
               ),
+              if (_linkMode) _linkBanner(palette),
               _toggle(palette, 'Expand items inside canvases',
                   !c.abstractInsideItems, (v) => c.setAbstractInsideItems(!v)),
               _toggle(palette, 'External links', c.showExternal,
                   (v) => c.setShowExternal(v)),
+              _toggle(palette, 'Show items without links', c.showUnlinked,
+                  (v) => c.setShowUnlinked(v)),
               _appearanceSection(palette),
               Divider(height: 1, color: palette.border),
               Expanded(
                 child: rows.isEmpty
                     ? Center(
-                        child: Text('Nothing to filter',
+                        child: Text('Nothing to show',
                             style: TextStyle(
                                 fontSize: 12, color: palette.textDim)))
                     : ListView(padding: EdgeInsets.zero, children: rows),
@@ -1114,16 +1241,75 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     );
   }
 
-  void _appendRows(List<Widget> out, _Ct node, int depth, bool ancestorHidden,
-      Set<String> hlIds, AppPalette palette) {
-    final selfHidden = c.hiddenContainers.contains(node.id);
+  Widget _linkBanner(AppPalette palette) {
+    final from = _linkFrom;
+    return Container(
+      color: palette.accentSoft,
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      child: Row(
+        children: [
+          Icon(Icons.link, size: 15, color: palette.accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              from == null
+                  ? 'Tap an item to link from…'
+                  : 'Linking from “${from.name}” — tap a target',
+              style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSurface),
+            ),
+          ),
+          if (from != null)
+            TextButton(
+              onPressed: () => setState(() => _linkFrom = null),
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8)),
+              child: const Text('Reset', style: TextStyle(fontSize: 12)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickForLink(GraphContainer g) async {
+    final from = _linkFrom;
+    if (from == null) {
+      setState(() => _linkFrom = g);
+      return;
+    }
+    if (from.id == g.id) {
+      setState(() => _linkFrom = null);
+      return;
+    }
+    await LinkService().addLink(
+        from: from.endpoint,
+        to: g.endpoint,
+        fromName: from.name,
+        toName: g.name);
+    if (!mounted) return;
+    setState(() => _linkFrom = null);
+    showAppToast(context, 'Linked “${from.name}” ↔ “${g.name}”');
+    widget.onReload?.call();
+  }
+
+  void _appendRows(List<Widget> out, GraphContainer g, int depth,
+      bool ancestorHidden, Set<String> hlIds, AppPalette palette) {
+    final count = _countOf(g);
+    // Hide zero-link subtrees unless the user wants to see unlinked items.
+    if (!c.showUnlinked && count == 0) return;
+    final selfHidden = c.hiddenContainers.contains(g.id);
     final effectiveHidden = ancestorHidden || selfHidden;
-    final hasChildren = node.children.isNotEmpty;
-    final expanded = _expanded.contains(node.id);
-    out.add(_rowTile(node, depth, effectiveHidden, ancestorHidden, hasChildren,
-        expanded, hlIds, palette));
-    if (hasChildren && expanded) {
-      final kids = node.children.values.toList()
+    final renderableChildren = c.showUnlinked
+        ? g.children
+        : g.children.where((ch) => _countOf(ch) > 0).toList();
+    final showChevron = renderableChildren.isNotEmpty;
+    final expanded = _expanded.contains(g.id);
+    out.add(_rowTile(g, depth, count, effectiveHidden, ancestorHidden,
+        showChevron, expanded, hlIds, palette));
+    if (showChevron && expanded) {
+      final kids = [...renderableChildren]
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       for (final k in kids) {
         _appendRows(out, k, depth + 1, effectiveHidden, hlIds, palette);
@@ -1132,25 +1318,29 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   }
 
   Widget _rowTile(
-      _Ct node,
+      GraphContainer g,
       int depth,
+      int count,
       bool effectiveHidden,
       bool ancestorHidden,
       bool hasChildren,
       bool expanded,
       Set<String> hlIds,
       AppPalette palette) {
-    final highlighted = hlIds.contains(node.id);
-    final color = AppPalette.identityColor(node.id);
+    final isLinkSource = _linkFrom?.id == g.id;
+    final highlighted = hlIds.contains(g.id);
+    final color = AppPalette.identityColor(g.id);
     return MouseRegion(
-      onEnter: (_) => c.setHighlightContainer(node.id),
+      onEnter: (_) => c.setHighlightContainer(g.id),
       onExit: (_) {
-        if (c.highlightContainerId == node.id) c.setHighlightContainer(null);
+        if (c.highlightContainerId == g.id) c.setHighlightContainer(null);
       },
       child: InkWell(
-        onTap: () => c.focusContainer(node.id),
+        onTap: () => _linkMode ? _pickForLink(g) : c.focusContainer(g.id),
         child: Container(
-          color: highlighted ? palette.accentSoft : null,
+          color: isLinkSource
+              ? palette.accent.withValues(alpha: 0.28)
+              : (highlighted ? palette.accentSoft : null),
           padding: EdgeInsets.only(left: 6.0 + depth * 14, right: 6),
           height: 32,
           child: Row(
@@ -1160,49 +1350,56 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                 child: hasChildren
                     ? InkWell(
                         onTap: () => setState(() {
-                          if (!_expanded.remove(node.id)) {
-                            _expanded.add(node.id);
-                          }
+                          if (!_expanded.remove(g.id)) _expanded.add(g.id);
                         }),
                         child: Icon(
-                            expanded
-                                ? Icons.expand_more
-                                : Icons.chevron_right,
+                            expanded ? Icons.expand_more : Icons.chevron_right,
                             size: 16,
                             color: palette.textDim),
                       )
                     : null,
               ),
-              _ShapeIcon(shape: _shapeForKind(node.kind), color: color, size: 13),
+              _ShapeIcon(
+                  shape: _shapeForContainer(g.kind),
+                  color: count == 0 ? palette.textDim : color,
+                  size: 13),
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
-                  node.name,
+                  g.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12.5,
-                    color: effectiveHidden
+                    color: (effectiveHidden || count == 0)
                         ? palette.textDim
                         : Theme.of(context).colorScheme.onSurface,
                     fontWeight: depth == 0 ? FontWeight.w600 : FontWeight.w400,
                   ),
                 ),
               ),
-              Text('${node.count}',
-                  style: TextStyle(fontSize: 11, color: palette.textDim)),
-              SizedBox(
-                width: 34,
-                child: Checkbox(
-                  value: !effectiveHidden,
-                  // Can't re-enable a row hidden by an ancestor.
-                  onChanged: ancestorHidden
-                      ? null
-                      : (v) => c.setContainerHidden(node.id, !(v ?? true)),
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              if (count > 0)
+                Text('$count',
+                    style: TextStyle(fontSize: 11, color: palette.textDim)),
+              if (_linkMode)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Icon(Icons.add_link,
+                      size: 15,
+                      color: isLinkSource ? palette.accent : palette.textDim),
+                )
+              else
+                SizedBox(
+                  width: 34,
+                  child: Checkbox(
+                    value: !effectiveHidden,
+                    onChanged: ancestorHidden
+                        ? null
+                        : (v) => c.setContainerHidden(g.id, !(v ?? true)),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -1340,24 +1537,18 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   }
 }
 
-/// The [_NodeShape] for a container kind (the tree only ever holds
-/// notebook/section/canvas, but kept general).
-_NodeShape _shapeForKind(LinkTargetKind kind) {
+/// The [_NodeShape] for a store-structure container kind (filter-tree rows).
+_NodeShape _shapeForContainer(GraphContainerKind kind) {
   switch (kind) {
-    case LinkTargetKind.notebook:
+    case GraphContainerKind.notebook:
       return _NodeShape.hexagon;
-    case LinkTargetKind.section:
-      return _NodeShape.box;
-    case LinkTargetKind.folder:
+    case GraphContainerKind.sectionGroup:
+    case GraphContainerKind.canvasFolder:
       return _NodeShape.pentagon;
-    case LinkTargetKind.canvas:
+    case GraphContainerKind.section:
+      return _NodeShape.box;
+    case GraphContainerKind.canvas:
       return _NodeShape.circle;
-    case LinkTargetKind.page:
-    case LinkTargetKind.element:
-    case LinkTargetKind.bookmark:
-      return _NodeShape.triangle;
-    case LinkTargetKind.external:
-      return _NodeShape.diamond;
   }
 }
 

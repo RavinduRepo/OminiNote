@@ -1,10 +1,44 @@
 import 'package:flutter/material.dart';
 
+import '../models/canvas.dart';
 import '../models/link.dart';
+import '../models/notebook.dart';
+import '../models/section.dart';
+import '../models/tree.dart';
 import '../theme/app_theme.dart';
 import 'link_resolver.dart';
 import 'link_service.dart';
+import 'notebook_service.dart';
 import 'search_service.dart';
+
+/// A container level in the store structure (for the filter tree + unlinked).
+enum GraphContainerKind { notebook, sectionGroup, section, canvasFolder, canvas }
+
+/// One node in the store-structure tree: a container plus its children, with an
+/// [endpoint]/[reveal] so it can be linked or navigated to like any graph node.
+class GraphContainer {
+  final String id;
+  final String name;
+  final GraphContainerKind kind;
+  final LinkEndpoint endpoint;
+  final SearchResult? reveal;
+  final List<GraphContainer> children;
+
+  GraphContainer({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.endpoint,
+    this.reveal,
+    this.children = const [],
+  });
+}
+
+/// The whole store as a nested container tree (notebooks at the roots).
+class GraphStructure {
+  final List<GraphContainer> notebooks;
+  const GraphStructure(this.notebooks);
+}
 
 /// One node in the Connections graph — a distinct linked endpoint, keyed by its
 /// canonical `omninote://link/...` URI (or the raw URL for an external target).
@@ -214,6 +248,116 @@ class GraphService {
 
     return GraphData(
         nodes: resolved, edges: edges, abstractCanvasNodes: abstractCanvas);
+  }
+
+  // ── Store structure (for the filter tree, groups included, + unlinked) ──
+
+  final _svc = NotebookService();
+
+  /// Walks the whole store into a nested container tree — notebook →
+  /// section-group → section → canvas-folder → canvas — so the filter tree
+  /// shows folders/groups and can surface containers that have no links.
+  /// O(store) like [SearchService.buildIndex]; built alongside the graph.
+  Future<GraphStructure> buildStructure() async {
+    final notebooks = await _svc.getNotebooks();
+    final roots = <GraphContainer>[];
+    for (final nb in notebooks) {
+      final sectionMap = await _svc.getSectionMap(nb.id, notebook: nb);
+      final children = await _walkNotebookLevel(nb, nb.nodes, sectionMap);
+      roots.add(GraphContainer(
+        id: nb.id,
+        name: nb.name,
+        kind: GraphContainerKind.notebook,
+        endpoint: LinkEndpoint(notebookId: nb.id),
+        reveal: SearchResult(
+            kind: SearchKind.notebook, title: nb.name, path: '', notebook: nb),
+        children: children,
+      ));
+    }
+    return GraphStructure(roots);
+  }
+
+  Future<List<GraphContainer>> _walkNotebookLevel(
+      Notebook nb, List<TreeNode> nodes, Map<String, Section> sectionMap) async {
+    final out = <GraphContainer>[];
+    for (final node in nodes) {
+      if (node is FolderNode) {
+        out.add(GraphContainer(
+          id: node.id,
+          name: node.name,
+          kind: GraphContainerKind.sectionGroup,
+          endpoint: LinkEndpoint(notebookId: nb.id, folderId: node.id),
+          reveal: SearchResult(
+              kind: SearchKind.superSection,
+              title: node.name,
+              path: nb.name,
+              notebook: nb,
+              folderId: node.id),
+          children: await _walkNotebookLevel(nb, node.children, sectionMap),
+        ));
+      } else if (node is LeafNode) {
+        final sec = sectionMap[node.refId];
+        if (sec == null) continue; // deleted / tombstoned
+        final canvasMap = await _svc.getCanvasMap(sec);
+        out.add(GraphContainer(
+          id: sec.id,
+          name: sec.name,
+          kind: GraphContainerKind.section,
+          endpoint: LinkEndpoint(notebookId: nb.id, sectionId: sec.id),
+          reveal: SearchResult(
+              kind: SearchKind.section,
+              title: sec.name,
+              path: nb.name,
+              notebook: nb,
+              section: sec),
+          children: _walkSectionLevel(nb, sec, sec.nodes, canvasMap),
+        ));
+      }
+    }
+    return out;
+  }
+
+  List<GraphContainer> _walkSectionLevel(Notebook nb, Section sec,
+      List<TreeNode> nodes, Map<String, Canvas> canvasMap) {
+    final out = <GraphContainer>[];
+    final path = '${nb.name} › ${sec.name}';
+    for (final node in nodes) {
+      if (node is FolderNode) {
+        out.add(GraphContainer(
+          id: node.id,
+          name: node.name,
+          kind: GraphContainerKind.canvasFolder,
+          endpoint: LinkEndpoint(
+              notebookId: nb.id, sectionId: sec.id, folderId: node.id),
+          reveal: SearchResult(
+              kind: SearchKind.superSection,
+              title: node.name,
+              path: path,
+              notebook: nb,
+              section: sec,
+              folderId: node.id),
+          children: _walkSectionLevel(nb, sec, node.children, canvasMap),
+        ));
+      } else if (node is LeafNode) {
+        final cv = canvasMap[node.refId];
+        if (cv == null) continue;
+        out.add(GraphContainer(
+          id: cv.id,
+          name: cv.name,
+          kind: GraphContainerKind.canvas,
+          endpoint: LinkEndpoint(
+              notebookId: nb.id, sectionId: sec.id, canvasId: cv.id),
+          reveal: SearchResult(
+              kind: SearchKind.canvas,
+              title: cv.name,
+              path: path,
+              notebook: nb,
+              section: sec,
+              canvas: cv),
+        ));
+      }
+    }
+    return out;
   }
 
   /// The container id a node inherits its identity color from (page/element/
