@@ -48,6 +48,15 @@ class LinkService {
     await NotebookService().saveLinksJson(raw);
   }
 
+  /// Every alive connection in the store — the edge set for the global graph
+  /// view. Uses the same version-gated cache as the id-scoped queries, so it's
+  /// cheap to re-call on a [SyncService.dataVersion] bump. Newest first.
+  Future<List<LinkRecord>> allLinks() async {
+    await _ensureLoaded();
+    return _records.values.where((r) => r.deletedAt == null).toList()
+      ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
+  }
+
   /// Alive connections where [leafId] is either side's target — the list a
   /// Connections sheet shows for one item.
   Future<List<LinkRecord>> linksOf(String leafId) async {

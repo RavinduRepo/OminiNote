@@ -25,13 +25,14 @@ import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
 import '../utils/new_canvas_ui.dart';
 import 'canvas_workspace_screen.dart';
+import 'graph_screen.dart';
 import 'note_search.dart';
 import '../widgets/action_sheet.dart';
 import 'bin_screen.dart';
 import 'settings_screen.dart';
 
 /// What the desktop shell's main (rightmost) pane is showing.
-enum _MainMode { canvas, search, bin, settings }
+enum _MainMode { canvas, search, graph, bin, settings }
 
 /// OneNote-desktop-style three-pane view. Sidebar: notebooks (reorderable) →
 /// each expands to its **section** tree (drag/reorder/color/group,
@@ -981,6 +982,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             onTap: () => createQuickNote(context),
             onLongPress: () => chooseAndCreateQuickNote(context),
           ),
+          // Connections graph — an Obsidian-style view of every internal link.
+          _railButton(
+            palette,
+            Icons.hub_outlined,
+            'Connections graph',
+            active: _mainMode == _MainMode.graph,
+            onTap: () => _openMainMode(_MainMode.graph),
+          ),
           const Spacer(),
           // Bin sits just above Settings at the bottom.
           _railButton(
@@ -1076,6 +1085,8 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             _revealSearchResult(r);
           },
         );
+      case _MainMode.graph:
+        return const GraphScreen();
       case _MainMode.bin:
         return BinScreen(refreshSignal: _binRefresh);
       case _MainMode.settings:
