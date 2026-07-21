@@ -1288,6 +1288,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   bool _projectsOpen = false;
   bool _linkMode = false;
   GraphContainer? _linkFrom; // link-mode source (null until first pick)
+  String _linkQuery = ''; // flat link-browser search
 
   // Project build/edit mode (null = not editing).
   String? _peId; // null = creating a new project
@@ -1444,6 +1445,108 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       }
     }
     return out;
+  }
+
+  // ── Flat link browser (link mode) ──────────────────────────────────────────
+
+  List<GraphContainer> _flatContainers() {
+    final out = <GraphContainer>[];
+    void walk(GraphContainer g) {
+      out.add(g);
+      for (final ch in g.children) {
+        walk(ch);
+      }
+    }
+
+    final s = c.structure;
+    if (s != null) {
+      for (final nb in s.notebooks) {
+        walk(nb);
+      }
+    }
+    out.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return out;
+  }
+
+  Widget _linkBrowserBody(AppPalette palette) {
+    final q = _linkQuery.trim().toLowerCase();
+    final all = _flatContainers();
+    final list = q.isEmpty
+        ? all
+        : all.where((g) {
+            final path = g.reveal?.path ?? '';
+            return g.name.toLowerCase().contains(q) ||
+                path.toLowerCase().contains(q);
+          }).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+          child: TextField(
+            onChanged: (v) => setState(() => _linkQuery = v),
+            decoration: InputDecoration(
+              isDense: true,
+              prefixIcon: const Icon(Icons.search, size: 18),
+              hintText: 'Search items to link',
+              hintStyle: TextStyle(color: palette.textDim, fontSize: 13),
+            ),
+          ),
+        ),
+        Expanded(
+          child: list.isEmpty
+              ? Center(
+                  child: Text('No matches',
+                      style: TextStyle(fontSize: 12, color: palette.textDim)))
+              : ListView.builder(
+                  padding: EdgeInsets.zero,
+                  itemCount: list.length,
+                  itemBuilder: (_, i) => _linkBrowserRow(palette, list[i]),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _linkBrowserRow(AppPalette palette, GraphContainer g) {
+    final isSource = _linkFrom?.id == g.id;
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    final path = g.reveal?.path ?? '';
+    return InkWell(
+      onTap: () => _pickForLink(g),
+      child: Container(
+        color: isSource ? palette.accent.withValues(alpha: 0.28) : null,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            _ShapeIcon(
+                shape: _shapeForContainer(g.kind),
+                color: AppPalette.identityColor(g.id),
+                size: 13),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(g.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13, color: onSurface)),
+                  if (path.isNotEmpty)
+                    Text(path,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            TextStyle(fontSize: 11, color: palette.textDim)),
+                ],
+              ),
+            ),
+            Icon(Icons.add_link,
+                size: 16, color: isSource ? palette.accent : palette.textDim),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _projectsBody(AppPalette palette) {
@@ -1794,20 +1897,25 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   () => setState(() => _projectsOpen = !_projectsOpen)),
               if (_projectsOpen) _projectsBody(palette),
               Divider(height: 1, color: palette.border),
-              // The notebook → section → canvas tree, tucked under a dropdown so
-              // it isn't in your face all the time.
-              _sectionHeader(palette, 'Filter items', _filterOpen,
-                  () => setState(() => _filterOpen = !_filterOpen)),
-              Expanded(
-                child: !_filterOpen
-                    ? const SizedBox.shrink()
-                    : (rows.isEmpty
-                        ? Center(
-                            child: Text('Nothing to show',
-                                style: TextStyle(
-                                    fontSize: 12, color: palette.textDim)))
-                        : ListView(padding: EdgeInsets.zero, children: rows)),
-              ),
+              // Link mode swaps the tree for a flat, searchable list of every
+              // container (fast to pick two and connect); else the tree tucked
+              // under a dropdown so it isn't always on screen.
+              if (_linkMode)
+                Expanded(child: _linkBrowserBody(palette))
+              else ...[
+                _sectionHeader(palette, 'Filter items', _filterOpen,
+                    () => setState(() => _filterOpen = !_filterOpen)),
+                Expanded(
+                  child: !_filterOpen
+                      ? const SizedBox.shrink()
+                      : (rows.isEmpty
+                          ? Center(
+                              child: Text('Nothing to show',
+                                  style: TextStyle(
+                                      fontSize: 12, color: palette.textDim)))
+                          : ListView(padding: EdgeInsets.zero, children: rows)),
+                ),
+              ],
               Divider(height: 1, color: palette.border),
               _appearanceSection(palette),
               _legend(palette),
