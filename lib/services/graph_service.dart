@@ -187,13 +187,32 @@ class GraphService {
       if (r.aName.isNotEmpty) fallbackNames.putIfAbsent(aKey, () => r.aName);
       if (r.bName.isNotEmpty) fallbackNames.putIfAbsent(bKey, () => r.bName);
       if (aKey == bKey) continue; // degenerate self-link — skip the edge
-      degree[aKey] = (degree[aKey] ?? 0) + 1;
-      degree[bKey] = (degree[bKey] ?? 0) + 1;
-      edges.add(GraphEdge(aKey: aKey, bKey: bKey, label: r.label));
+      edges.add(GraphEdge(aKey: aKey, bKey: bKey, label: r.label)); // remapped below
     }
 
-    // Resolve each unique endpoint (title / aliveness / reveal target).
-    final keys = endpoints.keys.toList();
+    // An item's endpoint GROWS as reciprocal markers get folded into it
+    // ({A} → {A,M} → {A,M,M2}…), so the SAME item would otherwise become
+    // several nodes (and each connection would find a different one). Collapse
+    // element endpoints that share any element id into ONE node, keyed by the
+    // smallest (most "content") of them.
+    final canon = _canonicalKeys(endpoints);
+    String ck(String key) => canon[key] ?? key;
+
+    // Remap + dedup the edges onto the merged keys; compute degree there.
+    final mergedEdges = <GraphEdge>[];
+    final seenEdge = <String>{};
+    for (final e in edges) {
+      final a = ck(e.aKey), b = ck(e.bKey);
+      if (a == b) continue;
+      final id = a.compareTo(b) < 0 ? '$a|$b' : '$b|$a';
+      if (!seenEdge.add(id)) continue;
+      degree[a] = (degree[a] ?? 0) + 1;
+      degree[b] = (degree[b] ?? 0) + 1;
+      mergedEdges.add(GraphEdge(aKey: a, bKey: b, label: e.label));
+    }
+
+    // Resolve each surviving (canonical) endpoint (title / aliveness / reveal).
+    final keys = endpoints.keys.map(ck).toSet().toList();
     final resolved = await _mapBounded<String, GraphNode>(keys, (key) async {
       final ep = endpoints[key]!;
       final r = await resolveEndpoint(ep, fallbackName: fallbackNames[key] ?? '');
@@ -272,7 +291,38 @@ class GraphService {
     });
 
     return GraphData(
-        nodes: resolved, edges: edges, abstractCanvasNodes: abstractCanvas);
+        nodes: resolved, edges: mergedEdges, abstractCanvasNodes: abstractCanvas);
+  }
+
+  /// Maps each element-endpoint URI to a canonical representative — the
+  /// smallest endpoint it overlaps (by shared element id) — so an item and its
+  /// marker-grown variants ({A} / {A,M} / {A,M,M2}) collapse to one node. Non
+  /// element endpoints map to themselves (identity).
+  Map<String, String> _canonicalKeys(Map<String, LinkEndpoint> endpoints) {
+    final elemOwner = <String, String>{}; // elementId -> canonical key
+    final canon = <String, String>{};
+    // Smallest endpoints first, so the most "content" one wins as the rep.
+    final elemEntries = [
+      for (final e in endpoints.entries)
+        if (e.value.kind == LinkTargetKind.element) e
+    ]..sort((x, y) =>
+        x.value.elementIds.length.compareTo(y.value.elementIds.length));
+    for (final entry in elemEntries) {
+      String? rep;
+      for (final id in entry.value.elementIds) {
+        final owner = elemOwner[id];
+        if (owner != null) {
+          rep = owner;
+          break;
+        }
+      }
+      rep ??= entry.key;
+      canon[entry.key] = rep;
+      for (final id in entry.value.elementIds) {
+        elemOwner.putIfAbsent(id, () => rep!);
+      }
+    }
+    return canon;
   }
 
   // ── Store structure (for the filter tree, groups included, + unlinked) ──

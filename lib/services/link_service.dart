@@ -72,6 +72,28 @@ class LinkService {
       ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
   }
 
+  /// The EXISTING linked element-endpoint overlapping [ids], if any — so a
+  /// re-selected linked item resolves to the SAME endpoint (one graph node, and
+  /// its Connections list finds the record) instead of a fresh endpoint with a
+  /// slightly different id set. Null when the selection isn't linked yet.
+  Future<LinkEndpoint?> canonicalElementEndpoint(List<String> ids) async {
+    await _ensureLoaded();
+    if (ids.isEmpty) return null;
+    final set = ids.toSet();
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if (r.a.kind == LinkTargetKind.element &&
+          r.a.elementIds.any(set.contains)) {
+        return r.a;
+      }
+      if (r.b.kind == LinkTargetKind.element &&
+          r.b.elementIds.any(set.contains)) {
+        return r.b;
+      }
+    }
+    return null;
+  }
+
   /// Alive connections where either side is an element endpoint intersecting
   /// [elementIds] — the Connections list for a lasso selection (any overlap
   /// counts, so re-selecting a superset/subset still finds the link).
@@ -257,6 +279,7 @@ class LinkService {
     required LinkEndpoint to,
     String fromName = '',
     String toName = '',
+    bool markBothSides = false,
   }) async {
     await _ensureLoaded();
     bool matches(LinkEndpoint x, LinkEndpoint y) =>
@@ -270,26 +293,34 @@ class LinkService {
         return r; // already connected — no duplicate record/marker
       }
     }
-    var target = to;
-    if (to.kind == LinkTargetKind.element) {
-      final markerId = await dropMarkerNear(
-        to,
-        uri: from.toUri(),
-        title: fromName.isEmpty ? 'Linked item' : fromName,
+    // Drop a marker next to an element endpoint pointing at [otherUri], and
+    // fold its id into the endpoint (so the marker's ✎ retargets this record).
+    Future<LinkEndpoint> withMarker(
+        LinkEndpoint e, String otherUri, String otherName) async {
+      if (e.kind != LinkTargetKind.element) return e;
+      final markerId = await dropMarkerNear(e,
+          uri: otherUri, title: otherName.isEmpty ? 'Linked item' : otherName);
+      if (markerId == null) return e;
+      return LinkEndpoint(
+        notebookId: e.notebookId,
+        sectionId: e.sectionId,
+        canvasId: e.canvasId,
+        pageId: e.pageId,
+        elementIds: [...e.elementIds, markerId],
+        bookmarkId: e.bookmarkId,
+        folderId: e.folderId,
       );
-      if (markerId != null) {
-        target = LinkEndpoint(
-          notebookId: to.notebookId,
-          sectionId: to.sectionId,
-          canvasId: to.canvasId,
-          pageId: to.pageId,
-          elementIds: [...to.elementIds, markerId],
-          bookmarkId: to.bookmarkId,
-          folderId: to.folderId,
-        );
-      }
     }
-    return addLink(from: from, to: target, fromName: fromName, toName: toName);
+
+    // The target always gets a marker (points back at [from]); with
+    // [markBothSides] (linking two existing elements via the graph) the source
+    // gets one too, so BOTH items show the link — like a manual canvas paste.
+    // The graph merges the marker-grown endpoints into one node per item.
+    final target = await withMarker(to, from.toUri(), fromName);
+    final source =
+        markBothSides ? await withMarker(from, to.toUri(), toName) : from;
+    return addLink(
+        from: source, to: target, fromName: fromName, toName: toName);
   }
 
   /// Rewrites the record that links [elementId]'s side to [oldTarget] so it

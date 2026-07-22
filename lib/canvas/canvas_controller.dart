@@ -110,6 +110,7 @@ class CanvasController extends ChangeNotifier {
         onInsertMarker: _insertMarkerFromLink,
         onRemoveMarker: _removeLinkMarkersLive,
         onRemapMarkerUris: _remapMarkerUrisLivePage,
+        onFocusElements: focusElements,
       ),
     );
   }

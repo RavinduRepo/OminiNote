@@ -19,6 +19,7 @@ import '../services/sync_service.dart';
 import '../services/tag_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
+import '../widgets/connections_sheet.dart' show ConnectionsListView;
 
 /// A live node in the force simulation — graph data plus physics state.
 class GraphSimNode {
@@ -31,6 +32,11 @@ class GraphSimNode {
   /// graph — drives node size, so an abstracted canvas grows with the items
   /// folded into it.
   int activeDegree = 0;
+
+  /// Pinned in place by the user (dragged and dropped): held fixed, excluded
+  /// from the force integration so it stays exactly where placed instead of
+  /// springing back. Preserved across rebuilds by key.
+  bool fixed = false;
 
   GraphSimNode(this.data, this.pos);
 }
@@ -55,6 +61,23 @@ class GraphController extends ChangeNotifier {
   /// node (edges rewired + deduped) for a cleaner view; when false each
   /// inside-canvas item shows individually.
   bool abstractInsideItems = true;
+
+  /// Local-graph mode: when [centerKey] is set, [_rebuildActive] restricts the
+  /// visible graph to nodes within [depthLimit] hops of it (BFS over the visible
+  /// edges) plus each kept node's same-canvas cluster — so the local graph is
+  /// exactly THIS global graph, scoped to a neighborhood. Null = global (no
+  /// restriction). The painter draws a ring on the center node.
+  String? centerKey;
+  int? depthLimit;
+
+  /// Focuses the graph on [key] with a [depth]-hop neighborhood (local-graph
+  /// mode), or clears it (null [key]) for the full global graph.
+  void setCenter(String? key, int? depth) {
+    if (centerKey == key && depthLimit == depth) return;
+    centerKey = key;
+    depthLimit = depth;
+    _rebuildActive();
+  }
 
   /// Show external-URL nodes.
   bool showExternal = true;
@@ -133,6 +156,7 @@ class GraphController extends ChangeNotifier {
   double labelOpacity = 0.95; // 0.15–1.0 (node text transparency)
   bool alwaysShowLabels = false; // keep labels visible however far you zoom out
   bool sameCanvasLinks = true; // dashed grouping links among same-canvas items
+  bool pinOnDrag = false; // dragging a node pins it in place (off = springs back)
 
   GraphController() {
     // Seed appearance + view toggles from device-local settings.
@@ -144,6 +168,7 @@ class GraphController extends ChangeNotifier {
     labelOpacity = s.graphLabelOpacity;
     alwaysShowLabels = s.graphAlwaysLabels;
     sameCanvasLinks = s.graphSameCanvasLinks;
+    pinOnDrag = s.graphPinOnDrag;
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
     showUnlinked = s.graphShowUnlinked;
@@ -419,6 +444,60 @@ class GraphController extends ChangeNotifier {
       }
     }
 
+    // Local-graph mode: keep only the [depthLimit]-hop neighborhood of
+    // [centerKey] (BFS over the visible edges), plus each kept node's
+    // same-canvas cluster (so a canvas's group stays intact). The center always
+    // shows. Off (null) → the whole global graph, unchanged.
+    final ck = centerKey;
+    final depth = depthLimit;
+    if (ck != null && depth != null) {
+      final center = remap(ck);
+      final adj = <String, Set<String>>{};
+      for (final e in _all.edges) {
+        final a = remap(e.aKey), b = remap(e.bKey);
+        if (a == b) continue;
+        if (!visibleKeys.contains(a) || !visibleKeys.contains(b)) continue;
+        adj.putIfAbsent(a, () => {}).add(b);
+        adj.putIfAbsent(b, () => {}).add(a);
+      }
+      // Seed with the center; if it IS a canvas, also its inside items, so the
+      // canvas's aggregate cluster is present (matches the Connections menu).
+      final seeds = <String>{center};
+      final cd = lookup[ck];
+      if (cd != null &&
+          cd.canvasId != null &&
+          (cd.leafId == cd.canvasId || cd.kind == LinkTargetKind.canvas)) {
+        for (final k in visibleKeys) {
+          if (lookup[k]?.canvasId == cd.canvasId) seeds.add(k);
+        }
+      }
+      final keep = <String>{...seeds};
+      var frontier = <String>{...seeds};
+      for (var d = 0; d < depth && frontier.isNotEmpty; d++) {
+        final next = <String>{};
+        for (final k in frontier) {
+          for (final nb in adj[k] ?? const <String>{}) {
+            if (keep.add(nb)) next.add(nb);
+          }
+        }
+        frontier = next;
+      }
+      final canvasIds = <String>{};
+      for (final k in keep) {
+        final cid = lookup[k]?.canvasId;
+        if (cid != null) canvasIds.add(cid);
+      }
+      if (canvasIds.isNotEmpty) {
+        for (final k in visibleKeys) {
+          final cid = lookup[k]?.canvasId;
+          if (cid != null && canvasIds.contains(cid)) keep.add(k);
+        }
+      }
+      keep.add(center);
+      visibleKeys.removeWhere((k) => !keep.contains(k));
+      if (lookup[center] != null) visibleKeys.add(center);
+    }
+
     final rnd = math.Random(7);
     var i = 0;
     for (final key in visibleKeys) {
@@ -430,7 +509,10 @@ class GraphController extends ChangeNotifier {
                   math.sin(i * 2.399) * (30 + i * 6)) +
               Offset(rnd.nextDouble() * 8, rnd.nextDouble() * 8);
       final sim = GraphSimNode(data, pos);
-      if (prev != null) sim.vel = prev.vel;
+      if (prev != null) {
+        sim.vel = prev.vel;
+        sim.fixed = prev.fixed; // keep a user-pinned node pinned across rebuilds
+      }
       _nodes.add(sim);
       _byKey[key] = sim;
       i++;
@@ -711,7 +793,9 @@ class GraphController extends ChangeNotifier {
     // Integrate.
     var maxSpeed = 0.0;
     for (final a in _nodes) {
-      if (identical(a, _pinned)) {
+      // The actively-dragged node and user-pinned nodes stay put (excluded
+      // from integration) — this is what lets you place a node freely.
+      if (identical(a, _pinned) || a.fixed) {
         a.vel = Offset.zero;
         continue;
       }
@@ -920,8 +1004,45 @@ class GraphController extends ChangeNotifier {
   }
 
   void endDrag() {
+    // With "pin nodes on drag" on, dropping a node keeps it where placed (it no
+    // longer springs back); clearFixed releases them. Off (default) → the node
+    // rejoins the force layout as before.
+    if (pinOnDrag) _pinned?.fixed = true;
     _pinned = null;
     onWake?.call();
+  }
+
+  void setPinOnDrag(bool v, {bool persist = true}) {
+    if (pinOnDrag == v) return;
+    pinOnDrag = v;
+    if (!v) {
+      for (final n in _nodes) {
+        n.fixed = false;
+      }
+      onWake?.call();
+    }
+    notifyListeners();
+    _bumpUi(); // the filter/appearance panel rebuilds on uiVersion, not this
+    if (persist) SettingsService().saveGraphSettings(pinOnDrag: v);
+  }
+
+  /// Releases a single node back into the force layout (double-tap).
+  void unfix(GraphSimNode node) {
+    if (!node.fixed) return;
+    node.fixed = false;
+    onWake?.call();
+  }
+
+  /// Releases every pinned node — the "re-layout" action.
+  void clearFixed() {
+    var any = false;
+    for (final n in _nodes) {
+      if (n.fixed) {
+        n.fixed = false;
+        any = true;
+      }
+    }
+    if (any) onWake?.call();
   }
 
   void setHover(String? key) {
@@ -1509,7 +1630,8 @@ class _GraphPainter extends CustomPainter {
       final r = c.radiusOf(node);
       final isHover = d.key == hover;
       final isNeighbor = neighbors.contains(d.key);
-      final dim = hover != null && !isHover && !isNeighbor;
+      final isCenter = c.centerKey != null && d.key == c.centerKey;
+      final dim = hover != null && !isHover && !isNeighbor && !isCenter;
       // Matches a container hovered in the filter tree.
       final treeHit = hlContainer != null &&
           (d.notebookId == hlContainer ||
@@ -1534,6 +1656,19 @@ class _GraphPainter extends CustomPainter {
             r + (treeHit ? 8 : (isHover ? 6 : 3)),
             Paint()..color = palette.accent.withValues(alpha: ha));
       }
+      // Local-graph center: a prominent accent ring (a soft fill + a crisp
+      // stroke), so the focused node reads at a glance — not just a faint glow.
+      if (isCenter) {
+        canvas.drawCircle(sp, r + 9,
+            Paint()..color = palette.accent.withValues(alpha: 0.14));
+        canvas.drawCircle(
+            sp,
+            r + 9,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2.5
+              ..color = palette.accent);
+      }
 
       final fillPaint = Paint()
         ..color = fill
@@ -1552,6 +1687,14 @@ class _GraphPainter extends CustomPainter {
             ..color = (d.externalUrl != null || !d.alive)
                 ? palette.canvas
                 : palette.canvas.withValues(alpha: 0.6));
+
+      // A small dot marks a user-pinned (dragged-in-place) node.
+      if (node.fixed) {
+        canvas.drawCircle(
+            Offset(sp.dx + r * 0.72, sp.dy - r * 0.72),
+            2.4,
+            Paint()..color = palette.accent);
+      }
 
       if (showLabels || isHover || treeHit) {
         _label(canvas, node, sp, r, dim && !treeHit);
@@ -2531,6 +2674,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               (v) => c.setAlwaysShowLabels(v)),
           _toggle(palette, 'Link items in same canvas', c.sameCanvasLinks,
               (v) => c.setSameCanvasLinks(v)),
+          _toggle(palette, 'Pin nodes where you drag them', c.pinOnDrag,
+              (v) => c.setPinOnDrag(v)),
           const SizedBox(height: 4),
         ],
       ],
@@ -2647,11 +2792,102 @@ class _ShapeIconPainter extends CustomPainter {
       old.shape != shape || old.color != color;
 }
 
-/// State for the desktop floating **local graph** — a small draggable card that
-/// shows the current item + its connections out to a chosen depth, persists
-/// across navigation (until closed), and stacks a back/forward history as you
-/// hop between nodes. Singleton so the Connections menus can open it and the
-/// desktop shell can host one instance + publish the current location.
+/// Appearance/visual controls (sliders + toggles) for a [GraphController] —
+/// the local panel's settings popup shows these so it exposes the same visual
+/// settings as the global graph. Changes persist (shared device-local graph
+/// settings), so the two stay consistent.
+List<Widget> graphAppearanceControls(
+    BuildContext context, GraphController c, AppPalette palette) {
+  return [
+    _graphSlider(palette, 'Node size', c.nodeSizeScale, 0.5, 2.5,
+        c.setNodeSizeScale),
+    _graphSlider(palette, 'Text size', c.textSizeScale, 0.6, 2.0,
+        c.setTextSizeScale),
+    _graphSlider(palette, 'Text opacity', c.labelOpacity, 0.15, 1.0,
+        c.setLabelOpacity),
+    _graphSlider(palette, 'Link thickness', c.linkThickness, 0.4, 3.0,
+        c.setLinkThickness),
+    _graphSlider(palette, 'Link opacity', c.linkOpacity, 0.1, 1.0,
+        c.setLinkOpacity),
+    _graphToggle(context, palette, 'Always show labels', c.alwaysShowLabels,
+        (v) => c.setAlwaysShowLabels(v)),
+    _graphToggle(context, palette, 'Expand items inside canvases',
+        !c.abstractInsideItems, (v) => c.setAbstractInsideItems(!v)),
+    _graphToggle(context, palette, 'Link items in same canvas',
+        c.sameCanvasLinks, (v) => c.setSameCanvasLinks(v)),
+    _graphToggle(context, palette, 'Pin nodes where you drag them', c.pinOnDrag,
+        (v) => c.setPinOnDrag(v)),
+  ];
+}
+
+Widget _graphSlider(AppPalette palette, String label, double value, double min,
+    double max, ValueChanged<double> onChanged) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 14),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 92,
+          child: Text(label,
+              style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+        ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderThemeData(
+              trackHeight: 2,
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            ),
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+Widget _graphToggle(BuildContext context, AppPalette palette, String label,
+    bool value, ValueChanged<bool> onChanged) {
+  return InkWell(
+    onTap: () => onChanged(!value),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 1),
+      child: Row(
+        children: [
+          Expanded(
+              child: Text(label,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      color: Theme.of(context).colorScheme.onSurface))),
+          Transform.scale(
+            scale: 0.72,
+            child: Switch(
+              value: value,
+              onChanged: onChanged,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// The floating Connections panel's two faces: the connections LIST or the
+/// local GRAPH (the same global engine, scoped to the current item + depth).
+enum ConnPanelView { list, graph }
+
+/// State for the desktop floating **Connections panel** — a draggable,
+/// pinnable card that shows the current item's Connections list OR its local
+/// graph (toggle), persists across navigation (until closed), and stacks a
+/// back/forward history as you hop between nodes. Singleton so the Connections
+/// menus open it and the desktop shell hosts one instance + publishes the
+/// current location.
 class LocalGraphController extends ChangeNotifier {
   static final LocalGraphController _i = LocalGraphController._();
   factory LocalGraphController() => _i;
@@ -2661,7 +2897,22 @@ class LocalGraphController extends ChangeNotifier {
   bool pinned = false; // pin ONLY keeps it visible (no dismiss on outside tap)
   int depth = 1; // hops from the center
   Offset position = const Offset(96, 96);
-  Size size = const Size(360, 340);
+  Size size = const Size(380, 420);
+
+  /// Which face is showing (list default — the panel replaces the old modal).
+  ConnPanelView view = ConnPanelView.list;
+
+  // ── Connections context (what the LIST face renders) ──
+  String connTitle = '';
+  LinkEndpoint? connEndpoint;
+  String connEndpointName = '';
+  String? connAggregateCanvasId;
+  LinkEndpoint? connSelfEndpoint;
+  String connSelfName = '';
+  String? connInsideCanvasId;
+  void Function(String? pageId)? connOnJump;
+  Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
+      connOnAddTarget;
 
   final List<({LinkEndpoint ep, String name})> _history = [];
   int _hi = -1;
@@ -2690,6 +2941,68 @@ class LocalGraphController extends ChangeNotifier {
     _bump();
   }
 
+  /// Opens the panel showing the Connections LIST for [endpoint] (or a canvas
+  /// aggregate). The graph face is centered on the same item, so toggling to it
+  /// is instant. Called by `showConnectionsSheet` on desktop.
+  void openConnections({
+    required String title,
+    LinkEndpoint? endpoint,
+    String endpointName = '',
+    String? aggregateCanvasId,
+    LinkEndpoint? selfEndpoint,
+    String selfName = '',
+    String? insideCanvasId,
+    void Function(String? pageId)? onJumpInSameCanvas,
+    Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
+        onAddTarget,
+  }) {
+    connTitle = title;
+    connEndpoint = endpoint;
+    connEndpointName = endpointName;
+    connAggregateCanvasId = aggregateCanvasId;
+    connSelfEndpoint = selfEndpoint;
+    connSelfName = selfName;
+    connInsideCanvasId = insideCanvasId;
+    connOnJump = onJumpInSameCanvas;
+    connOnAddTarget = onAddTarget;
+    open = true;
+    view = ConnPanelView.list;
+    // Center the graph face on the item the sheet is about.
+    final ep = endpoint ?? selfEndpoint;
+    final name = endpoint != null ? endpointName : selfName;
+    _history.clear();
+    if (ep != null) {
+      final e = (ep: ep, name: name.isEmpty ? title : name);
+      _history.add(e);
+      _hi = 0;
+      currentLocation = e; // the panel's list/actions start on the opened item
+    } else {
+      _hi = -1;
+      currentLocation = null;
+    }
+    _bump();
+  }
+
+  void setView(ConnPanelView v) {
+    if (view == v) return;
+    view = v;
+    notifyListeners();
+  }
+
+  // Suppress the live-follow auto-push while a PROGRAMMATIC navigation
+  // (back/forward/recenter/node-tap) echoes back through the shell's
+  // setCurrentLocation — otherwise back/forward re-navigate, the echo re-pushes,
+  // and the history corrupts ("freaks out", lands on the section).
+  bool _suppressEcho = false;
+  int _navToken = 0;
+  void _beginProgrammaticNav() {
+    final t = ++_navToken;
+    _suppressEcho = true;
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (t == _navToken) _suppressEcho = false;
+    });
+  }
+
   void _push(LinkEndpoint ep, String name) {
     if (center?.ep.toUri() == ep.toUri()) return; // already here
     if (_hi < _history.length - 1) {
@@ -2700,17 +3013,29 @@ class LocalGraphController extends ChangeNotifier {
     _bump();
   }
 
-  void navigateTo(LinkEndpoint ep, String name) => _push(ep, name);
+  void navigateTo(LinkEndpoint ep, String name) {
+    _beginProgrammaticNav();
+    // Keep the LIST + copy/add in sync with a graph node tap — otherwise the
+    // graph centers on the tapped item while the list/actions stay on the
+    // previous item (e.g. the canvas), so a paste links the wrong thing.
+    currentLocation = (ep: ep, name: name);
+    _push(ep, name);
+  }
+
   void back() {
     if (canBack) {
+      _beginProgrammaticNav();
       _hi--;
+      currentLocation = center; // list/title/actions follow back/forward
       _bump();
     }
   }
 
   void forward() {
     if (canForward) {
+      _beginProgrammaticNav();
       _hi++;
+      currentLocation = center;
       _bump();
     }
   }
@@ -2719,7 +3044,9 @@ class LocalGraphController extends ChangeNotifier {
     final n = d.clamp(1, 4);
     if (n != depth) {
       depth = n;
-      _bump();
+      // Depth is a cheap view param — the panel re-scopes the existing data
+      // via GraphController.setCenter; no subgraph refetch needed.
+      notifyListeners();
     }
   }
 
@@ -2733,15 +3060,64 @@ class LocalGraphController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The shell records the current location so [recenter] can jump the graph
-  /// there on demand — it never moves the graph on its own.
+  /// Live-navigate: when on, the graph auto-follows the app's current location
+  /// as you navigate manually (and records each step into back/forward). When
+  /// off, the graph only moves when you tap a node or hit recenter. Distinct
+  /// from pin (which just keeps the panel visible).
+  bool liveNavigate = false;
+
+  void toggleLiveNavigate() {
+    liveNavigate = !liveNavigate;
+    // Turning it on immediately snaps to where you are now.
+    if (liveNavigate) {
+      final l = currentLocation;
+      if (l != null && open) {
+        _push(l.ep, l.name);
+        return; // _push already notifies
+      }
+    }
+    notifyListeners();
+  }
+
+  /// The shell/canvas publishes the app's current location (selection or
+  /// canvas) here. The panel's LIST + copy/add/tags always follow it (so you
+  /// can select an item and copy/link it). With [liveNavigate] on it also
+  /// drives the GRAPH (auto-follow) and records the step — unless we're echoing
+  /// our own programmatic navigation.
+  Timer? _followDebounce;
   void setCurrentLocation(LinkEndpoint ep, String name) {
+    if (currentLocation?.ep.toUri() == ep.toUri()) return; // unchanged
     currentLocation = (ep: ep, name: name);
+    if (open) notifyListeners(); // list/actions/title follow immediately
+    if (liveNavigate && open && !_suppressEcho) {
+      // Debounce the GRAPH history push so a rapid section→canvas→element switch
+      // coalesces into one (the graph doesn't get stuck on an intermediate
+      // section/notebook you passed through).
+      _followDebounce?.cancel();
+      _followDebounce = Timer(const Duration(milliseconds: 350), () {
+        final l = currentLocation;
+        if (l == null || !open || _suppressEcho) return;
+        // Don't auto-follow to pure CONTAINER levels (notebook / section /
+        // folder) — you pass through them on the way to a canvas/item, and
+        // stopping the graph on an empty section is the "stuck on the section"
+        // bug. Recenter (manual) still honors them.
+        final k = l.ep.kind;
+        if (k == LinkTargetKind.notebook ||
+            k == LinkTargetKind.section ||
+            k == LinkTargetKind.folder) {
+          return;
+        }
+        _push(l.ep, l.name);
+      });
+    }
   }
 
   void recenter() {
     final l = currentLocation;
-    if (l != null) _push(l.ep, l.name);
+    if (l != null) {
+      _beginProgrammaticNav();
+      _push(l.ep, l.name);
+    }
   }
 
   void move(Offset d) {
@@ -2813,96 +3189,76 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
 
   void _onLgc() {
     if (mounted) setState(() {});
+    // Apply center + depth to the shared engine (cheap, re-scopes existing
+    // data); a center change also refetches the full graph via _maybeRebuild.
+    _g.setCenter(_lgc.center?.ep.toUri(), _lgc.depth);
     _maybeRebuild();
   }
 
+  /// Feeds the shared engine the WHOLE graph and lets it scope to the center's
+  /// depth-neighborhood (`GraphController.setCenter`) — so the local graph is
+  /// literally the global graph with a depth filter, no bespoke subgraph. Only
+  /// refetches the full graph on a center change (revision); depth changes
+  /// re-scope in memory via [_onLgc].
   Future<void> _maybeRebuild() async {
-    if (!_lgc.open || _lgc.revision == _builtRev) return;
+    // Lazy: only build the graph when the graph FACE is actually shown, so
+    // opening the panel to the LIST doesn't pay for a full graph build. When
+    // you toggle to graph, setView → notify → this runs (revision is ahead of
+    // _builtRev, so it fetches).
+    if (!_lgc.open || _lgc.view != ConnPanelView.graph) return;
+    if (_lgc.revision == _builtRev) return;
     _builtRev = _lgc.revision;
     final center = _lgc.center;
     if (center == null) return;
     final data = await GraphService().buildGraph();
     if (!mounted || _lgc.revision != _builtRev) return; // superseded
-    final byKey = {for (final n in data.nodes) n.key: n};
-    final centerKey = center.ep.toUri();
-    // The center always appears, even with no connections.
-    if (!byKey.containsKey(centerKey)) {
+    var centerKey = center.ep.toUri();
+    // If the center is an ELEMENT selection, match it to an EXISTING linked node
+    // by element-id OVERLAP (a re-selected linked selection has a different URI
+    // but the same ids) — so it highlights that node instead of adding a
+    // duplicate "new" one.
+    if (center.ep.elementIds.isNotEmpty &&
+        !data.nodes.any((n) => n.key == centerKey)) {
+      final set = center.ep.elementIds.toSet();
+      for (final n in data.nodes) {
+        final ep = LinkEndpoint.sideFrom(n.key);
+        if (ep != null && ep.elementIds.any(set.contains)) {
+          centerKey = n.key;
+          break;
+        }
+      }
+    }
+    // Ensure the center is present even with no connections (an isolated item).
+    var nodes = data.nodes;
+    if (!data.nodes.any((n) => n.key == centerKey)) {
       final ep = center.ep;
       final ext = ep.externalUrl != null;
-      byKey[centerKey] = GraphNode(
-        key: centerKey,
-        title: center.name.isEmpty ? 'Item' : center.name,
-        kind: ep.kind,
-        alive: true,
-        degree: 0,
-        leafId: ep.leafId,
-        externalUrl: ep.externalUrl,
-        color: ext ? null : AppPalette.identityColor(ep.leafId),
-        notebookId: ext ? null : ep.notebookId,
-        sectionId: ep.sectionId,
-        canvasId: ep.canvasId,
-        folderId: ep.folderId,
-      );
+      nodes = [
+        ...data.nodes,
+        GraphNode(
+          key: centerKey,
+          title: center.name.isEmpty ? 'Item' : center.name,
+          kind: ep.kind,
+          alive: true,
+          degree: 0,
+          leafId: ep.leafId,
+          externalUrl: ep.externalUrl,
+          color: ext ? null : AppPalette.identityColor(ep.leafId),
+          notebookId: ext ? null : ep.notebookId,
+          sectionId: ep.sectionId,
+          canvasId: ep.canvasId,
+          folderId: ep.folderId,
+        ),
+      ];
     }
-    // BFS out to depth over the full link graph.
-    final adj = <String, Set<String>>{};
-    for (final e in data.edges) {
-      adj.putIfAbsent(e.aKey, () => {}).add(e.bKey);
-      adj.putIfAbsent(e.bKey, () => {}).add(e.aKey);
-    }
-    // Seed set: the center, plus — when the center IS a canvas — every linked
-    // item inside that canvas (its pages/elements/bookmarks), so the local
-    // graph shows the canvas's aggregate connections, like the Connections menu.
-    final seeds = <String>{centerKey};
-    final ep = center.ep;
-    if (ep.canvasId != null && ep.pageId == null && ep.elementIds.isEmpty) {
-      for (final n in byKey.values) {
-        if (n.canvasId == ep.canvasId) seeds.add(n.key);
-      }
-    }
-    final keep = <String>{...seeds};
-    var frontier = <String>{...seeds};
-    for (var d = 0; d < _lgc.depth && frontier.isNotEmpty; d++) {
-      final next = <String>{};
-      for (final k in frontier) {
-        for (final nb in adj[k] ?? const <String>{}) {
-          if (keep.add(nb)) next.add(nb);
-        }
-      }
-      frontier = next;
-    }
-    // Pull in every same-canvas sibling of any kept node (plus the canvas node),
-    // so a canvas's whole cluster stays present from ANY of its items — the
-    // aggregate no longer vanishes after hopping to one item and back.
-    final canvasIds = <String>{};
-    for (final k in keep) {
-      final cid = byKey[k]?.canvasId;
-      if (cid != null) canvasIds.add(cid);
-    }
-    if (canvasIds.isNotEmpty) {
-      for (final n in byKey.values) {
-        if (n.canvasId != null && canvasIds.contains(n.canvasId)) {
-          keep.add(n.key);
-        }
-      }
-    }
-    final nodes = [for (final k in keep) if (byKey[k] != null) byKey[k]!];
-    final edges = [
-      for (final e in data.edges)
-        if (keep.contains(e.aKey) && keep.contains(e.bKey)) e
-    ];
-    // Carry the synthesized canvas hubs for the kept canvases so the controller
-    // can both abstract items INTO them and surface them as the weak-link hub
-    // when items are shown (a canvas owning linked items but not itself linked
-    // has no node in `nodes`). The controller decides visibility in
-    // _rebuildActive; it also adds the dashed same-canvas grouping edges there.
-    final absKept = [
-      for (final n in data.abstractCanvasNodes)
-        if (n.canvasId != null && canvasIds.contains(n.canvasId)) n
-    ];
-    _g.setData(
-        GraphData(nodes: nodes, edges: edges, abstractCanvasNodes: absKept));
-    _g.setHover(centerKey); // emphasize the center + its neighbors
+    // Set the focus BEFORE feeding data so the first rebuild is already scoped.
+    _g.centerKey = centerKey;
+    _g.depthLimit = _lgc.depth;
+    _g.setData(GraphData(
+      nodes: nodes,
+      edges: data.edges,
+      abstractCanvasNodes: data.abstractCanvasNodes,
+    ));
   }
 
   void _back() {
@@ -2936,8 +3292,11 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
 
   void _onScaleStart(ScaleStartDetails d) {
     _lastScale = 1.0;
-    _moved = false;
-    _dragNode = _g.hitTest(d.localFocalPoint);
+    // _dragNode was hit-tested on pointer-DOWN (exact position). Hit-testing
+    // here at the scale-start focal point misses, because the recognizer only
+    // fires after some movement — by then the pointer has left the node. That
+    // was why nodes were hard to grab in the (smaller, zoomed-out) local card;
+    // mirrors the global graph, which captures the candidate on pointer-down.
     if (_dragNode != null) _g.beginDrag(_dragNode!);
   }
 
@@ -2973,11 +3332,23 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       return;
     }
     if (!data.alive || data.reveal == null) return;
-    _handOffElementFocus(data); // flash + precise scroll for in-canvas targets
-    // Graph taps are deliberate navigation — go to the actual place (open the
-    // canvas / drill to the container), not the "stop one level up" reveal.
-    LinkNavigator().openCanvas(data.reveal!);
     final ep = LinkEndpoint.sideFrom(data.key);
+    // In-canvas element target: if its canvas is already open, flash it in place
+    // (re-fires on EVERY tap, incl. items in the current canvas, where opening
+    // would no-op — the "doesn't glow on re-tap" fix). Otherwise open it and
+    // hand off a pending focus so it flashes on arrival.
+    final inCanvasEl = ep != null &&
+        ep.canvasId != null &&
+        ep.pageId != null &&
+        ep.elementIds.isNotEmpty;
+    final flashed = inCanvasEl &&
+        SyncService()
+            .focusElementsInOpenCanvas(ep.canvasId!, ep.pageId!, ep.elementIds);
+    if (!flashed) {
+      _handOffElementFocus(data); // flash + precise scroll on arrival
+      // Graph taps are deliberate navigation — go to the actual place.
+      LinkNavigator().openCanvas(data.reveal!);
+    }
     if (ep != null) _lgc.navigateTo(ep, data.title); // stack the hop
   }
 
@@ -2986,7 +3357,8 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     if (!_lgc.open) return const SizedBox.shrink();
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
-    final center = _lgc.center;
+    // The title follows the current item (your selection), like the list.
+    final currentName = _lgc.currentLocation?.name ?? _lgc.connTitle;
     return Stack(
       children: [
         // Unpinned: a tap anywhere outside the card dismisses it (like a
@@ -3015,47 +3387,8 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
           clipBehavior: Clip.antiAlias,
           child: Column(
             children: [
-              _titleBar(palette, center?.name ?? 'Local graph'),
-              Expanded(
-                child: Listener(
-                  onPointerSignal: (e) {
-                    if (e is PointerScrollEvent) {
-                      _g.zoomAt(e.localPosition,
-                          e.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12);
-                    }
-                  },
-                  child: RawGestureDetector(
-                    gestures: {
-                      ScaleGestureRecognizer:
-                          GestureRecognizerFactoryWithHandlers<
-                              ScaleGestureRecognizer>(
-                        () => ScaleGestureRecognizer(),
-                        (r) => r
-                          ..onStart = _onScaleStart
-                          ..onUpdate = _onScaleUpdate
-                          ..onEnd = _onScaleEnd,
-                      ),
-                      TapGestureRecognizer: GestureRecognizerFactoryWithHandlers<
-                          TapGestureRecognizer>(
-                        () => TapGestureRecognizer(),
-                        (r) => r..onTapUp = _onTapUp,
-                      ),
-                    },
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        // Give the controller its size so it centers/fits the
-                        // subgraph — without this the graph sat at the origin
-                        // and couldn't be seen, zoomed, or dragged.
-                        _g.setScreenSize(constraints.biggest);
-                        return CustomPaint(
-                          painter: _GraphPainter(_g, palette, theme),
-                          size: Size.infinite,
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ),
+              _titleBar(palette, currentName),
+              Expanded(child: _buildConnectionsBody(palette, theme)),
               _bottomBar(palette),
             ],
           ),
@@ -3063,6 +3396,111 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       ),
         ),
       ],
+    );
+  }
+
+  /// The panel body: always the Connections view (so its consolidated copy /
+  /// add / tags action line shows in BOTH faces), with the graph injected as
+  /// its `body` in graph mode. The current item FOLLOWS the app's current
+  /// location (your selection) — so you can select something, hit Copy, select
+  /// another and hit + · Paste to link them. The rich opened-context (canvas
+  /// aggregate / lasso onAddTarget / in-canvas jump) applies only while you're
+  /// still on the item the panel was opened for.
+  Widget _buildConnectionsBody(AppPalette palette, ThemeData theme) {
+    final body = _lgc.view == ConnPanelView.graph
+        ? _buildGraphBody(palette, theme)
+        : null;
+    final cur = _lgc.currentLocation;
+    final openedEp = _lgc.connEndpoint ?? _lgc.connSelfEndpoint;
+    final atOpened =
+        cur == null || (openedEp != null && cur.ep.sameAs(openedEp));
+    if (atOpened) {
+      return ConnectionsListView(
+        key: ValueKey('opened:${_lgc.connEndpoint?.toUri() ?? _lgc.connAggregateCanvasId ?? _lgc.connTitle}'),
+        embedded: true,
+        body: body,
+        title: _lgc.connTitle,
+        endpoint: _lgc.connEndpoint,
+        endpointName: _lgc.connEndpointName,
+        aggregateCanvasId: _lgc.connAggregateCanvasId,
+        selfEndpoint: _lgc.connSelfEndpoint,
+        selfName: _lgc.connSelfName,
+        insideCanvasId: _lgc.connInsideCanvasId,
+        onJumpInSameCanvas: _lgc.connOnJump,
+        onAddTarget: _lgc.connOnAddTarget,
+        desktop: true,
+        hostContext: context,
+      );
+    }
+    // Following the current selection/location. A CANVAS with nothing selected
+    // shows the AGGREGATE of every connection inside it (element links live on
+    // the element, not the canvas — so this is what makes B's list show A after
+    // you linked A to an item inside B). An element/page shows its own links.
+    final ep = cur.ep;
+    final canvasOnly = ep.externalUrl == null &&
+        ep.canvasId != null &&
+        ep.pageId == null &&
+        ep.elementIds.isEmpty &&
+        ep.bookmarkId == null &&
+        ep.folderId == null;
+    return ConnectionsListView(
+      key: ValueKey('cur:${ep.toUri()}'),
+      embedded: true,
+      body: body,
+      title: cur.name,
+      endpointName: cur.name,
+      endpoint: canvasOnly ? null : ep,
+      aggregateCanvasId: canvasOnly ? ep.canvasId : null,
+      selfEndpoint: canvasOnly ? ep : null,
+      selfName: cur.name,
+      desktop: true,
+      hostContext: context,
+    );
+  }
+
+  /// The local GRAPH face — the shared engine, centered + depth-scoped.
+  Widget _buildGraphBody(AppPalette palette, ThemeData theme) {
+    return Listener(
+      // Reset the moved-flag AND capture the drag candidate at the precise
+      // pointer-down position (see _onScaleStart) — this fixes both the
+      // "sometimes can't tap nodes" and "hard to grab a node to drag" issues;
+      // mirrors the global graph's onPointerDown.
+      onPointerDown: (e) {
+        _moved = false;
+        _dragNode = _g.hitTest(e.localPosition);
+      },
+      onPointerSignal: (e) {
+        if (e is PointerScrollEvent) {
+          _g.zoomAt(e.localPosition, e.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12);
+        }
+      },
+      child: RawGestureDetector(
+        gestures: {
+          ScaleGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
+            () => ScaleGestureRecognizer(),
+            (r) => r
+              ..onStart = _onScaleStart
+              ..onUpdate = _onScaleUpdate
+              ..onEnd = _onScaleEnd,
+          ),
+          TapGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+            () => TapGestureRecognizer(),
+            (r) => r..onTapUp = _onTapUp,
+          ),
+        },
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // Give the controller its size so it centers/fits the subgraph.
+            _g.setScreenSize(constraints.biggest);
+            return CustomPaint(
+              painter: _GraphPainter(_g, palette, theme),
+              size: Size.infinite,
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -3091,38 +3529,32 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
                       fontWeight: FontWeight.w600,
                       color: onSurface)),
             ),
+            // List ⟷ graph face toggle (the active face is highlighted).
+            _tinyBtn(
+                palette,
+                Icons.format_list_bulleted,
+                'Connections list',
+                _lgc.view == ConnPanelView.list
+                    ? null
+                    : () => _lgc.setView(ConnPanelView.list),
+                active: _lgc.view == ConnPanelView.list),
+            _tinyBtn(
+                palette,
+                Icons.hub_outlined,
+                'Local graph',
+                _lgc.view == ConnPanelView.graph
+                    ? null
+                    : () => _lgc.setView(ConnPanelView.graph),
+                active: _lgc.view == ConnPanelView.graph),
             _tinyBtn(palette, Icons.arrow_back, 'Back',
                 _lgc.canBack ? _back : null),
             _tinyBtn(palette, Icons.arrow_forward, 'Forward',
                 _lgc.canForward ? _forward : null),
-            // Local view options (independent of the global graph — persist:
-            // false — so tweaking them here doesn't change the main graph).
-            PopupMenuButton<String>(
-              icon: Icon(Icons.tune, size: 15, color: palette.textDim),
-              tooltip: 'View options',
-              padding: EdgeInsets.zero,
-              onSelected: (v) {
-                if (v == 'abstract') {
-                  _g.setAbstractInsideItems(!_g.abstractInsideItems,
-                      persist: false);
-                } else if (v == 'sameCanvas') {
-                  _g.setSameCanvasLinks(!_g.sameCanvasLinks, persist: false);
-                }
-                setState(() {});
-              },
-              itemBuilder: (_) => [
-                CheckedPopupMenuItem(
-                  value: 'abstract',
-                  checked: _g.abstractInsideItems,
-                  child: const Text('Abstract items into canvas'),
-                ),
-                CheckedPopupMenuItem(
-                  value: 'sameCanvas',
-                  checked: _g.sameCanvasLinks,
-                  child: const Text('Link items in same canvas'),
-                ),
-              ],
-            ),
+            // Graph-only settings gear → the full visual settings popup (same
+            // controls the global graph has).
+            if (_lgc.view == ConnPanelView.graph)
+              _tinyBtn(palette, Icons.tune, 'Graph settings',
+                  _openGraphSettings),
             _tinyBtn(
               palette,
               _lgc.pinned ? Icons.push_pin : Icons.push_pin_outlined,
@@ -3138,6 +3570,7 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   }
 
   Widget _bottomBar(AppPalette palette) {
+    final graph = _lgc.view == ConnPanelView.graph;
     return Container(
       height: 34,
       padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -3147,27 +3580,80 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       ),
       child: Row(
         children: [
-          _tinyBtn(palette, Icons.my_location, 'Recenter on current location',
-              _lgc.recenter),
-          const Spacer(),
-          Text('Depth', style: TextStyle(fontSize: 11.5, color: palette.textDim)),
-          _tinyBtn(palette, Icons.remove, 'Fewer hops',
-              _lgc.depth > 1 ? () => _lgc.setDepth(_lgc.depth - 1) : null),
-          Text('${_lgc.depth}',
-              style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: palette.accent)),
-          _tinyBtn(palette, Icons.add, 'More hops',
-              _lgc.depth < 4 ? () => _lgc.setDepth(_lgc.depth + 1) : null),
+          // Graph-face controls (recenter / re-flow / depth); the list face
+          // just carries the resize grip.
+          if (graph) ...[
+            _tinyBtn(palette, Icons.my_location, 'Recenter on current location',
+                _lgc.recenter),
+            _tinyBtn(
+                palette,
+                _lgc.liveNavigate
+                    ? Icons.gps_fixed
+                    : Icons.gps_not_fixed,
+                _lgc.liveNavigate
+                    ? 'Live-follow on — graph follows you as you navigate'
+                    : 'Live-follow off — tap to make the graph follow navigation',
+                _lgc.toggleLiveNavigate,
+                active: _lgc.liveNavigate),
+            _tinyBtn(palette, Icons.bubble_chart_outlined,
+                'Re-flow layout (release pinned nodes)', _g.clearFixed),
+            const Spacer(),
+            Text('Depth',
+                style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+            _tinyBtn(palette, Icons.remove, 'Fewer hops',
+                _lgc.depth > 1 ? () => _lgc.setDepth(_lgc.depth - 1) : null),
+            Text('${_lgc.depth}',
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: palette.accent)),
+            _tinyBtn(palette, Icons.add, 'More hops',
+                _lgc.depth < 4 ? () => _lgc.setDepth(_lgc.depth + 1) : null),
+          ] else
+            const Spacer(),
           const SizedBox(width: 6),
-          // Resize grip (drag to size the card).
+          // Resize grip (drag to size the card) — both faces.
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onPanUpdate: (d) => _lgc.resize(d.delta),
             child: Icon(Icons.open_in_full, size: 14, color: palette.textDim),
           ),
         ],
+      ),
+    );
+  }
+
+  /// The graph settings popup — the same visual controls the global graph has,
+  /// operating on the local `_g` (and persisting, so both stay consistent).
+  void _openGraphSettings() {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 340),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            child: ListenableBuilder(
+              listenable: _g,
+              builder: (_, _) => Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                    child: Text('Graph settings',
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: palette.textDim)),
+                  ),
+                  ...graphAppearanceControls(ctx, _g, palette),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

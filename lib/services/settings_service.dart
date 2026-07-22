@@ -144,6 +144,7 @@ class SettingsService {
   bool graphShowExternal = true;
   bool graphShowUnlinked = false;
   bool graphSameCanvasLinks = true; // dashed links among same-canvas items
+  bool graphPinOnDrag = false; // dragging a node pins it in place (off = springs back)
 
   /// Free-form persisted graph-view state (device-local): selected/hidden
   /// containers, tag filter, active project, and panel expand states. A blob so
@@ -166,6 +167,7 @@ class SettingsService {
     bool? showExternal,
     bool? showUnlinked,
     bool? sameCanvasLinks,
+    bool? pinOnDrag,
   }) async {
     graphNodeSize = nodeSize ?? graphNodeSize;
     graphTextSize = textSize ?? graphTextSize;
@@ -177,6 +179,7 @@ class SettingsService {
     graphShowExternal = showExternal ?? graphShowExternal;
     graphShowUnlinked = showUnlinked ?? graphShowUnlinked;
     graphSameCanvasLinks = sameCanvasLinks ?? graphSameCanvasLinks;
+    graphPinOnDrag = pinOnDrag ?? graphPinOnDrag;
     await _persist();
   }
 
@@ -474,6 +477,7 @@ class SettingsService {
     graphShowExternal = data['graphShowExternal'] != false; // default true
     graphShowUnlinked = data['graphShowUnlinked'] == true; // default false
     graphSameCanvasLinks = data['graphSameCanvasLinks'] != false; // default true
+    graphPinOnDrag = data['graphPinOnDrag'] == true; // default false
     graphView = (data['graphView'] as Map?)?.cast<String, dynamic>() ?? {};
     ttsVoiceName = data['ttsVoiceName'] as String?;
     ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
@@ -685,6 +689,7 @@ class SettingsService {
         'graphShowExternal': graphShowExternal,
         'graphShowUnlinked': graphShowUnlinked,
         'graphSameCanvasLinks': graphSameCanvasLinks,
+        'graphPinOnDrag': graphPinOnDrag,
         'graphView': graphView,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
