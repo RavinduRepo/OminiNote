@@ -654,11 +654,16 @@ class _CanvasScreenState extends State<CanvasScreen>
     _graphLocDebounce = Timer(const Duration(milliseconds: 350), () async {
       final c = _controller;
       if (c == null || !mounted) return;
-      final pageId = c.selectionPageId;
-      final sel = c.selection;
       final nb = widget.canvas.notebookId, sec = widget.canvas.sectionId;
-      if (sel.isNotEmpty && pageId != null) {
-        final ids = [for (final e in sel) e.id];
+      // The "current item" is the lasso selection, else the text box being
+      // edited, else the canvas itself.
+      var pageId = c.selectionPageId;
+      var ids = [for (final e in c.selection) e.id];
+      if (ids.isEmpty && _textEdit != null) {
+        pageId = _textEdit!.pageId;
+        ids = [_textEdit!.element.id];
+      }
+      if (ids.isNotEmpty && pageId != null) {
         // If these elements are already part of a link, publish THAT endpoint so
         // it's the same graph node + its Connections list finds the record
         // (avoids "same item shows as two nodes" / asymmetric lists).

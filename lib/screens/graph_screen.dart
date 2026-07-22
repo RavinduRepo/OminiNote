@@ -3015,6 +3015,10 @@ class LocalGraphController extends ChangeNotifier {
 
   void navigateTo(LinkEndpoint ep, String name) {
     _beginProgrammaticNav();
+    // Keep the LIST + copy/add in sync with a graph node tap — otherwise the
+    // graph centers on the tapped item while the list/actions stay on the
+    // previous item (e.g. the canvas), so a paste links the wrong thing.
+    currentLocation = (ep: ep, name: name);
     _push(ep, name);
   }
 
@@ -3022,6 +3026,7 @@ class LocalGraphController extends ChangeNotifier {
     if (canBack) {
       _beginProgrammaticNav();
       _hi--;
+      currentLocation = center; // list/title/actions follow back/forward
       _bump();
     }
   }
@@ -3030,6 +3035,7 @@ class LocalGraphController extends ChangeNotifier {
     if (canForward) {
       _beginProgrammaticNav();
       _hi++;
+      currentLocation = center;
       _bump();
     }
   }
