@@ -11,6 +11,7 @@ import '../models/project.dart';
 import '../models/tag.dart';
 import '../services/graph_service.dart';
 import '../services/link_navigator.dart';
+import '../services/link_resolver.dart';
 import '../services/link_service.dart';
 import '../services/project_service.dart';
 import '../services/settings_service.dart';
@@ -104,6 +105,7 @@ class GraphController extends ChangeNotifier {
   double linkOpacity = 0.6; // 0.1–1.0
   double labelOpacity = 0.95; // 0.15–1.0 (node text transparency)
   bool alwaysShowLabels = false; // keep labels visible however far you zoom out
+  bool sameCanvasLinks = true; // dashed grouping links among same-canvas items
 
   GraphController() {
     // Seed appearance + view toggles from device-local settings.
@@ -114,6 +116,7 @@ class GraphController extends ChangeNotifier {
     linkOpacity = s.graphLinkOpacity;
     labelOpacity = s.graphLabelOpacity;
     alwaysShowLabels = s.graphAlwaysLabels;
+    sameCanvasLinks = s.graphSameCanvasLinks;
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
     showUnlinked = s.graphShowUnlinked;
@@ -374,10 +377,36 @@ class GraphController extends ChangeNotifier {
       _edges.add(GraphEdge(aKey: a, bKey: b, label: e.label));
     }
 
-    // Active degree per node (for sizing) from the final edge set.
+    // Active degree per node (for sizing) from the real edge set only.
     for (final e in _edges) {
       _byKey[e.aKey]?.activeDegree++;
       _byKey[e.bKey]?.activeDegree++;
+    }
+
+    // Implicit "same-canvas" grouping edges (dashed): connect every visible
+    // inside-canvas item to its canvas node, so a canvas's items stay clustered
+    // (and stay visible from any of them). Only when items are shown (not
+    // abstracted). These don't affect node size.
+    if (sameCanvasLinks && !abstractInsideItems) {
+      // Map canvasId -> its canvas node key (the node whose leaf IS the canvas).
+      final canvasNodeKey = <String, String>{};
+      for (final n in _nodes) {
+        final d = n.data;
+        if (d.canvasId != null && d.leafId == d.canvasId) {
+          canvasNodeKey[d.canvasId!] = d.key;
+        }
+      }
+      final implicitSeen = <String>{};
+      for (final n in _nodes) {
+        final d = n.data;
+        // an inside-canvas item (has a canvasId but isn't the canvas itself)
+        if (d.canvasId == null || d.leafId == d.canvasId) continue;
+        final hub = canvasNodeKey[d.canvasId!];
+        if (hub == null || hub == d.key) continue;
+        final id = d.key.compareTo(hub) < 0 ? '${d.key}|$hub' : '$hub|${d.key}';
+        if (!implicitSeen.add(id) || seen.contains(id)) continue;
+        _edges.add(GraphEdge(aKey: d.key, bKey: hub, implicit: true));
+      }
     }
 
     _untangled = false; // let the layout re-untangle for the new content
@@ -416,11 +445,11 @@ class GraphController extends ChangeNotifier {
     }
   }
 
-  void setAbstractInsideItems(bool abstract) {
+  void setAbstractInsideItems(bool abstract, {bool persist = true}) {
     if (abstractInsideItems == abstract) return;
     abstractInsideItems = abstract;
     _rebuildActive();
-    SettingsService().saveGraphSettings(abstractItems: abstract);
+    if (persist) SettingsService().saveGraphSettings(abstractItems: abstract);
   }
 
   void setShowExternal(bool show) {
@@ -510,6 +539,13 @@ class GraphController extends ChangeNotifier {
     notifyListeners();
     _bumpUi();
     SettingsService().saveGraphSettings(alwaysLabels: v);
+  }
+
+  void setSameCanvasLinks(bool v, {bool persist = true}) {
+    if (sameCanvasLinks == v) return;
+    sameCanvasLinks = v;
+    _rebuildActive();
+    if (persist) SettingsService().saveGraphSettings(sameCanvasLinks: v);
   }
 
   void setLabelOpacity(double v) {
@@ -1368,10 +1404,19 @@ class _GraphPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..color = palette.accent.withValues(alpha: math.max(0.9, c.linkOpacity))
       ..strokeWidth = c.linkThickness * 1.6;
+    // Implicit same-canvas grouping edges are drawn dashed + dimmer.
+    final implicitPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..color = palette.textDim.withValues(alpha: c.linkOpacity * 0.55)
+      ..strokeWidth = c.linkThickness * 0.8;
     for (final e in c.edges) {
       final a = screenPos[e.aKey];
       final b = screenPos[e.bKey];
       if (a == null || b == null) continue;
+      if (e.implicit) {
+        _dashLine(canvas, a, b, implicitPaint);
+        continue;
+      }
       final hot = hover != null && (e.aKey == hover || e.bKey == hover);
       canvas.drawLine(a, b, hot ? edgeHot : edgePaint);
     }
@@ -1432,6 +1477,20 @@ class _GraphPainter extends CustomPainter {
       if (showLabels || isHover || treeHit) {
         _label(canvas, node, sp, r, dim && !treeHit);
       }
+    }
+  }
+
+  void _dashLine(Canvas canvas, Offset a, Offset b, Paint p,
+      {double dash = 5, double gap = 4}) {
+    final total = (b - a).distance;
+    if (total < 0.5) return;
+    final dir = (b - a) / total;
+    var d = 0.0;
+    while (d < total) {
+      final s = a + dir * d;
+      final e = a + dir * math.min(d + dash, total);
+      canvas.drawLine(s, e, p);
+      d += dash + gap;
     }
   }
 
@@ -2339,6 +2398,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               c.setLinkOpacity),
           _toggle(palette, 'Always show labels', c.alwaysShowLabels,
               (v) => c.setAlwaysShowLabels(v)),
+          _toggle(palette, 'Link items in same canvas', c.sameCanvasLinks,
+              (v) => c.setSameCanvasLinks(v)),
           const SizedBox(height: 4),
         ],
       ],
@@ -2679,13 +2740,58 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       }
       frontier = next;
     }
+    // Pull in every same-canvas sibling of any kept node (plus the canvas node),
+    // so a canvas's whole cluster stays present from ANY of its items — the
+    // aggregate no longer vanishes after hopping to one item and back.
+    final canvasIds = <String>{};
+    for (final k in keep) {
+      final cid = byKey[k]?.canvasId;
+      if (cid != null) canvasIds.add(cid);
+    }
+    if (canvasIds.isNotEmpty) {
+      for (final n in byKey.values) {
+        if (n.canvasId != null && canvasIds.contains(n.canvasId)) {
+          keep.add(n.key);
+        }
+      }
+    }
     final nodes = [for (final k in keep) if (byKey[k] != null) byKey[k]!];
     final edges = [
       for (final e in data.edges)
         if (keep.contains(e.aKey) && keep.contains(e.bKey)) e
     ];
+    // The controller adds the dashed same-canvas grouping edges in _rebuildActive.
     _g.setData(GraphData(nodes: nodes, edges: edges));
     _g.setHover(centerKey); // emphasize the center + its neighbors
+  }
+
+  void _back() {
+    _lgc.back();
+    _navigateToCenter();
+  }
+
+  void _forward() {
+    _lgc.forward();
+    _navigateToCenter();
+  }
+
+  /// Back/forward (and recenter) don't just re-focus the graph — they also
+  /// navigate the app to the new center, like tapping the node would.
+  Future<void> _navigateToCenter() async {
+    final center = _lgc.center;
+    if (center == null) return;
+    final ep = center.ep;
+    if (ep.externalUrl != null) return; // external isn't an app location
+    final r = await resolveEndpoint(ep, fallbackName: center.name);
+    if (!mounted || r.reveal == null) return;
+    if (ep.elementIds.isNotEmpty && ep.canvasId != null && ep.pageId != null) {
+      LinkNavigator().pendingElementFocus = (
+        canvasId: ep.canvasId!,
+        pageId: ep.pageId!,
+        elementIds: ep.elementIds,
+      );
+    }
+    LinkNavigator().openCanvas(r.reveal!);
   }
 
   void _onScaleStart(ScaleStartDetails d) {
@@ -2846,9 +2952,37 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
                       color: onSurface)),
             ),
             _tinyBtn(palette, Icons.arrow_back, 'Back',
-                _lgc.canBack ? _lgc.back : null),
+                _lgc.canBack ? _back : null),
             _tinyBtn(palette, Icons.arrow_forward, 'Forward',
-                _lgc.canForward ? _lgc.forward : null),
+                _lgc.canForward ? _forward : null),
+            // Local view options (independent of the global graph — persist:
+            // false — so tweaking them here doesn't change the main graph).
+            PopupMenuButton<String>(
+              icon: Icon(Icons.tune, size: 15, color: palette.textDim),
+              tooltip: 'View options',
+              padding: EdgeInsets.zero,
+              onSelected: (v) {
+                if (v == 'abstract') {
+                  _g.setAbstractInsideItems(!_g.abstractInsideItems,
+                      persist: false);
+                } else if (v == 'sameCanvas') {
+                  _g.setSameCanvasLinks(!_g.sameCanvasLinks, persist: false);
+                }
+                setState(() {});
+              },
+              itemBuilder: (_) => [
+                CheckedPopupMenuItem(
+                  value: 'abstract',
+                  checked: _g.abstractInsideItems,
+                  child: const Text('Abstract items into canvas'),
+                ),
+                CheckedPopupMenuItem(
+                  value: 'sameCanvas',
+                  checked: _g.sameCanvasLinks,
+                  child: const Text('Link items in same canvas'),
+                ),
+              ],
+            ),
             _tinyBtn(
               palette,
               _lgc.pinned ? Icons.push_pin : Icons.push_pin_outlined,

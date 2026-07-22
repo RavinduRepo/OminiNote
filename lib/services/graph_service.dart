@@ -125,7 +125,15 @@ class GraphEdge {
   /// The record's user label, if any (shown on the edge later; unused for now).
   final String? label;
 
-  const GraphEdge({required this.aKey, required this.bKey, this.label});
+  /// An implicit "same-canvas" grouping edge (not a real connection) — drawn as
+  /// a dashed line so items in one canvas stay visually clustered.
+  final bool implicit;
+
+  const GraphEdge(
+      {required this.aKey,
+      required this.bKey,
+      this.label,
+      this.implicit = false});
 }
 
 /// The whole Connections graph: distinct endpoint nodes + connection edges,

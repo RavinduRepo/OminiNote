@@ -343,6 +343,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   Future<void> _selectSection(Section section) async {
+    // Publish the section as the local-graph recenter target (so recentering
+    // works when you're on a section, not only a canvas).
+    LocalGraphController().setCurrentLocation(
+        LinkEndpoint(notebookId: section.notebookId, sectionId: section.id),
+        section.name);
     // Cache hit → switch instantly, no disk read. The cache is dropped on any
     // data change (dataVersion) and refreshed on local edits, so it's fresh.
     final cached = _canvasCache[section.id];
@@ -1540,14 +1545,21 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               ),
                             InkWell(
                               borderRadius: BorderRadius.circular(kRadius),
-                              onTap: () => setState(() {
-                                if (expanded) {
-                                  _expanded.remove(notebook.id);
-                                } else {
-                                  _expanded.add(notebook.id);
-                                  _everExpanded.add(notebook.id);
-                                }
-                              }),
+                              onTap: () {
+                                // Publish the notebook as the local-graph
+                                // recenter target.
+                                LocalGraphController().setCurrentLocation(
+                                    LinkEndpoint(notebookId: notebook.id),
+                                    notebook.name);
+                                setState(() {
+                                  if (expanded) {
+                                    _expanded.remove(notebook.id);
+                                  } else {
+                                    _expanded.add(notebook.id);
+                                    _everExpanded.add(notebook.id);
+                                  }
+                                });
+                              },
                               child: SizedBox(
                                 height: 44,
                                 child: Row(
