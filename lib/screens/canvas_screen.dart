@@ -651,21 +651,28 @@ class _CanvasScreenState extends State<CanvasScreen>
   void _publishGraphLocation() {
     if (!LocalGraphController().open) return;
     _graphLocDebounce?.cancel();
-    _graphLocDebounce = Timer(const Duration(milliseconds: 350), () {
+    _graphLocDebounce = Timer(const Duration(milliseconds: 350), () async {
       final c = _controller;
       if (c == null || !mounted) return;
       final pageId = c.selectionPageId;
       final sel = c.selection;
       final nb = widget.canvas.notebookId, sec = widget.canvas.sectionId;
       if (sel.isNotEmpty && pageId != null) {
+        final ids = [for (final e in sel) e.id];
+        // If these elements are already part of a link, publish THAT endpoint so
+        // it's the same graph node + its Connections list finds the record
+        // (avoids "same item shows as two nodes" / asymmetric lists).
+        final canon = await LinkService().canonicalElementEndpoint(ids);
+        if (!mounted) return;
         LocalGraphController().setCurrentLocation(
-          LinkEndpoint(
-            notebookId: nb,
-            sectionId: sec,
-            canvasId: widget.canvas.id,
-            pageId: pageId,
-            elementIds: [for (final e in sel) e.id],
-          ),
+          canon ??
+              LinkEndpoint(
+                notebookId: nb,
+                sectionId: sec,
+                canvasId: widget.canvas.id,
+                pageId: pageId,
+                elementIds: ids,
+              ),
           'Selection in ${widget.canvas.name}',
         );
       } else {

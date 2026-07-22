@@ -3078,13 +3078,31 @@ class LocalGraphController extends ChangeNotifier {
   /// can select an item and copy/link it). With [liveNavigate] on it also
   /// drives the GRAPH (auto-follow) and records the step — unless we're echoing
   /// our own programmatic navigation.
+  Timer? _followDebounce;
   void setCurrentLocation(LinkEndpoint ep, String name) {
     if (currentLocation?.ep.toUri() == ep.toUri()) return; // unchanged
     currentLocation = (ep: ep, name: name);
+    if (open) notifyListeners(); // list/actions/title follow immediately
     if (liveNavigate && open && !_suppressEcho) {
-      _push(ep, name); // follow + record (also notifies)
-    } else if (open) {
-      notifyListeners(); // list/actions/title track the current selection
+      // Debounce the GRAPH history push so a rapid section→canvas→element switch
+      // coalesces into one (the graph doesn't get stuck on an intermediate
+      // section/notebook you passed through).
+      _followDebounce?.cancel();
+      _followDebounce = Timer(const Duration(milliseconds: 350), () {
+        final l = currentLocation;
+        if (l == null || !open || _suppressEcho) return;
+        // Don't auto-follow to pure CONTAINER levels (notebook / section /
+        // folder) — you pass through them on the way to a canvas/item, and
+        // stopping the graph on an empty section is the "stuck on the section"
+        // bug. Recenter (manual) still honors them.
+        final k = l.ep.kind;
+        if (k == LinkTargetKind.notebook ||
+            k == LinkTargetKind.section ||
+            k == LinkTargetKind.folder) {
+          return;
+        }
+        _push(l.ep, l.name);
+      });
     }
   }
 
@@ -3308,11 +3326,23 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       return;
     }
     if (!data.alive || data.reveal == null) return;
-    _handOffElementFocus(data); // flash + precise scroll for in-canvas targets
-    // Graph taps are deliberate navigation — go to the actual place (open the
-    // canvas / drill to the container), not the "stop one level up" reveal.
-    LinkNavigator().openCanvas(data.reveal!);
     final ep = LinkEndpoint.sideFrom(data.key);
+    // In-canvas element target: if its canvas is already open, flash it in place
+    // (re-fires on EVERY tap, incl. items in the current canvas, where opening
+    // would no-op — the "doesn't glow on re-tap" fix). Otherwise open it and
+    // hand off a pending focus so it flashes on arrival.
+    final inCanvasEl = ep != null &&
+        ep.canvasId != null &&
+        ep.pageId != null &&
+        ep.elementIds.isNotEmpty;
+    final flashed = inCanvasEl &&
+        SyncService()
+            .focusElementsInOpenCanvas(ep.canvasId!, ep.pageId!, ep.elementIds);
+    if (!flashed) {
+      _handOffElementFocus(data); // flash + precise scroll on arrival
+      // Graph taps are deliberate navigation — go to the actual place.
+      LinkNavigator().openCanvas(data.reveal!);
+    }
     if (ep != null) _lgc.navigateTo(ep, data.title); // stack the hop
   }
 
@@ -3396,16 +3426,27 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
         hostContext: context,
       );
     }
-    // Following the current selection — plain element/canvas connections, so
-    // Copy/Add operate on exactly what you've selected.
+    // Following the current selection/location. A CANVAS with nothing selected
+    // shows the AGGREGATE of every connection inside it (element links live on
+    // the element, not the canvas — so this is what makes B's list show A after
+    // you linked A to an item inside B). An element/page shows its own links.
+    final ep = cur.ep;
+    final canvasOnly = ep.externalUrl == null &&
+        ep.canvasId != null &&
+        ep.pageId == null &&
+        ep.elementIds.isEmpty &&
+        ep.bookmarkId == null &&
+        ep.folderId == null;
     return ConnectionsListView(
-      key: ValueKey('cur:${cur.ep.toUri()}'),
+      key: ValueKey('cur:${ep.toUri()}'),
       embedded: true,
       body: body,
       title: cur.name,
-      endpoint: cur.ep,
       endpointName: cur.name,
-      aggregateCanvasId: null,
+      endpoint: canvasOnly ? null : ep,
+      aggregateCanvasId: canvasOnly ? ep.canvasId : null,
+      selfEndpoint: canvasOnly ? ep : null,
+      selfName: cur.name,
       desktop: true,
       hostContext: context,
     );

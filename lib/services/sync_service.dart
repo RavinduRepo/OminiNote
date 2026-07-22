@@ -49,6 +49,11 @@ class CanvasSyncListener {
   final Future<void> Function(String pageId, Set<String> movedIds,
       String movedCanvasId, String fromPage, String toPage)? onRemapMarkerUris;
 
+  /// Called to flash + scroll to elements of this OPEN canvas (a graph node tap
+  /// targeting the already-open canvas) — so the glow re-fires on every tap,
+  /// including items in the current canvas, where opening it would no-op.
+  final void Function(String pageId, List<String> elementIds)? onFocusElements;
+
   const CanvasSyncListener({
     required this.onPage,
     required this.onStructure,
@@ -56,6 +61,7 @@ class CanvasSyncListener {
     this.onInsertMarker,
     this.onRemoveMarker,
     this.onRemapMarkerUris,
+    this.onFocusElements,
   });
 }
 
@@ -167,6 +173,18 @@ class SyncService {
     final cb = _canvasListeners[canvasId]?.onRemapMarkerUris;
     if (cb == null) return false;
     await cb(pageId, movedIds, movedCanvasId, fromPage, toPage);
+    return true;
+  }
+
+  /// If the named canvas is open, flash + scroll to [elementIds] on [pageId]
+  /// through its live controller and return true; false → not open (the caller
+  /// navigates + hands off a pending focus instead). Lets a graph node tap
+  /// re-glow the current canvas on every tap.
+  bool focusElementsInOpenCanvas(
+      String canvasId, String pageId, List<String> elementIds) {
+    final cb = _canvasListeners[canvasId]?.onFocusElements;
+    if (cb == null) return false;
+    cb(pageId, elementIds);
     return true;
   }
 

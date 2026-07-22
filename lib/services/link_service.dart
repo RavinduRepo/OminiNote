@@ -72,6 +72,28 @@ class LinkService {
       ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
   }
 
+  /// The EXISTING linked element-endpoint overlapping [ids], if any — so a
+  /// re-selected linked item resolves to the SAME endpoint (one graph node, and
+  /// its Connections list finds the record) instead of a fresh endpoint with a
+  /// slightly different id set. Null when the selection isn't linked yet.
+  Future<LinkEndpoint?> canonicalElementEndpoint(List<String> ids) async {
+    await _ensureLoaded();
+    if (ids.isEmpty) return null;
+    final set = ids.toSet();
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if (r.a.kind == LinkTargetKind.element &&
+          r.a.elementIds.any(set.contains)) {
+        return r.a;
+      }
+      if (r.b.kind == LinkTargetKind.element &&
+          r.b.elementIds.any(set.contains)) {
+        return r.b;
+      }
+    }
+    return null;
+  }
+
   /// Alive connections where either side is an element endpoint intersecting
   /// [elementIds] — the Connections list for a lasso selection (any overlap
   /// counts, so re-selecting a superset/subset still finds the link).
