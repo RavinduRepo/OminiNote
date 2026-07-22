@@ -7,9 +7,11 @@ import 'package:flutter/widgets.dart';
 import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/canvas.dart';
+import '../models/link.dart';
 import '../models/shape_template.dart';
 import '../services/audio_playback_service.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/link_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/pdf_text_extractor.dart';
@@ -20,6 +22,7 @@ import '../services/sync_service.dart';
 import '../services/tts_service.dart';
 import '../utils/audio_sync.dart';
 import '../utils/ink_contrast.dart';
+import '../utils/link_markers.dart';
 import '../utils/readable_text.dart';
 import '../utils/url_text.dart';
 import 'canvas_layout.dart';
@@ -105,8 +108,61 @@ class CanvasController extends ChangeNotifier {
         onStructure: () => unawaited(applyRemoteStructure()),
         onRestorePage: restorePage,
         onInsertMarker: _insertMarkerFromLink,
+        onRemoveMarker: _removeLinkMarkersLive,
+        onRemapMarkerUris: _remapMarkerUrisLivePage,
       ),
     );
+  }
+
+  /// Dispatched cross-canvas marker-URI fix (see
+  /// [SyncService.remapMarkerUrisInOpenCanvas]): this canvas is open in a split
+  /// and holds a marker pointing at an element that just moved pages in another
+  /// canvas — rewrite that marker's URI in memory so its autosave can't clobber
+  /// a disk write.
+  Future<void> _remapMarkerUrisLivePage(String pageId, Set<String> movedIds,
+      String movedCanvasId, String fromPage, String toPage) async {
+    final page = pages[pageId];
+    if (page == null) return;
+    var changed = false;
+    for (final el in page.objects) {
+      if (el is! TextElement) continue;
+      var elChanged = false;
+      for (final run in el.runs) {
+        final link = run.link;
+        if (link == null) continue;
+        final next = remapLinkUriPage(link,
+            movedIds: movedIds,
+            canvasId: movedCanvasId,
+            fromPage: fromPage,
+            toPage: toPage);
+        if (next != null) {
+          run.link = next;
+          elChanged = true;
+        }
+      }
+      if (elChanged) {
+        _stamp([el]);
+        changed = true;
+      }
+    }
+    if (changed) _markDirty({pageId});
+  }
+
+  /// Dispatched marker cleanup (see [SyncService.removeMarkersInOpenCanvas]):
+  /// delete the standalone link markers among [ids] on [pageId] of this open
+  /// canvas — the reciprocal-marker half of a connection removal (Model A).
+  /// Runs through [removeElement] so the deletion tombstones + syncs like any
+  /// element delete.
+  Future<void> _removeLinkMarkersLive(String pageId, List<String> ids) async {
+    final page = pages[pageId];
+    if (page == null) return;
+    final idSet = ids.toSet();
+    final markers = page.objects
+        .where((o) => idSet.contains(o.id) && standaloneMarkerUri(o) != null)
+        .toList();
+    for (final el in markers) {
+      removeElement(pageId, el);
+    }
   }
 
   /// Dispatched reciprocal-marker insertion (see
@@ -2177,6 +2233,9 @@ class CanvasController extends ChangeNotifier {
           for (final el in [...target.strokes, ...target.objects]) {
             if (movedIds.contains(el.id)) _bumpAliveOn(target, el);
           }
+          // Correct any connections + on-canvas link URIs pointing at the
+          // moved elements so they follow to the new page.
+          _correctMovedLinks(movedIds, sourceId, targetId);
         },
         revert: () {
           // Target: tombstone the moved ids at their CURRENT (pushed) rev —
@@ -2192,6 +2251,8 @@ class CanvasController extends ChangeNotifier {
           for (final el in [...source.strokes, ...source.objects]) {
             if (movedIds.contains(el.id)) _bumpAliveOn(source, el);
           }
+          // Undo the move → the links follow back to the origin page.
+          _correctMovedLinks(movedIds, targetId, sourceId);
         },
       ),
     );
@@ -2218,6 +2279,61 @@ class CanvasController extends ChangeNotifier {
       else
         page.objects.add(copy);
     }
+  }
+
+  /// After a cross-page move within this canvas, keep every reference to the
+  /// moved elements pointing at their new page: (1) the connection records in
+  /// `links.json` (so the Connections list + graph stay accurate — store-wide,
+  /// async), and (2) the on-canvas link-run URIs of markers/text that point at
+  /// them (so tapping a marker still lands on the moved item — in memory).
+  /// Runs from the move op's apply/revert, so undo/redo carry the links back
+  /// and forth too. (Link URIs in OTHER, closed canvases aren't rewritten —
+  /// see KNOWN_ISSUES.)
+  void _correctMovedLinks(Set<String> movedIds, String fromPage, String toPage) {
+    if (movedIds.isEmpty || fromPage == toPage) return;
+    unawaited(LinkService().remapElementsToPage(
+      movedIds,
+      canvasId: canvas.id,
+      fromPageId: fromPage,
+      toPageId: toPage,
+    ));
+    _remapLinkUrisOnCanvas(movedIds, fromPage, toPage);
+  }
+
+  /// Rewrites any link-run URI on this canvas that points at a moved element
+  /// (canvasId + [fromPage] + an id in [movedIds]) to reference [toPage]
+  /// instead. `_stamp`s the touched markers (LWW) and marks their pages dirty.
+  void _remapLinkUrisOnCanvas(
+      Set<String> movedIds, String fromPage, String toPage) {
+    final touchedPages = <String>{};
+    for (final page in pages.values) {
+      var pageChanged = false;
+      for (final el in page.objects) {
+        if (el is! TextElement) continue;
+        var elChanged = false;
+        for (final run in el.runs) {
+          final link = run.link;
+          if (link == null) continue;
+          final next = remapLinkUriPage(
+            link,
+            movedIds: movedIds,
+            canvasId: canvas.id,
+            fromPage: fromPage,
+            toPage: toPage,
+          );
+          if (next != null) {
+            run.link = next;
+            elChanged = true;
+          }
+        }
+        if (elChanged) {
+          _stamp([el]);
+          pageChanged = true;
+        }
+      }
+      if (pageChanged) touchedPages.add(page.id);
+    }
+    if (touchedPages.isNotEmpty) _markDirty(touchedPages);
   }
 
   void _replaceElements(String pageId, List<CanvasElement> copies) {
@@ -2255,11 +2371,22 @@ class CanvasController extends ChangeNotifier {
   Future<void> Function()? systemCopyHook;
   Future<void> Function()? systemPasteFallback;
 
+  /// Set by the screen: the text toolbar's "add link" button — opens the link
+  /// target picker for the current text session (search or paste a link) and
+  /// applies it to the selection / caret. Kept as a hook because it needs a
+  /// BuildContext (a modal picker) and the screen's link-registration plumbing.
+  VoidCallback? addTextLinkHook;
+
   void deleteSelection() {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
     final page = pages[pageId]!;
     final slots = <_ElSlot>[];
+    // Standalone link markers among the deleted elements: deleting a marker
+    // breaks its connection (Model A — the marker IS the connection's on-canvas
+    // body) and removes the reciprocal marker on the other side. Fired as a
+    // side effect after the op, like link *registration* is on creation.
+    final deletedMarkerIds = <String>[];
     for (final el in selection) {
       if (el is StrokeElement) {
         final i = page.strokes.indexOf(el);
@@ -2268,6 +2395,7 @@ class CanvasController extends ChangeNotifier {
         final i = page.objects.indexOf(el);
         if (i >= 0) slots.add(_ElSlot(el, i));
       }
+      if (standaloneMarkerUri(el) != null) deletedMarkerIds.add(el.id);
     }
     clearSelection(notify: false);
     _doOp(
@@ -2280,6 +2408,9 @@ class CanvasController extends ChangeNotifier {
         revert: () => _reviveSlots(page, slots),
       ),
     );
+    for (final id in deletedMarkerIds) {
+      unawaited(LinkService().removeLinkForMarker(id));
+    }
   }
 
   void copySelection() {
@@ -2879,6 +3010,113 @@ class CanvasController extends ChangeNotifier {
         apply: () {
           if (applied) {
             applied = false; // live mutation already happened
+            return;
+          }
+          _replaceElements(pageId, after);
+        },
+        revert: () => _replaceElements(pageId, before),
+      ),
+    );
+  }
+
+  /// Applies [uri] as a hyperlink to the character range `[start, end)` of the
+  /// committed text element [elementId] on [pageId], **keeping the existing
+  /// text** as the link's display — the text toolbar's "add link" on a selected
+  /// span (select a to-do line, link it, the line stays but becomes tappable).
+  /// One undoable, `_stamp`ed op; the box re-auto-sizes.
+  void applyLinkToRange(
+      String pageId, String elementId, int start, int end, String uri) {
+    final page = pages[pageId];
+    if (page == null) return;
+    TextElement? el;
+    for (final o in page.objects) {
+      if (o.id == elementId && o is TextElement) {
+        el = o;
+        break;
+      }
+    }
+    if (el == null) return;
+    final len = el.text.length;
+    final s = start.clamp(0, len);
+    final e = end.clamp(0, len);
+    if (s >= e) return;
+    final before = <CanvasElement>[el.deepCopy()];
+    el.runs = setLinkOnRuns(el.runs, s, e, uri);
+    el.rect = autoTextRect(el, page.width - el.rect.left - 6);
+    _stamp([el]);
+    final after = <CanvasElement>[el.deepCopy()];
+    var applied = true;
+    _doOp(
+      _CanvasOp(
+        label: 'Add link',
+        dirtyPageIds: {pageId},
+        apply: () {
+          if (applied) {
+            applied = false;
+            return;
+          }
+          _replaceElements(pageId, after);
+        },
+        revert: () => _replaceElements(pageId, before),
+      ),
+    );
+  }
+
+  /// Inserts a hyperlink ([title] shown, linking to [uri]) at [caret] in the
+  /// committed text element — the text toolbar's "add link" with **no**
+  /// selection (same result as the `[[` trigger, minus a marker to replace).
+  /// One undoable, `_stamp`ed op.
+  void insertLinkAtCaret(
+      String pageId, String elementId, int caret, String title, String uri) {
+    final page = pages[pageId];
+    if (page == null) return;
+    TextElement? el;
+    for (final o in page.objects) {
+      if (o.id == elementId && o is TextElement) {
+        el = o;
+        break;
+      }
+    }
+    if (el == null || caret < 0 || caret > el.text.length) return;
+    // Style the link like the run it lands in.
+    TextRun styleSource = el.runs.isEmpty
+        ? TextRun(
+            text: '',
+            fontSize: el.fontSize,
+            bold: el.bold,
+            italic: el.italic,
+            color: el.color,
+            fontFamily: el.fontFamily,
+          )
+        : el.runs.first;
+    var pos = 0;
+    for (final r in el.runs) {
+      if (caret < pos + r.text.length) {
+        styleSource = r;
+        break;
+      }
+      pos += r.text.length;
+    }
+    final before = <CanvasElement>[el.deepCopy()];
+    el.runs = replaceRunRange(el.runs, caret, caret, [
+      styleSource.clone()
+        ..text = title
+        ..link = uri,
+      styleSource.clone()
+        ..text = ' '
+        ..link = null,
+    ]);
+    el.rect = autoTextRect(el, page.width - el.rect.left - 6);
+    _stamp([el]);
+    final after = <CanvasElement>[el.deepCopy()];
+    var applied = true;
+    _doOp(
+      _CanvasOp(
+        label: 'Insert link',
+        dirtyPageIds: {pageId},
+        apply: () {
+          if (applied) {
+            applied = false;
             return;
           }
           _replaceElements(pageId, after);

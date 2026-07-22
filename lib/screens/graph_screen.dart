@@ -87,15 +87,42 @@ class GraphController extends ChangeNotifier {
   // ── Projects (named saved selections; activating one scopes the graph) ──
   List<ProjectDef> projects = const [];
   String? activeProjectId;
-  Set<String> _activeProjectMemberIds = {};
+  // Project membership is CONTAINER-INHERITING: selecting a section/notebook
+  // includes it and everything under it — now and future — while an item can be
+  // excluded to carve it back out. Both sets hold container/leaf ids; membership
+  // is decided nearest-first over a node's container ancestry (a nearer choice
+  // wins), so a new canvas under an included section is a member with no record
+  // of its own.
+  Set<String> _projIncludes = {};
+  Set<String> _projExcludes = {};
   bool projectPlusLinks = false; // also show members' linked neighbors
 
-  /// Membership keys off the node's OWN deepest container (so the build-mode
-  /// cascade — check a section, then uncheck a canvas — excludes exactly that
-  /// canvas rather than pulling it back via its section).
+  /// Container id → its ancestry [self, parent, …, notebook], nearest first.
+  /// Built from the store structure so folder/group levels are honored (an
+  /// endpoint URI alone doesn't carry its parent folder). Rebuilt in
+  /// [setStructure].
+  Map<String, List<String>> _ancestors = {};
+
+  /// The ancestry chain for [id] (self first), or just [id] when unknown
+  /// (a dead/absent container). Used by the build-mode tri-state checkboxes.
+  List<String> ancestorsOf(String id) => _ancestors[id] ?? [id];
+
+  /// Whether [id] resolves to a member under the active project's include/
+  /// exclude sets — walking its ancestry nearest-first (a nearer exclude beats a
+  /// farther include and vice-versa). Also the tree-scoping predicate.
+  bool isProjectMember(String id) {
+    for (final a in ancestorsOf(id)) {
+      if (_projExcludes.contains(a)) return false;
+      if (_projIncludes.contains(a)) return true;
+    }
+    return false;
+  }
+
+  /// A node belongs to the active project when its deepest container resolves to
+  /// a member (inside-canvas items inherit their canvas's membership).
   bool _inActiveProject(GraphNode n) {
     final id = n.deepestContainerId;
-    return id != null && _activeProjectMemberIds.contains(id);
+    return id != null && isProjectMember(id);
   }
 
   // ── Appearance (Obsidian-style sliders) ──
@@ -142,7 +169,6 @@ class GraphController extends ChangeNotifier {
       });
 
   bool get hasActiveProject => activeProjectId != null;
-  bool isProjectMember(String id) => _activeProjectMemberIds.contains(id);
 
   /// Fired at the end of every filter/data rebuild — the screen uses it to
   /// auto-fit the graph after the change settles.
@@ -212,7 +238,27 @@ class GraphController extends ChangeNotifier {
   void setStructure(GraphStructure s) {
     structure = s;
     _unlinkedCandidates = _flattenStructureNodes(s);
+    _buildAncestors(s);
     _rebuildActive();
+  }
+
+  /// Records each container's ancestry (self → … → notebook) so project
+  /// membership can inherit down real folder/group nesting, which endpoint URIs
+  /// don't fully encode.
+  void _buildAncestors(GraphStructure s) {
+    final map = <String, List<String>>{};
+    void walk(GraphContainer g, List<String> parentChain) {
+      final chain = [g.id, ...parentChain];
+      map[g.id] = chain;
+      for (final ch in g.children) {
+        walk(ch, chain);
+      }
+    }
+
+    for (final nb in s.notebooks) {
+      walk(nb, const []);
+    }
+    _ancestors = map;
   }
 
   static LinkTargetKind _kindOf(GraphContainerKind k) {
@@ -294,10 +340,14 @@ class GraphController extends ChangeNotifier {
     // Lookup of every candidate GraphNode by key (real nodes win over
     // synthesized canvases and unlinked-container placeholders).
     final lookup = <String, GraphNode>{for (final n in _all.nodes) n.key: n};
-    if (abstractInsideItems) {
-      for (final n in _all.abstractCanvasNodes) {
-        lookup.putIfAbsent(n.key, () => n);
-      }
+    // Synthesized canvas nodes are needed in two cases: when abstracting (the
+    // target inside-canvas items collapse INTO), and — new — when items are
+    // shown with same-canvas grouping (the weak-link hub a canvas that owns
+    // linked items but isn't itself linked would otherwise lack). So include
+    // them regardless of the abstraction toggle; whether they actually appear
+    // is decided per-node below.
+    for (final n in _all.abstractCanvasNodes) {
+      lookup.putIfAbsent(n.key, () => n);
     }
     for (final n in _unlinkedCandidates) {
       lookup.putIfAbsent(n.key, () => n);
@@ -344,6 +394,28 @@ class GraphController extends ChangeNotifier {
         if (data != null && _passesFilter(data, ignoreContainers: true)) {
           visibleKeys.add(add);
         }
+      }
+    }
+
+    // When items are shown (not abstracted) with same-canvas grouping on, also
+    // surface each visible item's OWNING CANVAS as a node — even if that canvas
+    // isn't itself linked — so the weak dashed containment link has a hub and
+    // the user can see which canvas holds each item. The item's real connection
+    // edges still run item→item directly (see the edge remap below); only this
+    // dashed grouping edge routes through the canvas. Under abstraction the
+    // canvas absorbs the item instead, so this is skipped.
+    if (!abstractInsideItems && sameCanvasLinks) {
+      final hubs = <String>{};
+      for (final key in visibleKeys) {
+        final ck = lookup[key]?.canvasKey;
+        if (ck != null && !visibleKeys.contains(ck)) hubs.add(ck);
+      }
+      for (final ck in hubs) {
+        final data = lookup[ck];
+        if (data == null) continue;
+        if (!_passesFilter(data)) continue;
+        if (projectActive && !_inActiveProject(data)) continue;
+        visibleKeys.add(ck);
       }
     }
 
@@ -508,17 +580,21 @@ class GraphController extends ChangeNotifier {
     if (activeProjectId != null &&
         !p.any((d) => d.id == activeProjectId)) {
       activeProjectId = null;
-      _activeProjectMemberIds = {};
+      _projIncludes = {};
+      _projExcludes = {};
     }
     _bumpUi();
   }
 
-  /// Activates [id] with its member leaf ids (the graph scopes to them); pass a
-  /// null [id] to deactivate.
-  void setActiveProject(String? id, Set<String> memberIds) {
+  /// Activates [id] with its include/exclude container ids (the graph scopes to
+  /// the members those imply — see [isProjectMember]); pass a null [id] to
+  /// deactivate.
+  void setActiveProject(
+      String? id, Set<String> includes, Set<String> excludes) {
     final changed = id != activeProjectId;
     activeProjectId = id;
-    _activeProjectMemberIds = id == null ? {} : memberIds;
+    _projIncludes = id == null ? {} : includes;
+    _projExcludes = id == null ? {} : excludes;
     // Switching INTO a project starts with all its items shown (checked); a
     // plain refresh (same id, e.g. on reload) preserves the user's unchecks.
     if (id != null && changed) hiddenContainers.clear();
@@ -956,9 +1032,12 @@ class _GraphScreenState extends State<GraphScreen>
     _controller.setProjects(projs);
     final active = _controller.activeProjectId;
     if (active != null) {
-      final ids =
-          (await ProjectService().itemsOf(active)).map((e) => e.leafId).toSet();
-      if (mounted) _controller.setActiveProject(active, ids);
+      final items = await ProjectService().membersOf(active);
+      final inc =
+          items.where((i) => !i.excluded).map((i) => i.endpoint.leafId).toSet();
+      final exc =
+          items.where((i) => i.excluded).map((i) => i.endpoint.leafId).toSet();
+      if (mounted) _controller.setActiveProject(active, inc, exc);
     }
     // Auto-fit fires via onContentChanged (setData/setStructure/etc. above).
   }
@@ -1545,10 +1624,14 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
   bool _linkMode = false;
   GraphContainer? _linkFrom; // link-mode source (null until first pick)
 
-  // Project build/edit mode (null = not editing).
+  // Project build/edit mode (null = not editing). Membership is inheriting: an
+  // include on a container covers its whole subtree, an exclude carves one out;
+  // a row's checkbox reflects the *effective* state and only writes an explicit
+  // marker when it differs from what's inherited (see [_toggleMember]).
   String? _peId; // null = creating a new project
   final TextEditingController _peName = TextEditingController();
-  final Set<String> _peMembers = {};
+  final Set<String> _peIncludes = {};
+  final Set<String> _peExcludes = {};
   bool _editingProject = false;
 
   GraphController get c => widget.controller;
@@ -1730,12 +1813,13 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (active != null) ...[
+          if (active != null)
+            // "Include linked neighbors" is project-specific and stays here.
+            // "Show items without links" is a global view toggle (up in the View
+            // section) — it drives the same c.showUnlinked, so it was a
+            // confusing duplicate here and is removed.
             _toggle(palette, 'Include linked neighbors', c.projectPlusLinks,
                 (v) => c.setProjectPlusLinks(v)),
-            _toggle(palette, 'Show items without links', c.showUnlinked,
-                (v) => c.setShowUnlinked(v)),
-          ],
           for (final p in c.projects)
             _projectRow(palette, onSurface, p, p.id == active),
           Align(
@@ -1797,31 +1881,37 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
 
   Future<void> _activate(ProjectDef p) async {
     if (c.activeProjectId == p.id) {
-      c.setActiveProject(null, {});
+      c.setActiveProject(null, {}, {});
       return;
     }
-    final ids =
-        (await ProjectService().itemsOf(p.id)).map((e) => e.leafId).toSet();
-    c.setActiveProject(p.id, ids);
+    final items = await ProjectService().membersOf(p.id);
+    final inc =
+        items.where((i) => !i.excluded).map((i) => i.endpoint.leafId).toSet();
+    final exc =
+        items.where((i) => i.excluded).map((i) => i.endpoint.leafId).toSet();
+    c.setActiveProject(p.id, inc, exc);
   }
 
   void _startNewProject() => setState(() {
         _peId = null;
         _peName.text = '';
-        _peMembers.clear();
+        _peIncludes.clear();
+        _peExcludes.clear();
         _editingProject = true;
       });
 
   Future<void> _editProject(ProjectDef p) async {
-    final ids =
-        (await ProjectService().itemsOf(p.id)).map((e) => e.leafId).toSet();
+    final items = await ProjectService().membersOf(p.id);
     if (!mounted) return;
     setState(() {
       _peId = p.id;
       _peName.text = p.name;
-      _peMembers
+      _peIncludes
         ..clear()
-        ..addAll(ids);
+        ..addAll(items.where((i) => !i.excluded).map((i) => i.endpoint.leafId));
+      _peExcludes
+        ..clear()
+        ..addAll(items.where((i) => i.excluded).map((i) => i.endpoint.leafId));
       _editingProject = true;
     });
   }
@@ -1843,7 +1933,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       ),
     );
     if (ok != true) return;
-    if (c.activeProjectId == p.id) c.setActiveProject(null, {});
+    if (c.activeProjectId == p.id) c.setActiveProject(null, {}, {});
     await ProjectService().deleteProject(p.id);
     widget.onReload?.call();
   }
@@ -1859,11 +1949,16 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       pid = _peId!;
     }
     final byId = _containersById();
-    final members = _peMembers
+    final includes = _peIncludes
         .map((id) => byId[id]?.endpoint)
         .whereType<LinkEndpoint>()
         .toList();
-    await ProjectService().setMembers(pid, members);
+    final excludes = _peExcludes
+        .map((id) => byId[id]?.endpoint)
+        .whereType<LinkEndpoint>()
+        .toList();
+    await ProjectService()
+        .setMembers(pid, includes: includes, excludes: excludes);
     if (!mounted) return;
     setState(() => _editingProject = false);
     widget.onReload?.call();
@@ -1915,7 +2010,9 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
-            child: Text('Check the items to include (${_peMembers.length})',
+            child: Text(
+                'Check a section or notebook to include everything in it — '
+                'new items join automatically; uncheck any to exclude it',
                 style: TextStyle(fontSize: 11.5, color: palette.textDim)),
           ),
           Divider(height: 1, color: palette.border),
@@ -2214,7 +2311,12 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       {bool editMode = false}) {
     final isLinkSource = _linkFrom?.id == g.id;
     final selfHidden = c.hiddenContainers.contains(g.id);
-    final member = _peMembers.contains(g.id);
+    final member = editMode && _peEffective(g.id);
+    // A checked row whose membership comes from an ancestor (not its own marker)
+    // is drawn dimmer, so it reads as "included via its parent" rather than an
+    // explicit pick.
+    final memberInherited =
+        member && !_peIncludes.contains(g.id) && !_peExcludes.contains(g.id);
     final highlighted = hlIds.contains(g.id);
     final color = AppPalette.identityColor(g.id);
     return MouseRegion(
@@ -2224,7 +2326,7 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
       },
       child: InkWell(
         onTap: () => editMode
-            ? _toggleMemberCascade(g)
+            ? _toggleMember(g)
             : (_linkMode ? _pickForLink(g) : c.focusContainer(g.id)),
         child: Container(
           color: isLinkSource
@@ -2287,7 +2389,11 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   width: 34,
                   child: Checkbox(
                     value: member,
-                    onChanged: (_) => _toggleMemberCascade(g),
+                    // Inherited-from-parent checks read dimmer than explicit ones.
+                    fillColor: memberInherited
+                        ? WidgetStatePropertyAll(palette.textDim)
+                        : null,
+                    onChanged: (_) => _toggleMember(g),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -2314,14 +2420,39 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
 
   /// Build-mode selection cascades: checking a container selects its whole
   /// subtree; you can then uncheck individual descendants.
-  void _toggleMemberCascade(GraphContainer g) {
-    final ids = _subtreeIds(g);
-    final adding = !_peMembers.contains(g.id);
+  /// Effective build-mode membership of [id] — nearest choice over its ancestry
+  /// wins (an include/exclude on a nearer container beats a farther one).
+  bool _peEffective(String id) {
+    for (final a in c.ancestorsOf(id)) {
+      if (_peExcludes.contains(a)) return false;
+      if (_peIncludes.contains(a)) return true;
+    }
+    return false;
+  }
+
+  /// What [id] would inherit from its ancestors alone (ignoring its own marker)
+  /// — so a toggle only needs an explicit marker when it differs from this.
+  bool _peInherited(String id) {
+    for (final a in c.ancestorsOf(id).skip(1)) {
+      if (_peExcludes.contains(a)) return false;
+      if (_peIncludes.contains(a)) return true;
+    }
+    return false;
+  }
+
+  /// Tri-state toggle: flip [g]'s effective membership. Clears any explicit
+  /// markers on [g] and its subtree first (so a parent choice re-governs the
+  /// whole subtree), then writes an explicit include/exclude on [g] only if the
+  /// desired state differs from what it inherits — keeping the record set
+  /// minimal and letting future descendants inherit automatically.
+  void _toggleMember(GraphContainer g) {
+    final desired = !_peEffective(g.id);
     setState(() {
-      if (adding) {
-        _peMembers.addAll(ids);
-      } else {
-        _peMembers.removeAll(ids);
+      final sub = _subtreeIds(g);
+      _peIncludes.removeAll(sub);
+      _peExcludes.removeAll(sub);
+      if (desired != _peInherited(g.id)) {
+        (desired ? _peIncludes : _peExcludes).add(g.id);
       }
     });
   }
@@ -2760,8 +2891,17 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       for (final e in data.edges)
         if (keep.contains(e.aKey) && keep.contains(e.bKey)) e
     ];
-    // The controller adds the dashed same-canvas grouping edges in _rebuildActive.
-    _g.setData(GraphData(nodes: nodes, edges: edges));
+    // Carry the synthesized canvas hubs for the kept canvases so the controller
+    // can both abstract items INTO them and surface them as the weak-link hub
+    // when items are shown (a canvas owning linked items but not itself linked
+    // has no node in `nodes`). The controller decides visibility in
+    // _rebuildActive; it also adds the dashed same-canvas grouping edges there.
+    final absKept = [
+      for (final n in data.abstractCanvasNodes)
+        if (n.canvasId != null && canvasIds.contains(n.canvasId)) n
+    ];
+    _g.setData(
+        GraphData(nodes: nodes, edges: edges, abstractCanvasNodes: absKept));
     _g.setHover(centerKey); // emphasize the center + its neighbors
   }
 

@@ -3,6 +3,9 @@ import 'notebook_service.dart';
 import 'settings_service.dart';
 import 'sync_service.dart';
 
+// Marker deletion (Model A) dispatches to the open canvas or the page file; the
+// standalone-marker test lives in the shared helper.
+
 /// In-memory view over the Connections registry (`links.json`).
 ///
 /// Loaded lazily on first query and re-read only when [SyncService.dataVersion]
@@ -146,6 +149,70 @@ class LinkService {
     r.deletedAt = DateTime.now();
     r.bumpRev(SettingsService().deviceId);
     await _persist();
+  }
+
+  /// Removes connection [id] **and** the on-canvas link markers it dropped on
+  /// either side (Model A: a marker is the connection's visual body — the two
+  /// live and die together). Only *standalone* markers are deleted; an inline
+  /// link inside a larger text box is left alone. Called from the Connections
+  /// sheet's ✕.
+  Future<void> removeLinkAndMarkers(String id) async {
+    await _ensureLoaded();
+    final r = _records[id];
+    if (r == null || r.deletedAt != null) return;
+    r.deletedAt = DateTime.now();
+    r.bumpRev(SettingsService().deviceId);
+    await _persist();
+    await _deleteMarkersOn(r.a);
+    await _deleteMarkersOn(r.b);
+  }
+
+  /// Tombstones the connection backed by the just-deleted marker [markerId] and
+  /// deletes the marker on the OTHER side (this one is already being removed by
+  /// the canvas's own delete op). Called when a standalone marker element is
+  /// deleted on the canvas. No-op if the marker backs no live connection.
+  Future<void> removeLinkForMarker(String markerId) async {
+    await _ensureLoaded();
+    LinkRecord? rec;
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if (r.a.elementIds.contains(markerId) ||
+          r.b.elementIds.contains(markerId)) {
+        rec = r;
+        break;
+      }
+    }
+    if (rec == null) return;
+    rec.deletedAt = DateTime.now();
+    rec.bumpRev(SettingsService().deviceId);
+    await _persist();
+    await _deleteMarkersOn(rec.a, except: markerId);
+    await _deleteMarkersOn(rec.b, except: markerId);
+  }
+
+  /// Deletes the standalone link markers among [e]'s element ids — routed to
+  /// the open canvas's live controller when it's open (its autosave would
+  /// clobber a disk write), else the page file. Skips [except] (the marker the
+  /// caller is already deleting). No-op for non-element endpoints.
+  Future<void> _deleteMarkersOn(LinkEndpoint e, {String? except}) async {
+    if (e.kind != LinkTargetKind.element ||
+        e.sectionId == null ||
+        e.canvasId == null ||
+        e.pageId == null) {
+      return;
+    }
+    final ids = [for (final id in e.elementIds) if (id != except) id];
+    if (ids.isEmpty) return;
+    final handled = await SyncService()
+        .removeMarkersInOpenCanvas(e.canvasId!, e.pageId!, ids);
+    if (handled) return;
+    await NotebookService().removeLinkMarkersFromPage(
+      notebookId: e.notebookId,
+      sectionId: e.sectionId!,
+      canvasId: e.canvasId!,
+      pageId: e.pageId!,
+      elementIds: ids,
+    );
   }
 
   /// Drops the visible reciprocal marker next to an element endpoint [at] —
@@ -294,6 +361,74 @@ class LinkService {
     }
     r.bumpRev(SettingsService().deviceId);
     await _persist();
+  }
+
+  /// When linked elements move to another page **in the same canvas**, corrects
+  /// any connection endpoints that referenced them so the links keep resolving
+  /// to the right page (the Connections list + graph stay accurate). Updates an
+  /// element-endpoint side whose canvasId matches and whose pageId is
+  /// [fromPageId] and whose elementIds intersect [movedIds]. Rev-bumped so the
+  /// fix wins LWW + propagates. No-op when nothing moved.
+  Future<void> remapElementsToPage(
+    Set<String> movedIds, {
+    required String canvasId,
+    required String fromPageId,
+    required String toPageId,
+  }) async {
+    if (movedIds.isEmpty || fromPageId == toPageId) return;
+    await _ensureLoaded();
+    bool hit(LinkEndpoint e) =>
+        e.canvasId == canvasId &&
+        e.pageId == fromPageId &&
+        e.elementIds.any(movedIds.contains);
+    // The FAR endpoint of a touched record is where a marker pointing at the
+    // moved element lives — its URI needs the same page fix. Collect the ones
+    // on OTHER canvases (the moved canvas's own markers are rewritten in memory
+    // by the controller, whole-canvas).
+    final farMarkers = <LinkEndpoint>[];
+    var changed = false;
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      var touched = false;
+      if (hit(r.a)) {
+        farMarkers.add(r.b);
+        r.a = r.a.withPage(toPageId);
+        touched = true;
+      }
+      if (hit(r.b)) {
+        farMarkers.add(r.a);
+        r.b = r.b.withPage(toPageId);
+        touched = true;
+      }
+      if (touched) {
+        r.bumpRev(SettingsService().deviceId);
+        changed = true;
+      }
+    }
+    if (changed) await _persist();
+    // Fix each far marker's embedded URI (open canvas in a split → in memory;
+    // else the page file). The record gives its exact location, so no scan.
+    for (final o in farMarkers) {
+      if (o.canvasId == null ||
+          o.sectionId == null ||
+          o.pageId == null ||
+          o.canvasId == canvasId) {
+        continue;
+      }
+      final handled = await SyncService().remapMarkerUrisInOpenCanvas(
+          o.canvasId!, o.pageId!, movedIds, canvasId, fromPageId, toPageId);
+      if (handled) continue;
+      await NotebookService().remapLinkMarkerUrisOnPage(
+        notebookId: o.notebookId,
+        sectionId: o.sectionId!,
+        canvasId: o.canvasId!,
+        pageId: o.pageId!,
+        movedIds: movedIds,
+        movedCanvasId: canvasId,
+        fromPage: fromPageId,
+        toPage: toPageId,
+      );
+    }
   }
 
   /// Tombstones the connection between exactly [a] and [b] (either order),

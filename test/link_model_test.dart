@@ -102,6 +102,69 @@ void main() {
     });
   });
 
+  group('remapLinkUriPage (move a linked element between pages)', () {
+    const uri =
+        'omninote://link/n/nb/s/s1/c/c1/p/pageA/e/elem1';
+    test('rewrites the page when a referenced element moved', () {
+      final out = remapLinkUriPage(uri,
+          movedIds: {'elem1'},
+          canvasId: 'c1',
+          fromPage: 'pageA',
+          toPage: 'pageB');
+      expect(out, 'omninote://link/n/nb/s/s1/c/c1/p/pageB/e/elem1');
+    });
+
+    test('leaves URIs for other canvases / pages / elements alone', () {
+      // wrong canvas
+      expect(
+          remapLinkUriPage(uri,
+              movedIds: {'elem1'},
+              canvasId: 'OTHER',
+              fromPage: 'pageA',
+              toPage: 'pageB'),
+          isNull);
+      // wrong from-page
+      expect(
+          remapLinkUriPage(uri,
+              movedIds: {'elem1'},
+              canvasId: 'c1',
+              fromPage: 'pageZ',
+              toPage: 'pageB'),
+          isNull);
+      // element not among the moved ids
+      expect(
+          remapLinkUriPage(uri,
+              movedIds: {'somethingElse'},
+              canvasId: 'c1',
+              fromPage: 'pageA',
+              toPage: 'pageB'),
+          isNull);
+    });
+
+    test('non-link / external strings are ignored', () {
+      expect(
+          remapLinkUriPage('https://example.com',
+              movedIds: {'elem1'},
+              canvasId: 'c1',
+              fromPage: 'pageA',
+              toPage: 'pageB'),
+          isNull);
+    });
+
+    test('withPage keeps every other field', () {
+      const e = LinkEndpoint(
+          notebookId: 'nb',
+          sectionId: 's1',
+          canvasId: 'c1',
+          pageId: 'pageA',
+          elementIds: ['elem1', 'elem2']);
+      final moved = e.withPage('pageB');
+      expect(moved.pageId, 'pageB');
+      expect(moved.canvasId, 'c1');
+      expect(moved.elementIds, ['elem1', 'elem2']);
+    });
+  });
+
   group('LinkRecord json', () {
     test('round-trips with envelope, label and name snapshots', () {
       final rec = LinkRecord(

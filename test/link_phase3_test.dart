@@ -215,4 +215,64 @@ void main() {
       expect(runs.last.link, isNull); // trailing space is plain
     });
   });
+
+  group('setLinkOnRuns (link a selected span)', () {
+    test('links the middle range, keeping surrounding text plain', () {
+      final out = setLinkOnRuns([_run('one two three')], 4, 7,
+          'omninote://link/n/nb/s/s/c/cv');
+      expect(out.map((r) => r.text).join(), 'one two three');
+      final linked = out.where((r) => r.link != null).toList();
+      expect(linked.length, 1);
+      expect(linked.single.text, 'two');
+      expect(out.first.link, isNull);
+      expect(out.last.link, isNull);
+    });
+
+    test('preserves per-run styles across the boundary', () {
+      final out = setLinkOnRuns(
+          [_run('ab', bold: true), _run('cd')], 1, 3, 'x://y');
+      // 'a'(bold) | 'b'(bold,link) | 'c'(link) | 'd'
+      expect(out.map((r) => r.text).join(), 'abcd');
+      expect(out[0].text, 'a');
+      expect(out[0].bold, isTrue);
+      expect(out[0].link, isNull);
+      final linked = out.where((r) => r.link == 'x://y').toList();
+      expect(linked.map((r) => r.text).join(), 'bc');
+      expect(linked.first.bold, isTrue); // 'b' kept its bold
+    });
+
+    test('empty range is a no-op', () {
+      final input = [_run('hello')];
+      expect(identical(setLinkOnRuns(input, 3, 3, 'x'), input), isTrue);
+    });
+  });
+
+  group('CanvasController link on selection / at caret', () {
+    test('applyLinkToRange hyperlinks the selected text, keeping it', () {
+      final el = _el([_run('buy milk today')]);
+      final c = _controller(el);
+      c.applyLinkToRange('p1', 'el1', 4, 8, 'omninote://link/n/nb/s/s/c/cv');
+      final now = c.pages['p1']!.objects.whereType<TextElement>().first;
+      expect(now.text, 'buy milk today'); // text unchanged
+      final linkRun = now.runs.firstWhere((r) => r.link != null);
+      expect(linkRun.text, 'milk');
+      expect(linkRun.link, 'omninote://link/n/nb/s/s/c/cv');
+      c.undo();
+      final reverted = c.pages['p1']!.objects.whereType<TextElement>().first;
+      expect(reverted.runs.every((r) => r.link == null), isTrue);
+    });
+
+    test('insertLinkAtCaret inserts a link + space at the caret', () {
+      final el = _el([_run('see ')]);
+      final c = _controller(el);
+      c.insertLinkAtCaret(
+          'p1', 'el1', 4, 'My canvas', 'omninote://link/n/nb/s/s/c/cv');
+      final now = c.pages['p1']!.objects.whereType<TextElement>().first;
+      expect(now.text, 'see My canvas ');
+      final linkRun = now.runs.firstWhere((r) => r.link != null);
+      expect(linkRun.text, 'My canvas');
+      c.undo();
+      expect(c.pages['p1']!.objects.whereType<TextElement>().first.text, 'see ');
+    });
+  });
 }

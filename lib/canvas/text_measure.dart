@@ -180,6 +180,41 @@ List<TextRun> replaceRunRange(
   ];
 }
 
+/// Returns [runs] with the character range `[start, end)` carrying [uri] as its
+/// link (null clears it), splitting runs at the boundaries and preserving every
+/// other style. Used to hyperlink a **selected span** of text while keeping its
+/// existing per-run formatting (the text toolbar's "add link" on a selection).
+List<TextRun> setLinkOnRuns(
+    List<TextRun> runs, int start, int end, String? uri) {
+  if (start >= end) return runs;
+  final out = <TextRun>[];
+  var pos = 0;
+  for (final run in runs) {
+    final rStart = pos;
+    final rEnd = pos + run.text.length;
+    pos = rEnd;
+    if (rEnd <= start || rStart >= end) {
+      out.add(run); // fully outside the range
+      continue;
+    }
+    final localStart = start > rStart ? start - rStart : 0;
+    final localEnd = end < rEnd ? end - rStart : run.text.length;
+    if (localStart > 0) {
+      out.add(run.clone()..text = run.text.substring(0, localStart));
+    }
+    out.add(run.clone()
+      ..text = run.text.substring(localStart, localEnd)
+      ..link = uri);
+    if (localEnd < run.text.length) {
+      out.add(run.clone()..text = run.text.substring(localEnd));
+    }
+  }
+  return [
+    for (final r in out)
+      if (r.text.isNotEmpty) r
+  ];
+}
+
 /// One always-visible ✎ edit affordance per link run: the small square where
 /// the pencil is drawn (page-local, like [selectionRectsForElement]'s rects),
 /// anchored just past the run's last laid-out box. The painter draws a glyph

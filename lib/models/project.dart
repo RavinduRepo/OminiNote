@@ -83,6 +83,14 @@ class ProjectItem {
   final String projectId;
   LinkEndpoint endpoint;
 
+  /// When true this record *excludes* [endpoint] from the project rather than
+  /// including it — the per-item override that lets you uncheck one canvas under
+  /// a whole-section (inherited) include. Membership is decided nearest-first
+  /// over the container ancestry, so a nearer exclude beats a farther include
+  /// (and vice-versa). Defaults false (a plain include) — legacy records with no
+  /// `ex` flag load as includes, so old projects keep working.
+  bool excluded;
+
   ProjectItem({
     this.schemaVersion = 1,
     required this.id,
@@ -92,6 +100,7 @@ class ProjectItem {
     this.deletedAt,
     required this.projectId,
     required this.endpoint,
+    this.excluded = false,
   }) : updatedAt = updatedAt ?? DateTime.now();
 
   void bumpRev(String newDeviceId) {
@@ -110,6 +119,8 @@ class ProjectItem {
         'deletedAt': deletedAt?.millisecondsSinceEpoch,
         'projectId': projectId,
         'ep': endpoint.toUri(),
+        // Omitted when false so include records stay byte-stable vs. old data.
+        if (excluded) 'ex': true,
       };
 
   static ProjectItem? tryFromJson(Map<String, dynamic> json) {
@@ -130,6 +141,7 @@ class ProjectItem {
           : null,
       projectId: projectId,
       endpoint: ep,
+      excluded: json['ex'] == true,
     );
   }
 }

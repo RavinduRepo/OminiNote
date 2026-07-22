@@ -180,6 +180,39 @@ class LinkEndpoint {
       folderId == other.folderId &&
       elementIds.length == other.elementIds.length &&
       elementIds.toSet().containsAll(other.elementIds);
+
+  /// This endpoint with its [pageId] changed to [newPage] (every other field
+  /// kept). Used to correct an element endpoint when its element is moved to
+  /// another page of the same canvas.
+  LinkEndpoint withPage(String newPage) => LinkEndpoint(
+        notebookId: notebookId,
+        sectionId: sectionId,
+        canvasId: canvasId,
+        pageId: newPage,
+        elementIds: elementIds,
+        bookmarkId: bookmarkId,
+        folderId: folderId,
+        externalUrl: externalUrl,
+      );
+}
+
+/// If [uri] is an internal link endpoint that references any of [movedIds] as an
+/// element on ([canvasId], [fromPage]), returns the same URI with its page
+/// changed to [toPage]; otherwise null (leave it unchanged). Keeps an on-canvas
+/// link marker/run pointing at the right page after a linked element is moved
+/// between pages of the same canvas. Pure — unit-tested.
+String? remapLinkUriPage(
+  String uri, {
+  required Set<String> movedIds,
+  required String canvasId,
+  required String fromPage,
+  required String toPage,
+}) {
+  final ep = LinkEndpoint.tryParse(uri);
+  if (ep == null) return null;
+  if (ep.canvasId != canvasId || ep.pageId != fromPage) return null;
+  if (!ep.elementIds.any(movedIds.contains)) return null;
+  return ep.withPage(toPage).toUri();
 }
 
 /// One two-way connection between endpoints [a] and [b]. Carries the standard

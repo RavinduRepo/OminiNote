@@ -56,12 +56,13 @@ class ProjectService {
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
   }
 
-  /// The alive member endpoints of [projectId].
-  Future<List<LinkEndpoint>> itemsOf(String projectId) async {
+  /// The alive membership records of [projectId] — includes AND excludes (read
+  /// `.excluded` to tell them apart). Container inheritance is applied by the
+  /// caller (the graph controller walks each node's ancestry against these).
+  Future<List<ProjectItem>> membersOf(String projectId) async {
     await _ensureLoaded();
     return _items.values
         .where((i) => i.deletedAt == null && i.projectId == projectId)
-        .map((i) => i.endpoint)
         .toList();
   }
 
@@ -99,21 +100,36 @@ class ProjectService {
     await _persist();
   }
 
-  /// Replaces [projectId]'s membership with the given container endpoints
-  /// (keyed by [LinkEndpoint.leafId]) — adds new ones, tombstones removed ones,
-  /// revives previously-removed matches. Used by the build-mode save.
-  Future<void> setMembers(String projectId, List<LinkEndpoint> members) async {
+  /// Replaces [projectId]'s membership with the given [includes] + [excludes]
+  /// (container/leaf endpoints keyed by [LinkEndpoint.leafId]) — adds new ones,
+  /// flips an existing record's include/exclude sense in place, tombstones
+  /// removed ones, revives previously-removed matches. Used by the build-mode
+  /// save. An id can be an include OR an exclude, not both (excludes win the
+  /// merge below, but the panel never emits the same id in both lists).
+  Future<void> setMembers(
+    String projectId, {
+    required List<LinkEndpoint> includes,
+    List<LinkEndpoint> excludes = const [],
+  }) async {
     await _ensureLoaded();
-    final wanted = {for (final e in members) e.leafId: e};
-    // Tombstone / revive existing.
+    final wanted = <String, ({LinkEndpoint ep, bool ex})>{};
+    for (final e in includes) {
+      wanted[e.leafId] = (ep: e, ex: false);
+    }
+    for (final e in excludes) {
+      wanted[e.leafId] = (ep: e, ex: true);
+    }
+    // Tombstone / revive / re-sense existing.
     final seen = <String>{};
     for (final i in _items.values) {
       if (i.projectId != projectId) continue;
       final key = i.endpoint.leafId;
-      if (wanted.containsKey(key)) {
+      final w = wanted[key];
+      if (w != null) {
         seen.add(key);
-        if (i.deletedAt != null) {
+        if (i.deletedAt != null || i.excluded != w.ex) {
           i.deletedAt = null;
+          i.excluded = w.ex;
           i.bumpRev(_dev);
         }
       } else if (i.deletedAt == null) {
@@ -128,7 +144,8 @@ class ProjectService {
           id: NotebookService().newId(),
           deviceId: _dev,
           projectId: projectId,
-          endpoint: entry.value);
+          endpoint: entry.value.ep,
+          excluded: entry.value.ex);
       _items[item.id] = item;
     }
     await _persist();

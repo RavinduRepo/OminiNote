@@ -247,6 +247,7 @@ class _CanvasScreenState extends State<CanvasScreen>
       _controller = CanvasController(canvas: widget.canvas, pages: pages)
         ..systemCopyHook = _copySelectionToSystemClipboard
         ..systemPasteFallback = _pasteFromSystemClipboard
+        ..addTextLinkHook = _startTextLink
         ..eraserPartial = SettingsService().eraserPartial
         ..eraserSize = SettingsService().eraserSize;
     });
@@ -984,9 +985,55 @@ class _CanvasScreenState extends State<CanvasScreen>
     final caret = sel.baseOffset;
     if (rc.text.substring(caret - 2, caret) != '[[') return;
 
+    _openLinkPicker(
+      pageId: session.pageId,
+      elementId: session.element.id,
+      caret: caret,
+      bracket: true,
+    );
+  }
+
+  /// The text toolbar's "add link" button. Opens the same picker as the `[[`
+  /// trigger, keyed off the current selection: a collapsed caret inserts the
+  /// target's name as a link (like `[[`); a range hyperlinks the SELECTED text
+  /// (it stays as the clickable display). Works while editing on both layouts.
+  void _startTextLink() {
+    final session = _textEdit;
+    if (session == null) return;
+    final sel = session.controller.selection;
+    if (!sel.isValid) return;
+    if (sel.isCollapsed) {
+      _openLinkPicker(
+          pageId: session.pageId,
+          elementId: session.element.id,
+          caret: sel.baseOffset);
+    } else {
+      _openLinkPicker(
+          pageId: session.pageId,
+          elementId: session.element.id,
+          selStart: sel.start,
+          selEnd: sel.end);
+    }
+  }
+
+  /// Shared link-insert flow for the `[[` trigger and the toolbar button. The
+  /// session is COMMITTED first (a modal picker's taps would kill it anyway),
+  /// then the pick is applied to the committed element by id: a [selStart]/
+  /// [selEnd] range gets the link applied over the selected text; a [bracket]
+  /// caret replaces the `[[` marker; a plain caret inserts the target's name.
+  /// A connection is registered either way (element endpoint → shows in the
+  /// target's Connections list; a pasted element link also drops a reciprocal
+  /// marker).
+  void _openLinkPicker({
+    required String pageId,
+    required String elementId,
+    int? caret,
+    int? selStart,
+    int? selEnd,
+    bool bracket = false,
+  }) {
+    if (_linkPickerBusy) return;
     _linkPickerBusy = true;
-    final pageId = session.pageId;
-    final elementId = session.element.id;
     // Post-frame: committing tears the session down, which must not happen
     // inside the controller's own change notification (same re-entrancy rule
     // as _handleTypingOverflow).
@@ -996,14 +1043,20 @@ class _CanvasScreenState extends State<CanvasScreen>
         return;
       }
       if (_textEdit?.element.id == elementId) _commitTextEdit();
-      showLinkTargetPicker(context).then((r) async {
+      showLinkTargetPicker(context).then((pick) async {
         _linkPickerBusy = false;
-        if (r == null || !mounted) return;
-        final target = endpointOfSearchResult(r);
-        if (target == null) return;
-        _controller?.insertLinkIntoText(
-            pageId, elementId, caret, r.title, target.toUri());
-        await LinkService().addLink(
+        if (pick == null || !mounted) return;
+        final c = _controller;
+        if (c == null) return;
+        final uri = pick.target.toUri();
+        if (selStart != null && selEnd != null) {
+          c.applyLinkToRange(pageId, elementId, selStart, selEnd, uri);
+        } else if (bracket && caret != null) {
+          c.insertLinkIntoText(pageId, elementId, caret, pick.title, uri);
+        } else if (caret != null) {
+          c.insertLinkAtCaret(pageId, elementId, caret, pick.title, uri);
+        }
+        await LinkService().addLinkWithReciprocalMarker(
           from: LinkEndpoint(
             notebookId: widget.canvas.notebookId,
             sectionId: widget.canvas.sectionId,
@@ -1011,9 +1064,9 @@ class _CanvasScreenState extends State<CanvasScreen>
             pageId: pageId,
             elementIds: [elementId],
           ),
-          to: target,
+          to: pick.target,
           fromName: 'Link in ${widget.canvas.name}',
-          toName: r.title,
+          toName: pick.title,
         );
       });
     });

@@ -271,11 +271,14 @@ Applied in `GraphController._rebuildActive` / `_passesFilter`:
   canvas's items clustered/visible.
 - **Tag filter** (`tagInclude` / `tagExclude` / `tagMatchAll`): each chip cycles
   off→include→exclude; includes combine by ANY/ALL, excludes always remove.
-- **Project scope** (`activeProjectId`): restricts to the project's members
-  (`_inActiveProject` on the node's deepest id); container checkboxes still apply
-  on top; activating clears `hiddenContainers` so all start shown;
-  `projectPlusLinks` also pulls in members' one-hop neighbors. When a project is
-  active the Filter-items tree is scoped to its members (`_inProjectSubtree`).
+- **Project scope** (`activeProjectId`): restricts to the project's members —
+  `_inActiveProject` resolves the node's deepest container against the project's
+  inherited include/exclude sets ([§13](#13-projects), nearest-ancestor wins),
+  so a new item under a selected section is scoped in automatically; container
+  checkboxes still apply on top; activating clears `hiddenContainers` so all
+  start shown; `projectPlusLinks` also pulls in members' one-hop neighbors. When
+  a project is active the Filter-items tree is scoped to its members
+  (`_inProjectSubtree`, which also honors inheritance).
 
 Any change auto-fits the graph (debounced) via `onContentChanged`.
 
@@ -293,8 +296,11 @@ Reusable **name-only** labels on any of the 8 item kinds; **synced**.
   `deleteTag` (tombstones the def **and** all its assignments), `assign`,
   `unassign`.
 - **Item side:** a **Tags strip** in the Connections sheet (chips + ✕ + "＋
-  Add tag") → `tag_manager_sheet.dart` (attach existing / create / rename /
-  delete).
+  Add tag") → `tag_manager_sheet.dart`. **Seamless search-or-create (07/22/26):**
+  one search field filters existing tags as you type; when the typed name isn't
+  an existing tag a **"Create «name»"** row appears (Enter also creates-or-
+  reuses, case-insensitively — no duplicate same-named tags). Each listed tag
+  still has attach-checkbox / rename / delete.
 - **Graph side:** the "Tags" filter section (chips cycle off/include/exclude +
   ANY/ALL + Clear). Filter-only here — no create/delete.
 - Assignments reuse the `omninote://link/...` endpoint URIs (no new addressing).
@@ -307,18 +313,37 @@ Named, **graph-side, synced** saved selections of items (invisible from the item
 side — the contrast with tags).
 
 - **Storage:** store-root `projects.json` — `ProjectDef` (`t:'pd'`) +
-  `ProjectItem` (`t:'pi'`, projectId + endpoint). (`lib/models/project.dart`)
-- **`ProjectService`:** `allProjects`, `itemsOf`, `createProject`,
-  `renameProject`, `deleteProject`, `setMembers` (unions/tombstones membership).
+  `ProjectItem` (`t:'pi'`, projectId + endpoint + an **`ex`** flag: an
+  *exclude* record when true, else an include). (`lib/models/project.dart`)
+- **`ProjectService`:** `allProjects`, `membersOf` (alive include+exclude
+  records), `createProject`, `renameProject`, `deleteProject`,
+  `setMembers(includes:, excludes:)` (unions/tombstones membership; flips an
+  existing record's include/exclude sense in place).
+- **Membership is CONTAINER-INHERITING (07/22/26).** Checking a section/notebook
+  includes it **and everything under it — now and future**; a canvas added later
+  under a checked section is a member with no record of its own. Resolution walks
+  each node's container **ancestry nearest-first** (`isProjectMember` /
+  `_inActiveProject` in the controller; the panel's `_peEffective`) — a nearer
+  include/exclude beats a farther one. So unchecking one canvas under a checked
+  section writes an **exclude** record for just it (`_peExcludes`), and
+  re-checking it clears the exclude (inherits again — no marker kept). The
+  controller builds a `containerId → [self…notebook]` **ancestor map** from the
+  store structure (`_buildAncestors` in `setStructure`) so real folder/group
+  nesting is honored, which endpoint URIs alone don't encode. Only two sets are
+  stored (`_projIncludes`/`_projExcludes`), minimal — descendants inherit.
 - **Build mode** (in the panel): "New project" → a name field + the full tree
-  with **membership checkboxes that cascade** (check a section → all its
-  canvases; then uncheck individuals). Membership keys off each node's **own
-  deepest container**, so unchecking a canvas under a selected section excludes
-  exactly it.
+  with **tri-state checkboxes** — a check driven by an ancestor (inherited)
+  renders **dimmer** than an explicit one; tapping a row (`_toggleMember`) clears
+  its subtree's explicit markers then writes an explicit include/exclude only
+  when the desired state differs from what it inherits.
 - **Activate** a project → the graph scopes to it ([§11](#11-filtering--scoping-model));
   an "Include linked neighbors" toggle and a project-scoped "Show items without
   links" toggle appear. Members show even if unlinked. Containers-only, but
   inside-canvas items follow the usual link-only + abstract rule.
+- **Known limit:** membership is container-level (notebook/section/folder/
+  canvas); you can't add a single inside-canvas item to a project independent of
+  its canvas. A canvas selected via its parent **canvas-folder** inherits only if
+  the folder id is on its ancestry chain (it is, via the structure map).
 
 ---
 

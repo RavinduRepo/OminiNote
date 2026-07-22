@@ -32,7 +32,8 @@ class _TagManager extends StatefulWidget {
 }
 
 class _TagManagerState extends State<_TagManager> {
-  final _newCtrl = TextEditingController();
+  final _searchCtrl = TextEditingController();
+  String _query = '';
   List<TagDef>? _all;
   Set<String> _assigned = {};
 
@@ -44,7 +45,7 @@ class _TagManagerState extends State<_TagManager> {
 
   @override
   void dispose() {
-    _newCtrl.dispose();
+    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -58,12 +59,19 @@ class _TagManagerState extends State<_TagManager> {
     });
   }
 
-  Future<void> _createAndAttach() async {
-    final name = _newCtrl.text.trim();
-    if (name.isEmpty) return;
-    final def = await TagService().createTag(name);
+  /// Attaches the tag named [name] — reusing an existing same-named tag
+  /// (case-insensitive) instead of creating a duplicate, else creating it. The
+  /// seamless search-or-create: type a name, tap it if it exists, or create it.
+  Future<void> _createAndAttach(String name) async {
+    final n = name.trim();
+    if (n.isEmpty) return;
+    final existing = (_all ?? const <TagDef>[])
+        .where((t) => t.name.toLowerCase() == n.toLowerCase());
+    final def =
+        existing.isNotEmpty ? existing.first : await TagService().createTag(n);
     await TagService().assign(def.id, widget.endpoint);
-    _newCtrl.clear();
+    _searchCtrl.clear();
+    _query = '';
     await _reload();
   }
 
@@ -129,6 +137,12 @@ class _TagManagerState extends State<_TagManager> {
     final palette = Theme.of(context).extension<AppPalette>()!;
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final all = _all;
+    final q = _query.trim();
+    final ql = q.toLowerCase();
+    final filtered = (all == null || q.isEmpty)
+        ? (all ?? const <TagDef>[])
+        : all.where((t) => t.name.toLowerCase().contains(ql)).toList();
+    final exact = all != null && all.any((t) => t.name.toLowerCase() == ql);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 12, 12),
       child: Column(
@@ -149,45 +163,52 @@ class _TagManagerState extends State<_TagManager> {
               style: TextStyle(
                   fontSize: 13, fontWeight: FontWeight.w600, color: palette.textDim)),
           const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _newCtrl,
-                  textInputAction: TextInputAction.done,
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    hintText: 'New tag name',
-                  ),
-                  onSubmitted: (_) => _createAndAttach(),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: _createAndAttach,
-                child: const Text('Add'),
-              ),
-            ],
+          TextField(
+            controller: _searchCtrl,
+            autofocus: true,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(
+              isDense: true,
+              hintText: 'Search or create a tag',
+              prefixIcon: Icon(Icons.search, size: 20),
+            ),
+            onChanged: (v) => setState(() => _query = v),
+            onSubmitted: _createAndAttach,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
+          // When the typed name isn't an existing tag, offer to create it —
+          // the seamless "not found → make it" path.
+          if (all != null && q.isNotEmpty && !exact)
+            ListTile(
+              dense: true,
+              leading: Icon(Icons.add, size: 20, color: palette.accent),
+              title: Text('Create “$q”',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 14, color: palette.accent)),
+              onTap: () => _createAndAttach(q),
+            ),
           if (all == null)
             const Padding(
               padding: EdgeInsets.all(20),
               child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
             )
-          else if (all.isEmpty)
+          else if (filtered.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
-              child: Text('No tags yet — create one above.',
+              child: Text(
+                  q.isEmpty
+                      ? 'No tags yet — type a name to create one.'
+                      : (exact ? 'No other matching tags.' : 'No matching tags.'),
                   style: TextStyle(fontSize: 13, color: palette.textDim)),
             )
           else
             Flexible(
               child: ListView.builder(
                 shrinkWrap: true,
-                itemCount: all.length,
+                itemCount: filtered.length,
                 itemBuilder: (_, i) {
-                  final t = all[i];
+                  final t = filtered[i];
                   final on = _assigned.contains(t.id);
                   return Row(
                     children: [

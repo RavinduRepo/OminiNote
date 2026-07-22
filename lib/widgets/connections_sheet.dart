@@ -221,11 +221,9 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   Future<void> _chooseTarget() async {
-    final r = await showLinkTargetPicker(context);
-    if (r == null || !mounted) return;
-    final target = endpointOfSearchResult(r);
-    if (target == null) return;
-    await _addTarget(target);
+    final pick = await showLinkTargetPicker(context);
+    if (pick == null || !mounted) return;
+    await _addTarget(pick.target);
   }
 
   Future<void> _addTarget(LinkEndpoint target) async {
@@ -282,7 +280,9 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   Future<void> _remove(LinkRecord r) async {
-    await LinkService().removeLink(r.id);
+    // Model A: removing a connection also deletes its on-canvas link markers on
+    // both sides (a marker is the connection's visual body).
+    await LinkService().removeLinkAndMarkers(r.id);
     await _load();
     _toast('Connection removed from both items.');
   }

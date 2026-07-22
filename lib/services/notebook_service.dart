@@ -14,6 +14,7 @@ import '../models/link.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
+import '../utils/link_markers.dart';
 import 'pdf_exporter.dart';
 import 'settings_service.dart';
 import 'sync_service.dart';
@@ -1551,6 +1552,104 @@ class NotebookService {
     page.objects.add(el);
     await savePage(canvas, page);
     return el.id;
+  }
+
+  /// Tombstones any standalone link-markers among [elementIds] on a page file
+  /// (the reciprocal-marker cleanup when that canvas is NOT open — mirrors
+  /// [addLinkMarkerToPage]). Uses the object-delete tombstone so the removal
+  /// syncs like any element delete. Only markers are touched; real content
+  /// referenced by [elementIds] is left in place.
+  Future<void> removeLinkMarkersFromPage({
+    required String notebookId,
+    required String sectionId,
+    required String canvasId,
+    required String pageId,
+    required List<String> elementIds,
+  }) async {
+    final canvas = await getCanvas(notebookId, sectionId, canvasId);
+    if (canvas == null) return;
+    final file = _pageFile(canvas, pageId);
+    if (!await file.exists()) return;
+    CanvasPage page;
+    try {
+      page = CanvasPage.fromJson(
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>);
+    } catch (_) {
+      return;
+    }
+    if (page.deletedAt != null || page.purgedAt != null) return;
+    final ids = elementIds.toSet();
+    final markers = page.objects
+        .where((o) => ids.contains(o.id) && standaloneMarkerUri(o) != null)
+        .toList();
+    if (markers.isEmpty) return;
+    final dev = SettingsService().deviceId;
+    final markerIds = {for (final m in markers) m.id};
+    for (final el in markers) {
+      page.deletedObjects.removeWhere((e) => e.strokeId == el.id);
+      page.deletedObjects.add(EraseTombstone(
+        strokeId: el.id,
+        rev: el.rev,
+        erasedAt: DateTime.now(),
+        deviceId: dev,
+      ));
+    }
+    page.objects.removeWhere((o) => markerIds.contains(o.id));
+    await savePage(canvas, page);
+  }
+
+  /// Rewrites link-run URIs on a page file that point at a moved element
+  /// (`[movedCanvasId]/[fromPage]/<a moved id>`) to reference [toPage] instead —
+  /// the cross-canvas half of "a linked item moved pages": the marker on the
+  /// OTHER (closed) canvas keeps pointing at the item. Mirrors
+  /// [removeLinkMarkersFromPage]'s disk path; the record pinpoints this page, so
+  /// no store-wide scan. Element revs bumped so the fix syncs.
+  Future<void> remapLinkMarkerUrisOnPage({
+    required String notebookId,
+    required String sectionId,
+    required String canvasId,
+    required String pageId,
+    required Set<String> movedIds,
+    required String movedCanvasId,
+    required String fromPage,
+    required String toPage,
+  }) async {
+    final canvas = await getCanvas(notebookId, sectionId, canvasId);
+    if (canvas == null) return;
+    final file = _pageFile(canvas, pageId);
+    if (!await file.exists()) return;
+    CanvasPage page;
+    try {
+      page = CanvasPage.fromJson(
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>);
+    } catch (_) {
+      return;
+    }
+    if (page.deletedAt != null || page.purgedAt != null) return;
+    final dev = SettingsService().deviceId;
+    var changed = false;
+    for (final el in page.objects) {
+      if (el is! TextElement) continue;
+      var elChanged = false;
+      for (final run in el.runs) {
+        final link = run.link;
+        if (link == null) continue;
+        final next = remapLinkUriPage(link,
+            movedIds: movedIds,
+            canvasId: movedCanvasId,
+            fromPage: fromPage,
+            toPage: toPage);
+        if (next != null) {
+          run.link = next;
+          elChanged = true;
+        }
+      }
+      if (elChanged) {
+        el.bumpRev(dev);
+        changed = true;
+      }
+    }
+    if (changed) await savePage(canvas, page);
   }
 
   Future<void> deletePageFile(Canvas canvas, String pageId) async {
