@@ -32,6 +32,11 @@ class GraphSimNode {
   /// folded into it.
   int activeDegree = 0;
 
+  /// Pinned in place by the user (dragged and dropped): held fixed, excluded
+  /// from the force integration so it stays exactly where placed instead of
+  /// springing back. Preserved across rebuilds by key.
+  bool fixed = false;
+
   GraphSimNode(this.data, this.pos);
 }
 
@@ -55,6 +60,23 @@ class GraphController extends ChangeNotifier {
   /// node (edges rewired + deduped) for a cleaner view; when false each
   /// inside-canvas item shows individually.
   bool abstractInsideItems = true;
+
+  /// Local-graph mode: when [centerKey] is set, [_rebuildActive] restricts the
+  /// visible graph to nodes within [depthLimit] hops of it (BFS over the visible
+  /// edges) plus each kept node's same-canvas cluster — so the local graph is
+  /// exactly THIS global graph, scoped to a neighborhood. Null = global (no
+  /// restriction). The painter draws a ring on the center node.
+  String? centerKey;
+  int? depthLimit;
+
+  /// Focuses the graph on [key] with a [depth]-hop neighborhood (local-graph
+  /// mode), or clears it (null [key]) for the full global graph.
+  void setCenter(String? key, int? depth) {
+    if (centerKey == key && depthLimit == depth) return;
+    centerKey = key;
+    depthLimit = depth;
+    _rebuildActive();
+  }
 
   /// Show external-URL nodes.
   bool showExternal = true;
@@ -133,6 +155,7 @@ class GraphController extends ChangeNotifier {
   double labelOpacity = 0.95; // 0.15–1.0 (node text transparency)
   bool alwaysShowLabels = false; // keep labels visible however far you zoom out
   bool sameCanvasLinks = true; // dashed grouping links among same-canvas items
+  bool pinOnDrag = false; // dragging a node pins it in place (off = springs back)
 
   GraphController() {
     // Seed appearance + view toggles from device-local settings.
@@ -144,6 +167,7 @@ class GraphController extends ChangeNotifier {
     labelOpacity = s.graphLabelOpacity;
     alwaysShowLabels = s.graphAlwaysLabels;
     sameCanvasLinks = s.graphSameCanvasLinks;
+    pinOnDrag = s.graphPinOnDrag;
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
     showUnlinked = s.graphShowUnlinked;
@@ -419,6 +443,60 @@ class GraphController extends ChangeNotifier {
       }
     }
 
+    // Local-graph mode: keep only the [depthLimit]-hop neighborhood of
+    // [centerKey] (BFS over the visible edges), plus each kept node's
+    // same-canvas cluster (so a canvas's group stays intact). The center always
+    // shows. Off (null) → the whole global graph, unchanged.
+    final ck = centerKey;
+    final depth = depthLimit;
+    if (ck != null && depth != null) {
+      final center = remap(ck);
+      final adj = <String, Set<String>>{};
+      for (final e in _all.edges) {
+        final a = remap(e.aKey), b = remap(e.bKey);
+        if (a == b) continue;
+        if (!visibleKeys.contains(a) || !visibleKeys.contains(b)) continue;
+        adj.putIfAbsent(a, () => {}).add(b);
+        adj.putIfAbsent(b, () => {}).add(a);
+      }
+      // Seed with the center; if it IS a canvas, also its inside items, so the
+      // canvas's aggregate cluster is present (matches the Connections menu).
+      final seeds = <String>{center};
+      final cd = lookup[ck];
+      if (cd != null &&
+          cd.canvasId != null &&
+          (cd.leafId == cd.canvasId || cd.kind == LinkTargetKind.canvas)) {
+        for (final k in visibleKeys) {
+          if (lookup[k]?.canvasId == cd.canvasId) seeds.add(k);
+        }
+      }
+      final keep = <String>{...seeds};
+      var frontier = <String>{...seeds};
+      for (var d = 0; d < depth && frontier.isNotEmpty; d++) {
+        final next = <String>{};
+        for (final k in frontier) {
+          for (final nb in adj[k] ?? const <String>{}) {
+            if (keep.add(nb)) next.add(nb);
+          }
+        }
+        frontier = next;
+      }
+      final canvasIds = <String>{};
+      for (final k in keep) {
+        final cid = lookup[k]?.canvasId;
+        if (cid != null) canvasIds.add(cid);
+      }
+      if (canvasIds.isNotEmpty) {
+        for (final k in visibleKeys) {
+          final cid = lookup[k]?.canvasId;
+          if (cid != null && canvasIds.contains(cid)) keep.add(k);
+        }
+      }
+      keep.add(center);
+      visibleKeys.removeWhere((k) => !keep.contains(k));
+      if (lookup[center] != null) visibleKeys.add(center);
+    }
+
     final rnd = math.Random(7);
     var i = 0;
     for (final key in visibleKeys) {
@@ -430,7 +508,10 @@ class GraphController extends ChangeNotifier {
                   math.sin(i * 2.399) * (30 + i * 6)) +
               Offset(rnd.nextDouble() * 8, rnd.nextDouble() * 8);
       final sim = GraphSimNode(data, pos);
-      if (prev != null) sim.vel = prev.vel;
+      if (prev != null) {
+        sim.vel = prev.vel;
+        sim.fixed = prev.fixed; // keep a user-pinned node pinned across rebuilds
+      }
       _nodes.add(sim);
       _byKey[key] = sim;
       i++;
@@ -711,7 +792,9 @@ class GraphController extends ChangeNotifier {
     // Integrate.
     var maxSpeed = 0.0;
     for (final a in _nodes) {
-      if (identical(a, _pinned)) {
+      // The actively-dragged node and user-pinned nodes stay put (excluded
+      // from integration) — this is what lets you place a node freely.
+      if (identical(a, _pinned) || a.fixed) {
         a.vel = Offset.zero;
         continue;
       }
@@ -920,8 +1003,44 @@ class GraphController extends ChangeNotifier {
   }
 
   void endDrag() {
+    // With "pin nodes on drag" on, dropping a node keeps it where placed (it no
+    // longer springs back); clearFixed releases them. Off (default) → the node
+    // rejoins the force layout as before.
+    if (pinOnDrag) _pinned?.fixed = true;
     _pinned = null;
     onWake?.call();
+  }
+
+  void setPinOnDrag(bool v, {bool persist = true}) {
+    if (pinOnDrag == v) return;
+    pinOnDrag = v;
+    if (!v) {
+      for (final n in _nodes) {
+        n.fixed = false;
+      }
+      onWake?.call();
+    }
+    notifyListeners();
+    if (persist) SettingsService().saveGraphSettings(pinOnDrag: v);
+  }
+
+  /// Releases a single node back into the force layout (double-tap).
+  void unfix(GraphSimNode node) {
+    if (!node.fixed) return;
+    node.fixed = false;
+    onWake?.call();
+  }
+
+  /// Releases every pinned node — the "re-layout" action.
+  void clearFixed() {
+    var any = false;
+    for (final n in _nodes) {
+      if (n.fixed) {
+        n.fixed = false;
+        any = true;
+      }
+    }
+    if (any) onWake?.call();
   }
 
   void setHover(String? key) {
@@ -1509,7 +1628,8 @@ class _GraphPainter extends CustomPainter {
       final r = c.radiusOf(node);
       final isHover = d.key == hover;
       final isNeighbor = neighbors.contains(d.key);
-      final dim = hover != null && !isHover && !isNeighbor;
+      final isCenter = c.centerKey != null && d.key == c.centerKey;
+      final dim = hover != null && !isHover && !isNeighbor && !isCenter;
       // Matches a container hovered in the filter tree.
       final treeHit = hlContainer != null &&
           (d.notebookId == hlContainer ||
@@ -1534,6 +1654,19 @@ class _GraphPainter extends CustomPainter {
             r + (treeHit ? 8 : (isHover ? 6 : 3)),
             Paint()..color = palette.accent.withValues(alpha: ha));
       }
+      // Local-graph center: a prominent accent ring (a soft fill + a crisp
+      // stroke), so the focused node reads at a glance — not just a faint glow.
+      if (isCenter) {
+        canvas.drawCircle(sp, r + 9,
+            Paint()..color = palette.accent.withValues(alpha: 0.14));
+        canvas.drawCircle(
+            sp,
+            r + 9,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2.5
+              ..color = palette.accent);
+      }
 
       final fillPaint = Paint()
         ..color = fill
@@ -1552,6 +1685,14 @@ class _GraphPainter extends CustomPainter {
             ..color = (d.externalUrl != null || !d.alive)
                 ? palette.canvas
                 : palette.canvas.withValues(alpha: 0.6));
+
+      // A small dot marks a user-pinned (dragged-in-place) node.
+      if (node.fixed) {
+        canvas.drawCircle(
+            Offset(sp.dx + r * 0.72, sp.dy - r * 0.72),
+            2.4,
+            Paint()..color = palette.accent);
+      }
 
       if (showLabels || isHover || treeHit) {
         _label(canvas, node, sp, r, dim && !treeHit);
@@ -2531,6 +2672,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               (v) => c.setAlwaysShowLabels(v)),
           _toggle(palette, 'Link items in same canvas', c.sameCanvasLinks,
               (v) => c.setSameCanvasLinks(v)),
+          _toggle(palette, 'Pin nodes where you drag them', c.pinOnDrag,
+              (v) => c.setPinOnDrag(v)),
           const SizedBox(height: 4),
         ],
       ],
@@ -2719,7 +2862,9 @@ class LocalGraphController extends ChangeNotifier {
     final n = d.clamp(1, 4);
     if (n != depth) {
       depth = n;
-      _bump();
+      // Depth is a cheap view param — the panel re-scopes the existing data
+      // via GraphController.setCenter; no subgraph refetch needed.
+      notifyListeners();
     }
   }
 
@@ -2813,9 +2958,17 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
 
   void _onLgc() {
     if (mounted) setState(() {});
+    // Apply center + depth to the shared engine (cheap, re-scopes existing
+    // data); a center change also refetches the full graph via _maybeRebuild.
+    _g.setCenter(_lgc.center?.ep.toUri(), _lgc.depth);
     _maybeRebuild();
   }
 
+  /// Feeds the shared engine the WHOLE graph and lets it scope to the center's
+  /// depth-neighborhood (`GraphController.setCenter`) — so the local graph is
+  /// literally the global graph with a depth filter, no bespoke subgraph. Only
+  /// refetches the full graph on a center change (revision); depth changes
+  /// re-scope in memory via [_onLgc].
   Future<void> _maybeRebuild() async {
     if (!_lgc.open || _lgc.revision == _builtRev) return;
     _builtRev = _lgc.revision;
@@ -2823,86 +2976,38 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     if (center == null) return;
     final data = await GraphService().buildGraph();
     if (!mounted || _lgc.revision != _builtRev) return; // superseded
-    final byKey = {for (final n in data.nodes) n.key: n};
     final centerKey = center.ep.toUri();
-    // The center always appears, even with no connections.
-    if (!byKey.containsKey(centerKey)) {
+    // Ensure the center is present even with no connections (an isolated item).
+    var nodes = data.nodes;
+    if (!data.nodes.any((n) => n.key == centerKey)) {
       final ep = center.ep;
       final ext = ep.externalUrl != null;
-      byKey[centerKey] = GraphNode(
-        key: centerKey,
-        title: center.name.isEmpty ? 'Item' : center.name,
-        kind: ep.kind,
-        alive: true,
-        degree: 0,
-        leafId: ep.leafId,
-        externalUrl: ep.externalUrl,
-        color: ext ? null : AppPalette.identityColor(ep.leafId),
-        notebookId: ext ? null : ep.notebookId,
-        sectionId: ep.sectionId,
-        canvasId: ep.canvasId,
-        folderId: ep.folderId,
-      );
+      nodes = [
+        ...data.nodes,
+        GraphNode(
+          key: centerKey,
+          title: center.name.isEmpty ? 'Item' : center.name,
+          kind: ep.kind,
+          alive: true,
+          degree: 0,
+          leafId: ep.leafId,
+          externalUrl: ep.externalUrl,
+          color: ext ? null : AppPalette.identityColor(ep.leafId),
+          notebookId: ext ? null : ep.notebookId,
+          sectionId: ep.sectionId,
+          canvasId: ep.canvasId,
+          folderId: ep.folderId,
+        ),
+      ];
     }
-    // BFS out to depth over the full link graph.
-    final adj = <String, Set<String>>{};
-    for (final e in data.edges) {
-      adj.putIfAbsent(e.aKey, () => {}).add(e.bKey);
-      adj.putIfAbsent(e.bKey, () => {}).add(e.aKey);
-    }
-    // Seed set: the center, plus — when the center IS a canvas — every linked
-    // item inside that canvas (its pages/elements/bookmarks), so the local
-    // graph shows the canvas's aggregate connections, like the Connections menu.
-    final seeds = <String>{centerKey};
-    final ep = center.ep;
-    if (ep.canvasId != null && ep.pageId == null && ep.elementIds.isEmpty) {
-      for (final n in byKey.values) {
-        if (n.canvasId == ep.canvasId) seeds.add(n.key);
-      }
-    }
-    final keep = <String>{...seeds};
-    var frontier = <String>{...seeds};
-    for (var d = 0; d < _lgc.depth && frontier.isNotEmpty; d++) {
-      final next = <String>{};
-      for (final k in frontier) {
-        for (final nb in adj[k] ?? const <String>{}) {
-          if (keep.add(nb)) next.add(nb);
-        }
-      }
-      frontier = next;
-    }
-    // Pull in every same-canvas sibling of any kept node (plus the canvas node),
-    // so a canvas's whole cluster stays present from ANY of its items — the
-    // aggregate no longer vanishes after hopping to one item and back.
-    final canvasIds = <String>{};
-    for (final k in keep) {
-      final cid = byKey[k]?.canvasId;
-      if (cid != null) canvasIds.add(cid);
-    }
-    if (canvasIds.isNotEmpty) {
-      for (final n in byKey.values) {
-        if (n.canvasId != null && canvasIds.contains(n.canvasId)) {
-          keep.add(n.key);
-        }
-      }
-    }
-    final nodes = [for (final k in keep) if (byKey[k] != null) byKey[k]!];
-    final edges = [
-      for (final e in data.edges)
-        if (keep.contains(e.aKey) && keep.contains(e.bKey)) e
-    ];
-    // Carry the synthesized canvas hubs for the kept canvases so the controller
-    // can both abstract items INTO them and surface them as the weak-link hub
-    // when items are shown (a canvas owning linked items but not itself linked
-    // has no node in `nodes`). The controller decides visibility in
-    // _rebuildActive; it also adds the dashed same-canvas grouping edges there.
-    final absKept = [
-      for (final n in data.abstractCanvasNodes)
-        if (n.canvasId != null && canvasIds.contains(n.canvasId)) n
-    ];
-    _g.setData(
-        GraphData(nodes: nodes, edges: edges, abstractCanvasNodes: absKept));
-    _g.setHover(centerKey); // emphasize the center + its neighbors
+    // Set the focus BEFORE feeding data so the first rebuild is already scoped.
+    _g.centerKey = centerKey;
+    _g.depthLimit = _lgc.depth;
+    _g.setData(GraphData(
+      nodes: nodes,
+      edges: data.edges,
+      abstractCanvasNodes: data.abstractCanvasNodes,
+    ));
   }
 
   void _back() {
@@ -3018,6 +3123,13 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
               _titleBar(palette, center?.name ?? 'Local graph'),
               Expanded(
                 child: Listener(
+                  // Reset the moved-flag on every pointer-down so a tap after a
+                  // pan/drag isn't swallowed (a pure tap may not fire
+                  // onScaleStart — the recognizer arena gives it to the tap —
+                  // leaving a stale `_moved` from the previous gesture). This is
+                  // the "sometimes can't tap nodes" fix; mirrors the global
+                  // graph's onPointerDown reset.
+                  onPointerDown: (_) => _moved = false,
                   onPointerSignal: (e) {
                     if (e is PointerScrollEvent) {
                       _g.zoomAt(e.localPosition,
@@ -3149,6 +3261,8 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
         children: [
           _tinyBtn(palette, Icons.my_location, 'Recenter on current location',
               _lgc.recenter),
+          _tinyBtn(palette, Icons.bubble_chart_outlined,
+              'Re-flow layout (release pinned nodes)', _g.clearFixed),
           const Spacer(),
           Text('Depth', style: TextStyle(fontSize: 11.5, color: palette.textDim)),
           _tinyBtn(palette, Icons.remove, 'Fewer hops',
