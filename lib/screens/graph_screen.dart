@@ -19,6 +19,7 @@ import '../services/sync_service.dart';
 import '../services/tag_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
+import '../widgets/connections_sheet.dart' show ConnectionsListView;
 
 /// A live node in the force simulation — graph data plus physics state.
 class GraphSimNode {
@@ -1021,6 +1022,7 @@ class GraphController extends ChangeNotifier {
       onWake?.call();
     }
     notifyListeners();
+    _bumpUi(); // the filter/appearance panel rebuilds on uiVersion, not this
     if (persist) SettingsService().saveGraphSettings(pinOnDrag: v);
   }
 
@@ -2790,11 +2792,16 @@ class _ShapeIconPainter extends CustomPainter {
       old.shape != shape || old.color != color;
 }
 
-/// State for the desktop floating **local graph** — a small draggable card that
-/// shows the current item + its connections out to a chosen depth, persists
-/// across navigation (until closed), and stacks a back/forward history as you
-/// hop between nodes. Singleton so the Connections menus can open it and the
-/// desktop shell can host one instance + publish the current location.
+/// The floating Connections panel's two faces: the connections LIST or the
+/// local GRAPH (the same global engine, scoped to the current item + depth).
+enum ConnPanelView { list, graph }
+
+/// State for the desktop floating **Connections panel** — a draggable,
+/// pinnable card that shows the current item's Connections list OR its local
+/// graph (toggle), persists across navigation (until closed), and stacks a
+/// back/forward history as you hop between nodes. Singleton so the Connections
+/// menus open it and the desktop shell hosts one instance + publishes the
+/// current location.
 class LocalGraphController extends ChangeNotifier {
   static final LocalGraphController _i = LocalGraphController._();
   factory LocalGraphController() => _i;
@@ -2804,7 +2811,22 @@ class LocalGraphController extends ChangeNotifier {
   bool pinned = false; // pin ONLY keeps it visible (no dismiss on outside tap)
   int depth = 1; // hops from the center
   Offset position = const Offset(96, 96);
-  Size size = const Size(360, 340);
+  Size size = const Size(380, 420);
+
+  /// Which face is showing (list default — the panel replaces the old modal).
+  ConnPanelView view = ConnPanelView.list;
+
+  // ── Connections context (what the LIST face renders) ──
+  String connTitle = '';
+  LinkEndpoint? connEndpoint;
+  String connEndpointName = '';
+  String? connAggregateCanvasId;
+  LinkEndpoint? connSelfEndpoint;
+  String connSelfName = '';
+  String? connInsideCanvasId;
+  void Function(String? pageId)? connOnJump;
+  Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
+      connOnAddTarget;
 
   final List<({LinkEndpoint ep, String name})> _history = [];
   int _hi = -1;
@@ -2831,6 +2853,51 @@ class LocalGraphController extends ChangeNotifier {
       ..add((ep: ep, name: name));
     _hi = 0;
     _bump();
+  }
+
+  /// Opens the panel showing the Connections LIST for [endpoint] (or a canvas
+  /// aggregate). The graph face is centered on the same item, so toggling to it
+  /// is instant. Called by `showConnectionsSheet` on desktop.
+  void openConnections({
+    required String title,
+    LinkEndpoint? endpoint,
+    String endpointName = '',
+    String? aggregateCanvasId,
+    LinkEndpoint? selfEndpoint,
+    String selfName = '',
+    String? insideCanvasId,
+    void Function(String? pageId)? onJumpInSameCanvas,
+    Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
+        onAddTarget,
+  }) {
+    connTitle = title;
+    connEndpoint = endpoint;
+    connEndpointName = endpointName;
+    connAggregateCanvasId = aggregateCanvasId;
+    connSelfEndpoint = selfEndpoint;
+    connSelfName = selfName;
+    connInsideCanvasId = insideCanvasId;
+    connOnJump = onJumpInSameCanvas;
+    connOnAddTarget = onAddTarget;
+    open = true;
+    view = ConnPanelView.list;
+    // Center the graph face on the item the sheet is about.
+    final ep = endpoint ?? selfEndpoint;
+    final name = endpoint != null ? endpointName : selfName;
+    _history.clear();
+    if (ep != null) {
+      _history.add((ep: ep, name: name.isEmpty ? title : name));
+      _hi = 0;
+    } else {
+      _hi = -1;
+    }
+    _bump();
+  }
+
+  void setView(ConnPanelView v) {
+    if (view == v) return;
+    view = v;
+    notifyListeners();
   }
 
   void _push(LinkEndpoint ep, String name) {
@@ -2878,10 +2945,31 @@ class LocalGraphController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The shell records the current location so [recenter] can jump the graph
-  /// there on demand — it never moves the graph on its own.
+  /// Live-navigate: when on, the graph auto-follows the app's current location
+  /// as you navigate manually (and records each step into back/forward). When
+  /// off, the graph only moves when you tap a node or hit recenter. Distinct
+  /// from pin (which just keeps the panel visible).
+  bool liveNavigate = false;
+
+  void toggleLiveNavigate() {
+    liveNavigate = !liveNavigate;
+    // Turning it on immediately snaps to where you are now.
+    if (liveNavigate) {
+      final l = currentLocation;
+      if (l != null && open) {
+        _push(l.ep, l.name);
+        return; // _push already notifies
+      }
+    }
+    notifyListeners();
+  }
+
+  /// The shell publishes the app's current location here. With [liveNavigate]
+  /// on, it also drives the graph (auto-follow) and records the step; otherwise
+  /// it's just remembered for [recenter] to jump to on demand.
   void setCurrentLocation(LinkEndpoint ep, String name) {
     currentLocation = (ep: ep, name: name);
+    if (liveNavigate && open) _push(ep, name); // follow + record
   }
 
   void recenter() {
@@ -2970,7 +3058,12 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   /// refetches the full graph on a center change (revision); depth changes
   /// re-scope in memory via [_onLgc].
   Future<void> _maybeRebuild() async {
-    if (!_lgc.open || _lgc.revision == _builtRev) return;
+    // Lazy: only build the graph when the graph FACE is actually shown, so
+    // opening the panel to the LIST doesn't pay for a full graph build. When
+    // you toggle to graph, setView → notify → this runs (revision is ahead of
+    // _builtRev, so it fetches).
+    if (!_lgc.open || _lgc.view != ConnPanelView.graph) return;
+    if (_lgc.revision == _builtRev) return;
     _builtRev = _lgc.revision;
     final center = _lgc.center;
     if (center == null) return;
@@ -3041,8 +3134,11 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
 
   void _onScaleStart(ScaleStartDetails d) {
     _lastScale = 1.0;
-    _moved = false;
-    _dragNode = _g.hitTest(d.localFocalPoint);
+    // _dragNode was hit-tested on pointer-DOWN (exact position). Hit-testing
+    // here at the scale-start focal point misses, because the recognizer only
+    // fires after some movement — by then the pointer has left the node. That
+    // was why nodes were hard to grab in the (smaller, zoomed-out) local card;
+    // mirrors the global graph, which captures the candidate on pointer-down.
     if (_dragNode != null) _g.beginDrag(_dragNode!);
   }
 
@@ -3120,54 +3216,8 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
           clipBehavior: Clip.antiAlias,
           child: Column(
             children: [
-              _titleBar(palette, center?.name ?? 'Local graph'),
-              Expanded(
-                child: Listener(
-                  // Reset the moved-flag on every pointer-down so a tap after a
-                  // pan/drag isn't swallowed (a pure tap may not fire
-                  // onScaleStart — the recognizer arena gives it to the tap —
-                  // leaving a stale `_moved` from the previous gesture). This is
-                  // the "sometimes can't tap nodes" fix; mirrors the global
-                  // graph's onPointerDown reset.
-                  onPointerDown: (_) => _moved = false,
-                  onPointerSignal: (e) {
-                    if (e is PointerScrollEvent) {
-                      _g.zoomAt(e.localPosition,
-                          e.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12);
-                    }
-                  },
-                  child: RawGestureDetector(
-                    gestures: {
-                      ScaleGestureRecognizer:
-                          GestureRecognizerFactoryWithHandlers<
-                              ScaleGestureRecognizer>(
-                        () => ScaleGestureRecognizer(),
-                        (r) => r
-                          ..onStart = _onScaleStart
-                          ..onUpdate = _onScaleUpdate
-                          ..onEnd = _onScaleEnd,
-                      ),
-                      TapGestureRecognizer: GestureRecognizerFactoryWithHandlers<
-                          TapGestureRecognizer>(
-                        () => TapGestureRecognizer(),
-                        (r) => r..onTapUp = _onTapUp,
-                      ),
-                    },
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        // Give the controller its size so it centers/fits the
-                        // subgraph — without this the graph sat at the origin
-                        // and couldn't be seen, zoomed, or dragged.
-                        _g.setScreenSize(constraints.biggest);
-                        return CustomPaint(
-                          painter: _GraphPainter(_g, palette, theme),
-                          size: Size.infinite,
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ),
+              _titleBar(palette, center?.name ?? _lgc.connTitle),
+              Expanded(child: _buildConnectionsBody(palette, theme)),
               _bottomBar(palette),
             ],
           ),
@@ -3175,6 +3225,80 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       ),
         ),
       ],
+    );
+  }
+
+  /// The panel body: always the Connections view (so its consolidated copy /
+  /// add / tags action line shows in BOTH faces), with the graph injected as
+  /// its `body` when the graph face is selected.
+  Widget _buildConnectionsBody(AppPalette palette, ThemeData theme) {
+    return ConnectionsListView(
+      // Keyed by the OPENED item so it rebuilds when a different item's
+      // Connections are opened, but persists across a list⟷graph toggle.
+      key: ValueKey(_lgc.connEndpoint?.toUri() ??
+          _lgc.connAggregateCanvasId ??
+          _lgc.connTitle),
+      embedded: true,
+      body: _lgc.view == ConnPanelView.graph
+          ? _buildGraphBody(palette, theme)
+          : null,
+      title: _lgc.connTitle,
+      endpoint: _lgc.connEndpoint,
+      endpointName: _lgc.connEndpointName,
+      aggregateCanvasId: _lgc.connAggregateCanvasId,
+      selfEndpoint: _lgc.connSelfEndpoint,
+      selfName: _lgc.connSelfName,
+      insideCanvasId: _lgc.connInsideCanvasId,
+      onJumpInSameCanvas: _lgc.connOnJump,
+      onAddTarget: _lgc.connOnAddTarget,
+      desktop: true,
+      hostContext: context,
+    );
+  }
+
+  /// The local GRAPH face — the shared engine, centered + depth-scoped.
+  Widget _buildGraphBody(AppPalette palette, ThemeData theme) {
+    return Listener(
+      // Reset the moved-flag AND capture the drag candidate at the precise
+      // pointer-down position (see _onScaleStart) — this fixes both the
+      // "sometimes can't tap nodes" and "hard to grab a node to drag" issues;
+      // mirrors the global graph's onPointerDown.
+      onPointerDown: (e) {
+        _moved = false;
+        _dragNode = _g.hitTest(e.localPosition);
+      },
+      onPointerSignal: (e) {
+        if (e is PointerScrollEvent) {
+          _g.zoomAt(e.localPosition, e.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12);
+        }
+      },
+      child: RawGestureDetector(
+        gestures: {
+          ScaleGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<ScaleGestureRecognizer>(
+            () => ScaleGestureRecognizer(),
+            (r) => r
+              ..onStart = _onScaleStart
+              ..onUpdate = _onScaleUpdate
+              ..onEnd = _onScaleEnd,
+          ),
+          TapGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+            () => TapGestureRecognizer(),
+            (r) => r..onTapUp = _onTapUp,
+          ),
+        },
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // Give the controller its size so it centers/fits the subgraph.
+            _g.setScreenSize(constraints.biggest);
+            return CustomPaint(
+              painter: _GraphPainter(_g, palette, theme),
+              size: Size.infinite,
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -3203,38 +3327,56 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
                       fontWeight: FontWeight.w600,
                       color: onSurface)),
             ),
+            // List ⟷ graph face toggle (the active face is highlighted).
+            _tinyBtn(
+                palette,
+                Icons.format_list_bulleted,
+                'Connections list',
+                _lgc.view == ConnPanelView.list
+                    ? null
+                    : () => _lgc.setView(ConnPanelView.list),
+                active: _lgc.view == ConnPanelView.list),
+            _tinyBtn(
+                palette,
+                Icons.hub_outlined,
+                'Local graph',
+                _lgc.view == ConnPanelView.graph
+                    ? null
+                    : () => _lgc.setView(ConnPanelView.graph),
+                active: _lgc.view == ConnPanelView.graph),
             _tinyBtn(palette, Icons.arrow_back, 'Back',
                 _lgc.canBack ? _back : null),
             _tinyBtn(palette, Icons.arrow_forward, 'Forward',
                 _lgc.canForward ? _forward : null),
-            // Local view options (independent of the global graph — persist:
-            // false — so tweaking them here doesn't change the main graph).
-            PopupMenuButton<String>(
-              icon: Icon(Icons.tune, size: 15, color: palette.textDim),
-              tooltip: 'View options',
-              padding: EdgeInsets.zero,
-              onSelected: (v) {
-                if (v == 'abstract') {
-                  _g.setAbstractInsideItems(!_g.abstractInsideItems,
-                      persist: false);
-                } else if (v == 'sameCanvas') {
-                  _g.setSameCanvasLinks(!_g.sameCanvasLinks, persist: false);
-                }
-                setState(() {});
-              },
-              itemBuilder: (_) => [
-                CheckedPopupMenuItem(
-                  value: 'abstract',
-                  checked: _g.abstractInsideItems,
-                  child: const Text('Abstract items into canvas'),
-                ),
-                CheckedPopupMenuItem(
-                  value: 'sameCanvas',
-                  checked: _g.sameCanvasLinks,
-                  child: const Text('Link items in same canvas'),
-                ),
-              ],
-            ),
+            // Graph-only view options (independent of the global graph —
+            // persist:false — so tweaking here doesn't change the main graph).
+            if (_lgc.view == ConnPanelView.graph)
+              PopupMenuButton<String>(
+                icon: Icon(Icons.tune, size: 15, color: palette.textDim),
+                tooltip: 'View options',
+                padding: EdgeInsets.zero,
+                onSelected: (v) {
+                  if (v == 'abstract') {
+                    _g.setAbstractInsideItems(!_g.abstractInsideItems,
+                        persist: false);
+                  } else if (v == 'sameCanvas') {
+                    _g.setSameCanvasLinks(!_g.sameCanvasLinks, persist: false);
+                  }
+                  setState(() {});
+                },
+                itemBuilder: (_) => [
+                  CheckedPopupMenuItem(
+                    value: 'abstract',
+                    checked: _g.abstractInsideItems,
+                    child: const Text('Abstract items into canvas'),
+                  ),
+                  CheckedPopupMenuItem(
+                    value: 'sameCanvas',
+                    checked: _g.sameCanvasLinks,
+                    child: const Text('Link items in same canvas'),
+                  ),
+                ],
+              ),
             _tinyBtn(
               palette,
               _lgc.pinned ? Icons.push_pin : Icons.push_pin_outlined,
@@ -3250,6 +3392,7 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   }
 
   Widget _bottomBar(AppPalette palette) {
+    final graph = _lgc.view == ConnPanelView.graph;
     return Container(
       height: 34,
       padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -3259,23 +3402,39 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       ),
       child: Row(
         children: [
-          _tinyBtn(palette, Icons.my_location, 'Recenter on current location',
-              _lgc.recenter),
-          _tinyBtn(palette, Icons.bubble_chart_outlined,
-              'Re-flow layout (release pinned nodes)', _g.clearFixed),
-          const Spacer(),
-          Text('Depth', style: TextStyle(fontSize: 11.5, color: palette.textDim)),
-          _tinyBtn(palette, Icons.remove, 'Fewer hops',
-              _lgc.depth > 1 ? () => _lgc.setDepth(_lgc.depth - 1) : null),
-          Text('${_lgc.depth}',
-              style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: palette.accent)),
-          _tinyBtn(palette, Icons.add, 'More hops',
-              _lgc.depth < 4 ? () => _lgc.setDepth(_lgc.depth + 1) : null),
+          // Graph-face controls (recenter / re-flow / depth); the list face
+          // just carries the resize grip.
+          if (graph) ...[
+            _tinyBtn(palette, Icons.my_location, 'Recenter on current location',
+                _lgc.recenter),
+            _tinyBtn(
+                palette,
+                _lgc.liveNavigate
+                    ? Icons.gps_fixed
+                    : Icons.gps_not_fixed,
+                _lgc.liveNavigate
+                    ? 'Live-follow on — graph follows you as you navigate'
+                    : 'Live-follow off — tap to make the graph follow navigation',
+                _lgc.toggleLiveNavigate,
+                active: _lgc.liveNavigate),
+            _tinyBtn(palette, Icons.bubble_chart_outlined,
+                'Re-flow layout (release pinned nodes)', _g.clearFixed),
+            const Spacer(),
+            Text('Depth',
+                style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+            _tinyBtn(palette, Icons.remove, 'Fewer hops',
+                _lgc.depth > 1 ? () => _lgc.setDepth(_lgc.depth - 1) : null),
+            Text('${_lgc.depth}',
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: palette.accent)),
+            _tinyBtn(palette, Icons.add, 'More hops',
+                _lgc.depth < 4 ? () => _lgc.setDepth(_lgc.depth + 1) : null),
+          ] else
+            const Spacer(),
           const SizedBox(width: 6),
-          // Resize grip (drag to size the card).
+          // Resize grip (drag to size the card) — both faces.
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onPanUpdate: (d) => _lgc.resize(d.delta),
