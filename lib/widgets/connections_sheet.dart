@@ -262,7 +262,13 @@ class ConnectionsListViewState extends State<ConnectionsListView> {
 
   Future<void> _addTarget(LinkEndpoint target) async {
     final ep = _actionEndpoint!;
-    if (target.sameAs(ep)) {
+    // "Itself" check by OVERLAP for element endpoints (marker growth makes the
+    // exact URIs differ even for the same item).
+    final sameItem = ep.kind == LinkTargetKind.element &&
+            target.kind == LinkTargetKind.element
+        ? ep.elementIds.any(target.elementIds.contains)
+        : target.sameAs(ep);
+    if (sameItem) {
       _toast('That link points at this very item.');
       return;
     }
@@ -270,14 +276,15 @@ class ConnectionsListViewState extends State<ConnectionsListView> {
     if (widget.onAddTarget != null) {
       await widget.onAddTarget!(target, resolved);
     } else {
-      // Reciprocal marker: an element-endpoint target (a pasted lasso/element
-      // link) gets a hyperlink back to this item dropped next to it, so the
-      // linked spot shows the connection on its canvas too.
+      // Reciprocal marker so the linked spot shows the connection on its
+      // canvas too. In the floating panel (linking two existing elements),
+      // mark BOTH sides so each item shows the link — like a manual paste.
       await LinkService().addLinkWithReciprocalMarker(
         from: ep,
         to: target,
         fromName: _actionName,
         toName: resolved.title,
+        markBothSides: widget.embedded,
       );
     }
     await _load();

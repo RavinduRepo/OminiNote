@@ -256,6 +256,11 @@ class _CanvasScreenState extends State<CanvasScreen>
     // so recenter / live-follow tracks the ELEMENT you have selected, else this
     // canvas. Only runs while the panel is open (desktop); debounced.
     _controller!.addListener(_publishGraphLocation);
+    // Also publish once on open — the listener only fires on later controller
+    // changes, so switching canvases (which builds a fresh screen) wouldn't
+    // otherwise refresh the panel until you drew/panned. Fixes "navigating
+    // between canvases via the list doesn't refresh the connections list".
+    _publishGraphLocation();
     // Jump to a requested page (e.g. a bookmark opened from search) once the
     // first layout has set the screen size, so the fit math has real bounds.
     // An element-link arrival (LinkNavigator's one-shot pending focus) refines
