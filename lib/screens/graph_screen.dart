@@ -2792,6 +2792,92 @@ class _ShapeIconPainter extends CustomPainter {
       old.shape != shape || old.color != color;
 }
 
+/// Appearance/visual controls (sliders + toggles) for a [GraphController] —
+/// the local panel's settings popup shows these so it exposes the same visual
+/// settings as the global graph. Changes persist (shared device-local graph
+/// settings), so the two stay consistent.
+List<Widget> graphAppearanceControls(
+    BuildContext context, GraphController c, AppPalette palette) {
+  return [
+    _graphSlider(palette, 'Node size', c.nodeSizeScale, 0.5, 2.5,
+        c.setNodeSizeScale),
+    _graphSlider(palette, 'Text size', c.textSizeScale, 0.6, 2.0,
+        c.setTextSizeScale),
+    _graphSlider(palette, 'Text opacity', c.labelOpacity, 0.15, 1.0,
+        c.setLabelOpacity),
+    _graphSlider(palette, 'Link thickness', c.linkThickness, 0.4, 3.0,
+        c.setLinkThickness),
+    _graphSlider(palette, 'Link opacity', c.linkOpacity, 0.1, 1.0,
+        c.setLinkOpacity),
+    _graphToggle(context, palette, 'Always show labels', c.alwaysShowLabels,
+        (v) => c.setAlwaysShowLabels(v)),
+    _graphToggle(context, palette, 'Expand items inside canvases',
+        !c.abstractInsideItems, (v) => c.setAbstractInsideItems(!v)),
+    _graphToggle(context, palette, 'Link items in same canvas',
+        c.sameCanvasLinks, (v) => c.setSameCanvasLinks(v)),
+    _graphToggle(context, palette, 'Pin nodes where you drag them', c.pinOnDrag,
+        (v) => c.setPinOnDrag(v)),
+  ];
+}
+
+Widget _graphSlider(AppPalette palette, String label, double value, double min,
+    double max, ValueChanged<double> onChanged) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 14),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 92,
+          child: Text(label,
+              style: TextStyle(fontSize: 11.5, color: palette.textDim)),
+        ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderThemeData(
+              trackHeight: 2,
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            ),
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+Widget _graphToggle(BuildContext context, AppPalette palette, String label,
+    bool value, ValueChanged<bool> onChanged) {
+  return InkWell(
+    onTap: () => onChanged(!value),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 1),
+      child: Row(
+        children: [
+          Expanded(
+              child: Text(label,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      color: Theme.of(context).colorScheme.onSurface))),
+          Transform.scale(
+            scale: 0.72,
+            child: Switch(
+              value: value,
+              onChanged: onChanged,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 /// The floating Connections panel's two faces: the connections LIST or the
 /// local GRAPH (the same global engine, scoped to the current item + depth).
 enum ConnPanelView { list, graph }
@@ -3348,35 +3434,11 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
                 _lgc.canBack ? _back : null),
             _tinyBtn(palette, Icons.arrow_forward, 'Forward',
                 _lgc.canForward ? _forward : null),
-            // Graph-only view options (independent of the global graph —
-            // persist:false — so tweaking here doesn't change the main graph).
+            // Graph-only settings gear → the full visual settings popup (same
+            // controls the global graph has).
             if (_lgc.view == ConnPanelView.graph)
-              PopupMenuButton<String>(
-                icon: Icon(Icons.tune, size: 15, color: palette.textDim),
-                tooltip: 'View options',
-                padding: EdgeInsets.zero,
-                onSelected: (v) {
-                  if (v == 'abstract') {
-                    _g.setAbstractInsideItems(!_g.abstractInsideItems,
-                        persist: false);
-                  } else if (v == 'sameCanvas') {
-                    _g.setSameCanvasLinks(!_g.sameCanvasLinks, persist: false);
-                  }
-                  setState(() {});
-                },
-                itemBuilder: (_) => [
-                  CheckedPopupMenuItem(
-                    value: 'abstract',
-                    checked: _g.abstractInsideItems,
-                    child: const Text('Abstract items into canvas'),
-                  ),
-                  CheckedPopupMenuItem(
-                    value: 'sameCanvas',
-                    checked: _g.sameCanvasLinks,
-                    child: const Text('Link items in same canvas'),
-                  ),
-                ],
-              ),
+              _tinyBtn(palette, Icons.tune, 'Graph settings',
+                  _openGraphSettings),
             _tinyBtn(
               palette,
               _lgc.pinned ? Icons.push_pin : Icons.push_pin_outlined,
@@ -3441,6 +3503,41 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
             child: Icon(Icons.open_in_full, size: 14, color: palette.textDim),
           ),
         ],
+      ),
+    );
+  }
+
+  /// The graph settings popup — the same visual controls the global graph has,
+  /// operating on the local `_g` (and persisting, so both stay consistent).
+  void _openGraphSettings() {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 340),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            child: ListenableBuilder(
+              listenable: _g,
+              builder: (_, _) => Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                    child: Text('Graph settings',
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: palette.textDim)),
+                  ),
+                  ...graphAppearanceControls(ctx, _g, palette),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

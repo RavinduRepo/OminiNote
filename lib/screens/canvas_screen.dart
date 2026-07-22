@@ -41,6 +41,7 @@ import '../widgets/connections_sheet.dart';
 import '../widgets/edit_link_sheet.dart';
 import '../widgets/link_target_picker.dart';
 import '../widgets/sync_status_icon.dart';
+import 'graph_screen.dart' show LocalGraphController;
 import 'canvas_toolbar/adaptive_toolbar_row.dart';
 import 'canvas_toolbar/canvas_chrome_shared.dart';
 import 'canvas_toolbar/customize_toolbar_sheet.dart';
@@ -251,6 +252,10 @@ class _CanvasScreenState extends State<CanvasScreen>
         ..eraserPartial = SettingsService().eraserPartial
         ..eraserSize = SettingsService().eraserSize;
     });
+    // Publish the current selection (or the canvas) to the floating graph panel
+    // so recenter / live-follow tracks the ELEMENT you have selected, else this
+    // canvas. Only runs while the panel is open (desktop); debounced.
+    _controller!.addListener(_publishGraphLocation);
     // Jump to a requested page (e.g. a bookmark opened from search) once the
     // first layout has set the screen size, so the fit math has real bounds.
     // An element-link arrival (LinkNavigator's one-shot pending focus) refines
@@ -628,11 +633,49 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (!widget.embedded) {
       SyncService().dataVersion.removeListener(_onSyncData);
     }
+    _graphLocDebounce?.cancel();
     _canvasFocus.dispose();
     _controller?.dispose(); // flushes pending saves
     _titleFocusNode?.dispose();
     _titleController?.dispose();
     super.dispose();
+  }
+
+  Timer? _graphLocDebounce;
+
+  /// Publishes the current selection (element) — or this canvas when nothing is
+  /// selected — as the floating graph panel's current location, so recenter and
+  /// live-follow track exactly where you are. No-op while the panel is closed
+  /// (so it's free on mobile / when you're not using the graph). Debounced so a
+  /// stroke or a drag doesn't spam it.
+  void _publishGraphLocation() {
+    if (!LocalGraphController().open) return;
+    _graphLocDebounce?.cancel();
+    _graphLocDebounce = Timer(const Duration(milliseconds: 350), () {
+      final c = _controller;
+      if (c == null || !mounted) return;
+      final pageId = c.selectionPageId;
+      final sel = c.selection;
+      final nb = widget.canvas.notebookId, sec = widget.canvas.sectionId;
+      if (sel.isNotEmpty && pageId != null) {
+        LocalGraphController().setCurrentLocation(
+          LinkEndpoint(
+            notebookId: nb,
+            sectionId: sec,
+            canvasId: widget.canvas.id,
+            pageId: pageId,
+            elementIds: [for (final e in sel) e.id],
+          ),
+          'Selection in ${widget.canvas.name}',
+        );
+      } else {
+        LocalGraphController().setCurrentLocation(
+          LinkEndpoint(
+              notebookId: nb, sectionId: sec, canvasId: widget.canvas.id),
+          widget.canvas.name,
+        );
+      }
+    });
   }
 
   // ── Pointer routing ──────────────────────────────────────────────────
