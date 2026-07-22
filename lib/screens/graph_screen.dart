@@ -2972,10 +2972,13 @@ class LocalGraphController extends ChangeNotifier {
     final name = endpoint != null ? endpointName : selfName;
     _history.clear();
     if (ep != null) {
-      _history.add((ep: ep, name: name.isEmpty ? title : name));
+      final e = (ep: ep, name: name.isEmpty ? title : name);
+      _history.add(e);
       _hi = 0;
+      currentLocation = e; // the panel's list/actions start on the opened item
     } else {
       _hi = -1;
+      currentLocation = null;
     }
     _bump();
   }
@@ -2984,6 +2987,20 @@ class LocalGraphController extends ChangeNotifier {
     if (view == v) return;
     view = v;
     notifyListeners();
+  }
+
+  // Suppress the live-follow auto-push while a PROGRAMMATIC navigation
+  // (back/forward/recenter/node-tap) echoes back through the shell's
+  // setCurrentLocation — otherwise back/forward re-navigate, the echo re-pushes,
+  // and the history corrupts ("freaks out", lands on the section).
+  bool _suppressEcho = false;
+  int _navToken = 0;
+  void _beginProgrammaticNav() {
+    final t = ++_navToken;
+    _suppressEcho = true;
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (t == _navToken) _suppressEcho = false;
+    });
   }
 
   void _push(LinkEndpoint ep, String name) {
@@ -2996,9 +3013,14 @@ class LocalGraphController extends ChangeNotifier {
     _bump();
   }
 
-  void navigateTo(LinkEndpoint ep, String name) => _push(ep, name);
+  void navigateTo(LinkEndpoint ep, String name) {
+    _beginProgrammaticNav();
+    _push(ep, name);
+  }
+
   void back() {
     if (canBack) {
+      _beginProgrammaticNav();
       _hi--;
       _bump();
     }
@@ -3006,6 +3028,7 @@ class LocalGraphController extends ChangeNotifier {
 
   void forward() {
     if (canForward) {
+      _beginProgrammaticNav();
       _hi++;
       _bump();
     }
@@ -3050,17 +3073,27 @@ class LocalGraphController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The shell publishes the app's current location here. With [liveNavigate]
-  /// on, it also drives the graph (auto-follow) and records the step; otherwise
-  /// it's just remembered for [recenter] to jump to on demand.
+  /// The shell/canvas publishes the app's current location (selection or
+  /// canvas) here. The panel's LIST + copy/add/tags always follow it (so you
+  /// can select an item and copy/link it). With [liveNavigate] on it also
+  /// drives the GRAPH (auto-follow) and records the step — unless we're echoing
+  /// our own programmatic navigation.
   void setCurrentLocation(LinkEndpoint ep, String name) {
+    if (currentLocation?.ep.toUri() == ep.toUri()) return; // unchanged
     currentLocation = (ep: ep, name: name);
-    if (liveNavigate && open) _push(ep, name); // follow + record
+    if (liveNavigate && open && !_suppressEcho) {
+      _push(ep, name); // follow + record (also notifies)
+    } else if (open) {
+      notifyListeners(); // list/actions/title track the current selection
+    }
   }
 
   void recenter() {
     final l = currentLocation;
-    if (l != null) _push(l.ep, l.name);
+    if (l != null) {
+      _beginProgrammaticNav();
+      _push(l.ep, l.name);
+    }
   }
 
   void move(Offset d) {
@@ -3155,7 +3188,22 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     if (center == null) return;
     final data = await GraphService().buildGraph();
     if (!mounted || _lgc.revision != _builtRev) return; // superseded
-    final centerKey = center.ep.toUri();
+    var centerKey = center.ep.toUri();
+    // If the center is an ELEMENT selection, match it to an EXISTING linked node
+    // by element-id OVERLAP (a re-selected linked selection has a different URI
+    // but the same ids) — so it highlights that node instead of adding a
+    // duplicate "new" one.
+    if (center.ep.elementIds.isNotEmpty &&
+        !data.nodes.any((n) => n.key == centerKey)) {
+      final set = center.ep.elementIds.toSet();
+      for (final n in data.nodes) {
+        final ep = LinkEndpoint.sideFrom(n.key);
+        if (ep != null && ep.elementIds.any(set.contains)) {
+          centerKey = n.key;
+          break;
+        }
+      }
+    }
     // Ensure the center is present even with no connections (an isolated item).
     var nodes = data.nodes;
     if (!data.nodes.any((n) => n.key == centerKey)) {
@@ -3273,7 +3321,8 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     if (!_lgc.open) return const SizedBox.shrink();
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
-    final center = _lgc.center;
+    // The title follows the current item (your selection), like the list.
+    final currentName = _lgc.currentLocation?.name ?? _lgc.connTitle;
     return Stack(
       children: [
         // Unpinned: a tap anywhere outside the card dismisses it (like a
@@ -3302,7 +3351,7 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
           clipBehavior: Clip.antiAlias,
           child: Column(
             children: [
-              _titleBar(palette, center?.name ?? _lgc.connTitle),
+              _titleBar(palette, currentName),
               Expanded(child: _buildConnectionsBody(palette, theme)),
               _bottomBar(palette),
             ],
@@ -3316,27 +3365,47 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
 
   /// The panel body: always the Connections view (so its consolidated copy /
   /// add / tags action line shows in BOTH faces), with the graph injected as
-  /// its `body` when the graph face is selected.
+  /// its `body` in graph mode. The current item FOLLOWS the app's current
+  /// location (your selection) — so you can select something, hit Copy, select
+  /// another and hit + · Paste to link them. The rich opened-context (canvas
+  /// aggregate / lasso onAddTarget / in-canvas jump) applies only while you're
+  /// still on the item the panel was opened for.
   Widget _buildConnectionsBody(AppPalette palette, ThemeData theme) {
+    final body = _lgc.view == ConnPanelView.graph
+        ? _buildGraphBody(palette, theme)
+        : null;
+    final cur = _lgc.currentLocation;
+    final openedEp = _lgc.connEndpoint ?? _lgc.connSelfEndpoint;
+    final atOpened =
+        cur == null || (openedEp != null && cur.ep.sameAs(openedEp));
+    if (atOpened) {
+      return ConnectionsListView(
+        key: ValueKey('opened:${_lgc.connEndpoint?.toUri() ?? _lgc.connAggregateCanvasId ?? _lgc.connTitle}'),
+        embedded: true,
+        body: body,
+        title: _lgc.connTitle,
+        endpoint: _lgc.connEndpoint,
+        endpointName: _lgc.connEndpointName,
+        aggregateCanvasId: _lgc.connAggregateCanvasId,
+        selfEndpoint: _lgc.connSelfEndpoint,
+        selfName: _lgc.connSelfName,
+        insideCanvasId: _lgc.connInsideCanvasId,
+        onJumpInSameCanvas: _lgc.connOnJump,
+        onAddTarget: _lgc.connOnAddTarget,
+        desktop: true,
+        hostContext: context,
+      );
+    }
+    // Following the current selection — plain element/canvas connections, so
+    // Copy/Add operate on exactly what you've selected.
     return ConnectionsListView(
-      // Keyed by the OPENED item so it rebuilds when a different item's
-      // Connections are opened, but persists across a list⟷graph toggle.
-      key: ValueKey(_lgc.connEndpoint?.toUri() ??
-          _lgc.connAggregateCanvasId ??
-          _lgc.connTitle),
+      key: ValueKey('cur:${cur.ep.toUri()}'),
       embedded: true,
-      body: _lgc.view == ConnPanelView.graph
-          ? _buildGraphBody(palette, theme)
-          : null,
-      title: _lgc.connTitle,
-      endpoint: _lgc.connEndpoint,
-      endpointName: _lgc.connEndpointName,
-      aggregateCanvasId: _lgc.connAggregateCanvasId,
-      selfEndpoint: _lgc.connSelfEndpoint,
-      selfName: _lgc.connSelfName,
-      insideCanvasId: _lgc.connInsideCanvasId,
-      onJumpInSameCanvas: _lgc.connOnJump,
-      onAddTarget: _lgc.connOnAddTarget,
+      body: body,
+      title: cur.name,
+      endpoint: cur.ep,
+      endpointName: cur.name,
+      aggregateCanvasId: null,
       desktop: true,
       hostContext: context,
     );
