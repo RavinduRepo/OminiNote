@@ -991,7 +991,9 @@ class _GraphScreenState extends State<GraphScreen>
       }
       return;
     }
-    LinkNavigator().reveal(data.reveal!);
+    _handOffElementFocus(data); // flash + precise scroll for in-canvas targets
+    // Graph taps are deliberate navigation — open the actual place.
+    LinkNavigator().openCanvas(data.reveal!);
   }
 
   void _onHover(PointerHoverEvent e) {
@@ -1027,67 +1029,67 @@ class _GraphScreenState extends State<GraphScreen>
           }
           return graph;
         }
-        // Mobile: the panel is a persistent, draggable bottom sheet OVER the
-        // graph — peeks up, drag to expand, scrollable; the graph stays
-        // interactive above it.
+        // Mobile: the graph SHRINKS into the space above a bottom panel (both
+        // stay visible). Tap the handle to expand/retract the panel; the graph
+        // re-fits into whatever room is left. The panel scrolls internally.
         if (_empty || _loading) return graph;
-        return Stack(
+        final panelH = (constraints.maxHeight * _mobileSheet)
+            .clamp(56.0, constraints.maxHeight * 0.9);
+        return Column(
           children: [
-            Positioned.fill(child: graph),
-            _mobileBottomPanel(constraints, palette),
+            Expanded(child: graph),
+            SizedBox(
+                height: panelH, child: _mobileBottomPanel(constraints, palette)),
           ],
         );
       },
     );
   }
 
+  /// Sets the mobile sheet height fraction and re-fits the graph into the space
+  /// that remains (so it stays fully visible, just more zoomed out).
+  void _setSheet(double v) {
+    setState(() => _mobileSheet = v);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _controller.fitToScreen();
+    });
+  }
+
   Widget _mobileBottomPanel(BoxConstraints constraints, AppPalette palette) {
-    final h = (constraints.maxHeight * _mobileSheet)
-        .clamp(96.0, constraints.maxHeight * 0.9);
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      height: h,
-      child: Material(
-        elevation: 10,
-        color: palette.surface2,
-        child: Column(
-          children: [
-            // Drag handle — pull up for more options, down to retract; it snaps
-            // to peek / half / tall on release, and a tap toggles peek↔half.
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onVerticalDragUpdate: (d) => setState(() {
-                _mobileSheet = (_mobileSheet -
-                        d.primaryDelta! / constraints.maxHeight)
-                    .clamp(0.1, 0.9);
-              }),
-              onVerticalDragEnd: (_) => setState(() {
-                _mobileSheet = _kSheetStops.reduce((a, b) =>
-                    (a - _mobileSheet).abs() < (b - _mobileSheet).abs() ? a : b);
-              }),
-              onTap: () => setState(
-                  () => _mobileSheet = _mobileSheet <= 0.2 ? 0.5 : 0.14),
+    return Material(
+      elevation: 10,
+      color: palette.surface2,
+      child: Column(
+        children: [
+          // Handle: TAP to expand/retract (peek ↔ tall); drag for fine control,
+          // snapping to peek/half/tall on release. Either way the graph re-fits.
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _setSheet(_mobileSheet <= 0.2 ? 0.6 : 0.14),
+            onVerticalDragUpdate: (d) => setState(() {
+              _mobileSheet =
+                  (_mobileSheet - d.primaryDelta! / constraints.maxHeight)
+                      .clamp(0.1, 0.9);
+            }),
+            onVerticalDragEnd: (_) => _setSheet(_kSheetStops.reduce((a, b) =>
+                (a - _mobileSheet).abs() < (b - _mobileSheet).abs() ? a : b)),
+            child: Container(
+              height: 22,
+              alignment: Alignment.center,
               child: Container(
-                height: 24,
-                alignment: Alignment.center,
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: palette.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: palette.border,
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
             ),
-            Expanded(
-              child:
-                  _GraphFilterPanel(controller: _controller, onReload: _load),
-            ),
-          ],
-        ),
+          ),
+          Expanded(
+            child: _GraphFilterPanel(controller: _controller, onReload: _load),
+          ),
+        ],
       ),
     );
   }
@@ -1247,6 +1249,24 @@ class _GraphScreenState extends State<GraphScreen>
 
 /// Node silhouettes — one per kind so type reads at a glance.
 enum _NodeShape { circle, box, triangle, diamond, pentagon, hexagon }
+
+/// Before navigating to a graph node, hand the target's element ids to the
+/// destination canvas (via the one-shot pending-focus channel) so it flashes +
+/// scrolls to them — matching the Connections list's behavior. No-op for
+/// non-element targets.
+void _handOffElementFocus(GraphNode data) {
+  final ep = LinkEndpoint.sideFrom(data.key);
+  if (ep != null &&
+      ep.elementIds.isNotEmpty &&
+      ep.canvasId != null &&
+      ep.pageId != null) {
+    LinkNavigator().pendingElementFocus = (
+      canvasId: ep.canvasId!,
+      pageId: ep.pageId!,
+      elementIds: ep.elementIds,
+    );
+  }
+}
 
 /// Silhouette per node kind (user request): notebook=hexagon, section=box,
 /// folder=pentagon, canvas=circle, inside-canvas item (page/element/bookmark)=
@@ -1976,49 +1996,59 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                   ],
                 ),
               ),
-              if (_linkMode) _linkBanner(palette),
-              _toggle(palette, 'Expand items inside canvases',
-                  !c.abstractInsideItems, (v) => c.setAbstractInsideItems(!v)),
-              _toggle(palette, 'External links', c.showExternal,
-                  (v) => c.setShowExternal(v)),
-              _toggle(palette, 'Show items without links', c.showUnlinked,
-                  (v) => c.setShowUnlinked(v)),
-              Divider(height: 1, color: palette.border),
-              if (c.tags.isNotEmpty) ...[
-                _sectionHeader(palette, 'Tags', _tagsOpen, () {
-                  setState(() => _tagsOpen = !_tagsOpen);
-                  _savePanelUi();
-                }),
-                if (_tagsOpen) _tagsFilterBody(palette),
-                Divider(height: 1, color: palette.border),
-              ],
-              _sectionHeader(palette, 'Projects', _projectsOpen, () {
-                setState(() => _projectsOpen = !_projectsOpen);
-                _savePanelUi();
-              }),
-              if (_projectsOpen) _projectsBody(palette),
-              Divider(height: 1, color: palette.border),
-              // The notebook → section → canvas tree (scoped by the active
-              // project), tucked under a dropdown; link mode forces it visible
-              // so you pick two of the currently-shown items to connect — the
-              // checkboxes still toggle visibility while you work.
-              _sectionHeader(palette, 'Filter items', _filterOpen, () {
-                setState(() => _filterOpen = !_filterOpen);
-                _savePanelUi();
-              }),
+              // Everything below the header is ONE scroll view (tree rows
+              // inline, no nested Expanded) so nothing overflows even when the
+              // panel is short (e.g. the mobile peek), and all settings scroll.
               Expanded(
-                child: (_filterOpen || _linkMode)
-                    ? (rows.isEmpty
-                        ? Center(
-                            child: Text('Nothing to show',
-                                style: TextStyle(
-                                    fontSize: 12, color: palette.textDim)))
-                        : ListView(padding: EdgeInsets.zero, children: rows))
-                    : const SizedBox.shrink(),
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    if (_linkMode) _linkBanner(palette),
+                    _toggle(palette, 'Expand items inside canvases',
+                        !c.abstractInsideItems,
+                        (v) => c.setAbstractInsideItems(!v)),
+                    _toggle(palette, 'External links', c.showExternal,
+                        (v) => c.setShowExternal(v)),
+                    _toggle(palette, 'Show items without links', c.showUnlinked,
+                        (v) => c.setShowUnlinked(v)),
+                    Divider(height: 1, color: palette.border),
+                    if (c.tags.isNotEmpty) ...[
+                      _sectionHeader(palette, 'Tags', _tagsOpen, () {
+                        setState(() => _tagsOpen = !_tagsOpen);
+                        _savePanelUi();
+                      }),
+                      if (_tagsOpen) _tagsFilterBody(palette),
+                      Divider(height: 1, color: palette.border),
+                    ],
+                    _sectionHeader(palette, 'Projects', _projectsOpen, () {
+                      setState(() => _projectsOpen = !_projectsOpen);
+                      _savePanelUi();
+                    }),
+                    if (_projectsOpen) _projectsBody(palette),
+                    Divider(height: 1, color: palette.border),
+                    // The notebook → section → canvas tree (scoped by the active
+                    // project); link mode forces it visible so you pick two of
+                    // the shown items to connect — checkboxes still toggle view.
+                    _sectionHeader(palette, 'Filter items', _filterOpen, () {
+                      setState(() => _filterOpen = !_filterOpen);
+                      _savePanelUi();
+                    }),
+                    if (_filterOpen || _linkMode)
+                      if (rows.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text('Nothing to show',
+                              style: TextStyle(
+                                  fontSize: 12, color: palette.textDim)),
+                        )
+                      else
+                        ...rows,
+                    Divider(height: 1, color: palette.border),
+                    _appearanceSection(palette),
+                    _legend(palette),
+                  ],
+                ),
               ),
-              Divider(height: 1, color: palette.border),
-              _appearanceSection(palette),
-              _legend(palette),
             ],
           ),
         );
@@ -2436,7 +2466,7 @@ class LocalGraphController extends ChangeNotifier {
   LocalGraphController._();
 
   bool open = false;
-  bool follow = false; // pin: auto-recenter to wherever you navigate
+  bool pinned = false; // pin ONLY keeps it visible (no dismiss on outside tap)
   int depth = 1; // hops from the center
   Offset position = const Offset(96, 96);
   Size size = const Size(360, 340);
@@ -2506,17 +2536,15 @@ class LocalGraphController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleFollow() {
-    follow = !follow;
-    if (follow) recenter();
+  void togglePin() {
+    pinned = !pinned;
     notifyListeners();
   }
 
-  /// The shell calls this as the user navigates; when following, the card keeps
-  /// up automatically, else it stays put until [recenter].
+  /// The shell records the current location so [recenter] can jump the graph
+  /// there on demand — it never moves the graph on its own.
   void setCurrentLocation(LinkEndpoint ep, String name) {
     currentLocation = (ep: ep, name: name);
-    if (follow && open) _push(ep, name);
   }
 
   void recenter() {
@@ -2630,8 +2658,18 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       adj.putIfAbsent(e.aKey, () => {}).add(e.bKey);
       adj.putIfAbsent(e.bKey, () => {}).add(e.aKey);
     }
-    final keep = <String>{centerKey};
-    var frontier = <String>{centerKey};
+    // Seed set: the center, plus — when the center IS a canvas — every linked
+    // item inside that canvas (its pages/elements/bookmarks), so the local
+    // graph shows the canvas's aggregate connections, like the Connections menu.
+    final seeds = <String>{centerKey};
+    final ep = center.ep;
+    if (ep.canvasId != null && ep.pageId == null && ep.elementIds.isEmpty) {
+      for (final n in byKey.values) {
+        if (n.canvasId == ep.canvasId) seeds.add(n.key);
+      }
+    }
+    final keep = <String>{...seeds};
+    var frontier = <String>{...seeds};
     for (var d = 0; d < _lgc.depth && frontier.isNotEmpty; d++) {
       final next = <String>{};
       for (final k in frontier) {
@@ -2689,7 +2727,10 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       return;
     }
     if (!data.alive || data.reveal == null) return;
-    LinkNavigator().reveal(data.reveal!);
+    _handOffElementFocus(data); // flash + precise scroll for in-canvas targets
+    // Graph taps are deliberate navigation — go to the actual place (open the
+    // canvas / drill to the container), not the "stop one level up" reveal.
+    LinkNavigator().openCanvas(data.reveal!);
     final ep = LinkEndpoint.sideFrom(data.key);
     if (ep != null) _lgc.navigateTo(ep, data.title); // stack the hop
   }
@@ -2700,12 +2741,23 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     final theme = Theme.of(context);
     final palette = theme.extension<AppPalette>()!;
     final center = _lgc.center;
-    return Positioned(
-      left: _lgc.position.dx,
-      top: _lgc.position.dy,
-      width: _lgc.size.width,
-      height: _lgc.size.height,
-      child: Material(
+    return Stack(
+      children: [
+        // Unpinned: a tap anywhere outside the card dismisses it (like a
+        // popup). Pinned: no barrier — the card stays and the app stays usable.
+        if (!_lgc.pinned)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _lgc.close,
+            ),
+          ),
+        Positioned(
+          left: _lgc.position.dx,
+          top: _lgc.position.dy,
+          width: _lgc.size.width,
+          height: _lgc.size.height,
+          child: Material(
         elevation: 12,
         borderRadius: BorderRadius.circular(kRadius),
         color: palette.canvas,
@@ -2743,9 +2795,17 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
                         (r) => r..onTapUp = _onTapUp,
                       ),
                     },
-                    child: CustomPaint(
-                      painter: _GraphPainter(_g, palette, theme),
-                      size: Size.infinite,
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        // Give the controller its size so it centers/fits the
+                        // subgraph — without this the graph sat at the origin
+                        // and couldn't be seen, zoomed, or dragged.
+                        _g.setScreenSize(constraints.biggest);
+                        return CustomPaint(
+                          painter: _GraphPainter(_g, palette, theme),
+                          size: Size.infinite,
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -2755,6 +2815,8 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
           ),
         ),
       ),
+        ),
+      ],
     );
   }
 
@@ -2789,10 +2851,10 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
                 _lgc.canForward ? _lgc.forward : null),
             _tinyBtn(
               palette,
-              _lgc.follow ? Icons.push_pin : Icons.push_pin_outlined,
-              _lgc.follow ? 'Following location' : 'Pin to follow location',
-              _lgc.toggleFollow,
-              active: _lgc.follow,
+              _lgc.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+              _lgc.pinned ? 'Pinned (stays open)' : 'Pin to keep it open',
+              _lgc.togglePin,
+              active: _lgc.pinned,
             ),
             _tinyBtn(palette, Icons.close, 'Close', _lgc.close),
           ],

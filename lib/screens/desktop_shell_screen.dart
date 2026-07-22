@@ -125,8 +125,12 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   Future<void> _openCanvasFromResult(SearchResult r) async {
     // A quick note just created this canvas, so the section tree + canvas maps
-    // are stale — reload so the reveal finds it, then open it embedded.
-    await _loadAll();
+    // are stale — reload so the reveal finds it. But when the notebook is
+    // already loaded (e.g. a graph node tap), skip the full reload so nav stays
+    // snappy.
+    if (_notebooks == null || !_notebooks!.any((n) => n.id == r.notebook.id)) {
+      await _loadAll();
+    }
     if (!mounted) return;
     setState(() {
       _mainMode = _MainMode.canvas;

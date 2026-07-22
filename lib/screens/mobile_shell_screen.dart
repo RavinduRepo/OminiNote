@@ -212,6 +212,11 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   /// Reveals a search result: switch to the Notebooks tab, rebuild its drill-in
   /// stack (so Back walks up the hierarchy), and open a canvas above the shell.
   void _revealSearchResult(SearchResult r) {
+    // Clear any canvas already open on the root navigator FIRST, so navigating
+    // (e.g. tapping graph nodes) replaces rather than stacks a new canvas on
+    // top — one set of widgets, never duplicates.
+    Navigator.of(context, rootNavigator: true)
+        .popUntil((route) => route.isFirst);
     _jumpToNotebooksTab();
     final nav = _navKeys[_kNotebooks].currentState;
     if (nav == null) return;
