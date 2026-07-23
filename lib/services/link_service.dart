@@ -3,6 +3,9 @@ import 'notebook_service.dart';
 import 'settings_service.dart';
 import 'sync_service.dart';
 
+// Marker deletion (Model A) dispatches to the open canvas or the page file; the
+// standalone-marker test lives in the shared helper.
+
 /// In-memory view over the Connections registry (`links.json`).
 ///
 /// Loaded lazily on first query and re-read only when [SyncService.dataVersion]
@@ -48,6 +51,15 @@ class LinkService {
     await NotebookService().saveLinksJson(raw);
   }
 
+  /// Every alive connection in the store — the edge set for the global graph
+  /// view. Uses the same version-gated cache as the id-scoped queries, so it's
+  /// cheap to re-call on a [SyncService.dataVersion] bump. Newest first.
+  Future<List<LinkRecord>> allLinks() async {
+    await _ensureLoaded();
+    return _records.values.where((r) => r.deletedAt == null).toList()
+      ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
+  }
+
   /// Alive connections where [leafId] is either side's target — the list a
   /// Connections sheet shows for one item.
   Future<List<LinkRecord>> linksOf(String leafId) async {
@@ -58,6 +70,28 @@ class LinkService {
             (r.a.leafId == leafId || r.b.leafId == leafId))
         .toList()
       ..sort((x, y) => y.createdAt.compareTo(x.createdAt));
+  }
+
+  /// The EXISTING linked element-endpoint overlapping [ids], if any — so a
+  /// re-selected linked item resolves to the SAME endpoint (one graph node, and
+  /// its Connections list finds the record) instead of a fresh endpoint with a
+  /// slightly different id set. Null when the selection isn't linked yet.
+  Future<LinkEndpoint?> canonicalElementEndpoint(List<String> ids) async {
+    await _ensureLoaded();
+    if (ids.isEmpty) return null;
+    final set = ids.toSet();
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if (r.a.kind == LinkTargetKind.element &&
+          r.a.elementIds.any(set.contains)) {
+        return r.a;
+      }
+      if (r.b.kind == LinkTargetKind.element &&
+          r.b.elementIds.any(set.contains)) {
+        return r.b;
+      }
+    }
+    return null;
   }
 
   /// Alive connections where either side is an element endpoint intersecting
@@ -139,6 +173,70 @@ class LinkService {
     await _persist();
   }
 
+  /// Removes connection [id] **and** the on-canvas link markers it dropped on
+  /// either side (Model A: a marker is the connection's visual body — the two
+  /// live and die together). Only *standalone* markers are deleted; an inline
+  /// link inside a larger text box is left alone. Called from the Connections
+  /// sheet's ✕.
+  Future<void> removeLinkAndMarkers(String id) async {
+    await _ensureLoaded();
+    final r = _records[id];
+    if (r == null || r.deletedAt != null) return;
+    r.deletedAt = DateTime.now();
+    r.bumpRev(SettingsService().deviceId);
+    await _persist();
+    await _deleteMarkersOn(r.a);
+    await _deleteMarkersOn(r.b);
+  }
+
+  /// Tombstones the connection backed by the just-deleted marker [markerId] and
+  /// deletes the marker on the OTHER side (this one is already being removed by
+  /// the canvas's own delete op). Called when a standalone marker element is
+  /// deleted on the canvas. No-op if the marker backs no live connection.
+  Future<void> removeLinkForMarker(String markerId) async {
+    await _ensureLoaded();
+    LinkRecord? rec;
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      if (r.a.elementIds.contains(markerId) ||
+          r.b.elementIds.contains(markerId)) {
+        rec = r;
+        break;
+      }
+    }
+    if (rec == null) return;
+    rec.deletedAt = DateTime.now();
+    rec.bumpRev(SettingsService().deviceId);
+    await _persist();
+    await _deleteMarkersOn(rec.a, except: markerId);
+    await _deleteMarkersOn(rec.b, except: markerId);
+  }
+
+  /// Deletes the standalone link markers among [e]'s element ids — routed to
+  /// the open canvas's live controller when it's open (its autosave would
+  /// clobber a disk write), else the page file. Skips [except] (the marker the
+  /// caller is already deleting). No-op for non-element endpoints.
+  Future<void> _deleteMarkersOn(LinkEndpoint e, {String? except}) async {
+    if (e.kind != LinkTargetKind.element ||
+        e.sectionId == null ||
+        e.canvasId == null ||
+        e.pageId == null) {
+      return;
+    }
+    final ids = [for (final id in e.elementIds) if (id != except) id];
+    if (ids.isEmpty) return;
+    final handled = await SyncService()
+        .removeMarkersInOpenCanvas(e.canvasId!, e.pageId!, ids);
+    if (handled) return;
+    await NotebookService().removeLinkMarkersFromPage(
+      notebookId: e.notebookId,
+      sectionId: e.sectionId!,
+      canvasId: e.canvasId!,
+      pageId: e.pageId!,
+      elementIds: ids,
+    );
+  }
+
   /// Drops the visible reciprocal marker next to an element endpoint [at] —
   /// a small hyperlink pointing back at the connection's other side, so BOTH
   /// linked spots show something on their canvases. Routed through the open
@@ -181,6 +279,7 @@ class LinkService {
     required LinkEndpoint to,
     String fromName = '',
     String toName = '',
+    bool markBothSides = false,
   }) async {
     await _ensureLoaded();
     bool matches(LinkEndpoint x, LinkEndpoint y) =>
@@ -194,26 +293,34 @@ class LinkService {
         return r; // already connected — no duplicate record/marker
       }
     }
-    var target = to;
-    if (to.kind == LinkTargetKind.element) {
-      final markerId = await dropMarkerNear(
-        to,
-        uri: from.toUri(),
-        title: fromName.isEmpty ? 'Linked item' : fromName,
+    // Drop a marker next to an element endpoint pointing at [otherUri], and
+    // fold its id into the endpoint (so the marker's ✎ retargets this record).
+    Future<LinkEndpoint> withMarker(
+        LinkEndpoint e, String otherUri, String otherName) async {
+      if (e.kind != LinkTargetKind.element) return e;
+      final markerId = await dropMarkerNear(e,
+          uri: otherUri, title: otherName.isEmpty ? 'Linked item' : otherName);
+      if (markerId == null) return e;
+      return LinkEndpoint(
+        notebookId: e.notebookId,
+        sectionId: e.sectionId,
+        canvasId: e.canvasId,
+        pageId: e.pageId,
+        elementIds: [...e.elementIds, markerId],
+        bookmarkId: e.bookmarkId,
+        folderId: e.folderId,
       );
-      if (markerId != null) {
-        target = LinkEndpoint(
-          notebookId: to.notebookId,
-          sectionId: to.sectionId,
-          canvasId: to.canvasId,
-          pageId: to.pageId,
-          elementIds: [...to.elementIds, markerId],
-          bookmarkId: to.bookmarkId,
-          folderId: to.folderId,
-        );
-      }
     }
-    return addLink(from: from, to: target, fromName: fromName, toName: toName);
+
+    // The target always gets a marker (points back at [from]); with
+    // [markBothSides] (linking two existing elements via the graph) the source
+    // gets one too, so BOTH items show the link — like a manual canvas paste.
+    // The graph merges the marker-grown endpoints into one node per item.
+    final target = await withMarker(to, from.toUri(), fromName);
+    final source =
+        markBothSides ? await withMarker(from, to.toUri(), toName) : from;
+    return addLink(
+        from: source, to: target, fromName: fromName, toName: toName);
   }
 
   /// Rewrites the record that links [elementId]'s side to [oldTarget] so it
@@ -285,6 +392,74 @@ class LinkService {
     }
     r.bumpRev(SettingsService().deviceId);
     await _persist();
+  }
+
+  /// When linked elements move to another page **in the same canvas**, corrects
+  /// any connection endpoints that referenced them so the links keep resolving
+  /// to the right page (the Connections list + graph stay accurate). Updates an
+  /// element-endpoint side whose canvasId matches and whose pageId is
+  /// [fromPageId] and whose elementIds intersect [movedIds]. Rev-bumped so the
+  /// fix wins LWW + propagates. No-op when nothing moved.
+  Future<void> remapElementsToPage(
+    Set<String> movedIds, {
+    required String canvasId,
+    required String fromPageId,
+    required String toPageId,
+  }) async {
+    if (movedIds.isEmpty || fromPageId == toPageId) return;
+    await _ensureLoaded();
+    bool hit(LinkEndpoint e) =>
+        e.canvasId == canvasId &&
+        e.pageId == fromPageId &&
+        e.elementIds.any(movedIds.contains);
+    // The FAR endpoint of a touched record is where a marker pointing at the
+    // moved element lives — its URI needs the same page fix. Collect the ones
+    // on OTHER canvases (the moved canvas's own markers are rewritten in memory
+    // by the controller, whole-canvas).
+    final farMarkers = <LinkEndpoint>[];
+    var changed = false;
+    for (final r in _records.values) {
+      if (r.deletedAt != null) continue;
+      var touched = false;
+      if (hit(r.a)) {
+        farMarkers.add(r.b);
+        r.a = r.a.withPage(toPageId);
+        touched = true;
+      }
+      if (hit(r.b)) {
+        farMarkers.add(r.a);
+        r.b = r.b.withPage(toPageId);
+        touched = true;
+      }
+      if (touched) {
+        r.bumpRev(SettingsService().deviceId);
+        changed = true;
+      }
+    }
+    if (changed) await _persist();
+    // Fix each far marker's embedded URI (open canvas in a split → in memory;
+    // else the page file). The record gives its exact location, so no scan.
+    for (final o in farMarkers) {
+      if (o.canvasId == null ||
+          o.sectionId == null ||
+          o.pageId == null ||
+          o.canvasId == canvasId) {
+        continue;
+      }
+      final handled = await SyncService().remapMarkerUrisInOpenCanvas(
+          o.canvasId!, o.pageId!, movedIds, canvasId, fromPageId, toPageId);
+      if (handled) continue;
+      await NotebookService().remapLinkMarkerUrisOnPage(
+        notebookId: o.notebookId,
+        sectionId: o.sectionId!,
+        canvasId: o.canvasId!,
+        pageId: o.pageId!,
+        movedIds: movedIds,
+        movedCanvasId: canvasId,
+        fromPage: fromPageId,
+        toPage: toPageId,
+      );
+    }
   }
 
   /// Tombstones the connection between exactly [a] and [b] (either order),

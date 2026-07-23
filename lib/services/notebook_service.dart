@@ -14,6 +14,7 @@ import '../models/link.dart';
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/tree.dart';
+import '../utils/link_markers.dart';
 import 'pdf_exporter.dart';
 import 'settings_service.dart';
 import 'sync_service.dart';
@@ -71,6 +72,39 @@ class NotebookService {
   /// save journals + uploads like any local edit.
   Future<void> saveLinksJson(Map<String, dynamic> data) =>
       _writeAtomic(linksFile, jsonEncode(data));
+
+  /// The tag registry (`tags.json`, store root — synced + merged like
+  /// `links.json`: an id-keyed map of enveloped records).
+  File get tagsFile => File('${appDir.path}/tags.json');
+
+  Future<Map<String, dynamic>> readTagsJson() async {
+    try {
+      if (!await tagsFile.exists()) return {};
+      return jsonDecode(await tagsFile.readAsString()) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> saveTagsJson(Map<String, dynamic> data) =>
+      _writeAtomic(tagsFile, jsonEncode(data));
+
+  /// The project registry (`projects.json`, store root — synced + merged like
+  /// `tags.json`).
+  File get projectsFile => File('${appDir.path}/projects.json');
+
+  Future<Map<String, dynamic>> readProjectsJson() async {
+    try {
+      if (!await projectsFile.exists()) return {};
+      return jsonDecode(await projectsFile.readAsString())
+          as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> saveProjectsJson(Map<String, dynamic> data) =>
+      _writeAtomic(projectsFile, jsonEncode(data));
 
   /// Rewrites Connections endpoints per [idMap] (old→new container ids) after
   /// a notebook re-key, so links **follow a moved notebook** instead of dying
@@ -1520,6 +1554,104 @@ class NotebookService {
     return el.id;
   }
 
+  /// Tombstones any standalone link-markers among [elementIds] on a page file
+  /// (the reciprocal-marker cleanup when that canvas is NOT open — mirrors
+  /// [addLinkMarkerToPage]). Uses the object-delete tombstone so the removal
+  /// syncs like any element delete. Only markers are touched; real content
+  /// referenced by [elementIds] is left in place.
+  Future<void> removeLinkMarkersFromPage({
+    required String notebookId,
+    required String sectionId,
+    required String canvasId,
+    required String pageId,
+    required List<String> elementIds,
+  }) async {
+    final canvas = await getCanvas(notebookId, sectionId, canvasId);
+    if (canvas == null) return;
+    final file = _pageFile(canvas, pageId);
+    if (!await file.exists()) return;
+    CanvasPage page;
+    try {
+      page = CanvasPage.fromJson(
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>);
+    } catch (_) {
+      return;
+    }
+    if (page.deletedAt != null || page.purgedAt != null) return;
+    final ids = elementIds.toSet();
+    final markers = page.objects
+        .where((o) => ids.contains(o.id) && standaloneMarkerUri(o) != null)
+        .toList();
+    if (markers.isEmpty) return;
+    final dev = SettingsService().deviceId;
+    final markerIds = {for (final m in markers) m.id};
+    for (final el in markers) {
+      page.deletedObjects.removeWhere((e) => e.strokeId == el.id);
+      page.deletedObjects.add(EraseTombstone(
+        strokeId: el.id,
+        rev: el.rev,
+        erasedAt: DateTime.now(),
+        deviceId: dev,
+      ));
+    }
+    page.objects.removeWhere((o) => markerIds.contains(o.id));
+    await savePage(canvas, page);
+  }
+
+  /// Rewrites link-run URIs on a page file that point at a moved element
+  /// (`[movedCanvasId]/[fromPage]/<a moved id>`) to reference [toPage] instead —
+  /// the cross-canvas half of "a linked item moved pages": the marker on the
+  /// OTHER (closed) canvas keeps pointing at the item. Mirrors
+  /// [removeLinkMarkersFromPage]'s disk path; the record pinpoints this page, so
+  /// no store-wide scan. Element revs bumped so the fix syncs.
+  Future<void> remapLinkMarkerUrisOnPage({
+    required String notebookId,
+    required String sectionId,
+    required String canvasId,
+    required String pageId,
+    required Set<String> movedIds,
+    required String movedCanvasId,
+    required String fromPage,
+    required String toPage,
+  }) async {
+    final canvas = await getCanvas(notebookId, sectionId, canvasId);
+    if (canvas == null) return;
+    final file = _pageFile(canvas, pageId);
+    if (!await file.exists()) return;
+    CanvasPage page;
+    try {
+      page = CanvasPage.fromJson(
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>);
+    } catch (_) {
+      return;
+    }
+    if (page.deletedAt != null || page.purgedAt != null) return;
+    final dev = SettingsService().deviceId;
+    var changed = false;
+    for (final el in page.objects) {
+      if (el is! TextElement) continue;
+      var elChanged = false;
+      for (final run in el.runs) {
+        final link = run.link;
+        if (link == null) continue;
+        final next = remapLinkUriPage(link,
+            movedIds: movedIds,
+            canvasId: movedCanvasId,
+            fromPage: fromPage,
+            toPage: toPage);
+        if (next != null) {
+          run.link = next;
+          elChanged = true;
+        }
+      }
+      if (elChanged) {
+        el.bumpRev(dev);
+        changed = true;
+      }
+    }
+    if (changed) await savePage(canvas, page);
+  }
+
   Future<void> deletePageFile(Canvas canvas, String pageId) async {
     final file = _pageFile(canvas, pageId);
     if (await file.exists()) await file.delete();
@@ -1681,6 +1813,8 @@ class NotebookService {
     if (rel.endsWith('.tmp')) return false;
     if (rel == 'notebooks.json') return true;
     if (rel == 'links.json') return true; // Connections registry
+    if (rel == 'tags.json') return true; // Tag registry
+    if (rel == 'projects.json') return true; // Project registry
     if (!rel.startsWith('notebooks/')) return false;
     // Only structural JSON, page JSON, and asset blobs are synced.
     return true;
@@ -1771,6 +1905,8 @@ class NotebookService {
     final nb = notebooksFile;
     if (await nb.exists()) out.add('notebooks.json');
     if (await linksFile.exists()) out.add('links.json');
+    if (await tagsFile.exists()) out.add('tags.json');
+    if (await projectsFile.exists()) out.add('projects.json');
     final dir = Directory('${appDir.path}/notebooks');
     if (await dir.exists()) {
       await for (final e in dir.list(recursive: true, followLinks: false)) {

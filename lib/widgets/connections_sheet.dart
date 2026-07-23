@@ -3,15 +3,19 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/link.dart';
+import '../models/tag.dart';
 import '../utils/url_text.dart';
 import '../services/link_navigator.dart';
 import '../services/link_resolver.dart';
 import '../services/link_service.dart';
+import '../services/tag_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/app_toast.dart';
+import '../screens/graph_screen.dart' show LocalGraphController;
 import 'action_sheet.dart';
 import 'edit_link_sheet.dart';
 import 'link_target_picker.dart';
+import 'tag_manager_sheet.dart';
 
 /// Copies [endpoint]'s `omninote://link/...` URI to the OS clipboard — the
 /// "Copy link" action every linkable item's menu offers.
@@ -40,6 +44,10 @@ Future<void> showConnectionsSheet(
   LinkEndpoint? endpoint,
   String endpointName = '',
   String? aggregateCanvasId,
+  // In aggregate mode, the container the sheet is "about" (the canvas) — enables
+  // Copy link / Add / Tags for it while the LIST still shows the aggregate.
+  LinkEndpoint? selfEndpoint,
+  String selfName = '',
   String? insideCanvasId,
   void Function(String? pageId)? onJumpInSameCanvas,
   Future<void> Function(LinkEndpoint target, ResolvedLink resolved)?
@@ -48,19 +56,39 @@ Future<void> showConnectionsSheet(
 }) {
   assert((endpoint == null) != (aggregateCanvasId == null),
       'pass exactly one of endpoint / aggregateCanvasId');
+  final isDesktop = desktop ?? (MediaQuery.of(context).size.width >= 840);
+  // Desktop: open the floating, movable/pinnable Connections panel (list⟷graph
+  // toggle) instead of a modal — one surface for the list and the local graph.
+  if (isDesktop) {
+    LocalGraphController().openConnections(
+      title: title,
+      endpoint: endpoint,
+      endpointName: endpointName,
+      aggregateCanvasId: aggregateCanvasId,
+      selfEndpoint: selfEndpoint,
+      selfName: selfName,
+      insideCanvasId: insideCanvasId,
+      onJumpInSameCanvas: onJumpInSameCanvas,
+      onAddTarget: onAddTarget,
+    );
+    return Future<void>.value();
+  }
   return showAdaptiveMenu<void>(
     context,
     desktop: desktop,
     builder: (sheetContext) => cappedSheetBody(
       sheetContext,
-      child: _ConnectionsList(
+      child: ConnectionsListView(
         title: title,
         endpoint: endpoint,
         endpointName: endpointName,
         aggregateCanvasId: aggregateCanvasId,
+        selfEndpoint: selfEndpoint,
+        selfName: selfName,
         insideCanvasId: insideCanvasId,
         onJumpInSameCanvas: onJumpInSameCanvas,
         onAddTarget: onAddTarget,
+        desktop: desktop,
         // Navigation must outlive the sheet; snackbars anchor to the host.
         hostContext: context,
       ),
@@ -68,12 +96,29 @@ Future<void> showConnectionsSheet(
   );
 }
 
-class _ConnectionsList extends StatefulWidget {
+/// The Connections list for one item (or a canvas aggregate). Used both as the
+/// body of the modal sheet (mobile) and — with [embedded] true — inside the
+/// floating Connections panel (desktop), where it must NOT pop a route on
+/// navigation (there's none) and toasts anchor to the panel.
+class ConnectionsListView extends StatefulWidget {
   final String title;
   final LinkEndpoint? endpoint;
   final String endpointName;
   final String? aggregateCanvasId;
+  final LinkEndpoint? selfEndpoint;
+  final String selfName;
   final String? insideCanvasId;
+  final bool? desktop;
+
+  /// Embedded in the floating panel (not a modal sheet): opening a row must not
+  /// `Navigator.pop`, and the header's grab handle is hidden (the panel has its
+  /// own title bar).
+  final bool embedded;
+
+  /// When set (panel graph face), renders this instead of the connections
+  /// rows — so the copy/add/tags action line stays visible above the GRAPH too,
+  /// not just the list. Only used with [embedded].
+  final Widget? body;
   final void Function(String? pageId)? onJumpInSameCanvas;
 
   /// When set (the lasso-selection host), adding a target routes here instead
@@ -84,19 +129,25 @@ class _ConnectionsList extends StatefulWidget {
 
   final BuildContext hostContext;
 
-  const _ConnectionsList({
+  const ConnectionsListView({
+    super.key,
     required this.title,
     required this.endpoint,
     required this.endpointName,
     required this.aggregateCanvasId,
+    this.selfEndpoint,
+    this.selfName = '',
     this.insideCanvasId,
+    this.desktop,
+    this.embedded = false,
+    this.body,
     this.onJumpInSameCanvas,
     this.onAddTarget,
     required this.hostContext,
   });
 
   @override
-  State<_ConnectionsList> createState() => _ConnectionsListState();
+  State<ConnectionsListView> createState() => ConnectionsListViewState();
 }
 
 class _Row {
@@ -105,13 +156,42 @@ class _Row {
   _Row(this.record, this.resolved);
 }
 
-class _ConnectionsListState extends State<_ConnectionsList> {
+class ConnectionsListViewState extends State<ConnectionsListView> {
   List<_Row>? _rows;
+  List<TagDef> _tags = const [];
+
+  /// The endpoint the header actions (Copy link / Add / Tags) operate on: the
+  /// concrete item, or — in the canvas aggregate — the canvas itself.
+  LinkEndpoint? get _actionEndpoint => widget.endpoint ?? widget.selfEndpoint;
+  String get _actionName =>
+      widget.endpoint != null ? widget.endpointName : widget.selfName;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadTags();
+  }
+
+  Future<void> _loadTags() async {
+    final ep = _actionEndpoint;
+    if (ep == null) return;
+    final tags = await TagService().tagsOf(ep.leafId);
+    if (mounted) setState(() => _tags = tags);
+  }
+
+  Future<void> _manageTags() async {
+    final ep = _actionEndpoint;
+    if (ep == null) return;
+    await showTagManagerSheet(context, endpoint: ep);
+    await _loadTags();
+  }
+
+  Future<void> _removeTag(TagDef t) async {
+    final ep = _actionEndpoint;
+    if (ep == null) return;
+    await TagService().unassign(t.id, ep);
+    await _loadTags();
   }
 
   Future<void> _load() async {
@@ -175,16 +255,20 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   Future<void> _chooseTarget() async {
-    final r = await showLinkTargetPicker(context);
-    if (r == null || !mounted) return;
-    final target = endpointOfSearchResult(r);
-    if (target == null) return;
-    await _addTarget(target);
+    final pick = await showLinkTargetPicker(context);
+    if (pick == null || !mounted) return;
+    await _addTarget(pick.target);
   }
 
   Future<void> _addTarget(LinkEndpoint target) async {
-    final ep = widget.endpoint!;
-    if (target.sameAs(ep)) {
+    final ep = _actionEndpoint!;
+    // "Itself" check by OVERLAP for element endpoints (marker growth makes the
+    // exact URIs differ even for the same item).
+    final sameItem = ep.kind == LinkTargetKind.element &&
+            target.kind == LinkTargetKind.element
+        ? ep.elementIds.any(target.elementIds.contains)
+        : target.sameAs(ep);
+    if (sameItem) {
       _toast('That link points at this very item.');
       return;
     }
@@ -192,14 +276,15 @@ class _ConnectionsListState extends State<_ConnectionsList> {
     if (widget.onAddTarget != null) {
       await widget.onAddTarget!(target, resolved);
     } else {
-      // Reciprocal marker: an element-endpoint target (a pasted lasso/element
-      // link) gets a hyperlink back to this item dropped next to it, so the
-      // linked spot shows the connection on its canvas too.
+      // Reciprocal marker so the linked spot shows the connection on its
+      // canvas too. In the floating panel (linking two existing elements),
+      // mark BOTH sides so each item shows the link — like a manual paste.
       await LinkService().addLinkWithReciprocalMarker(
         from: ep,
         to: target,
-        fromName: widget.endpointName,
+        fromName: _actionName,
         toName: resolved.title,
+        markBothSides: widget.embedded,
       );
     }
     await _load();
@@ -236,7 +321,9 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   }
 
   Future<void> _remove(LinkRecord r) async {
-    await LinkService().removeLink(r.id);
+    // Model A: removing a connection also deletes its on-canvas link markers on
+    // both sides (a marker is the connection's visual body).
+    await LinkService().removeLinkAndMarkers(r.id);
     await _load();
     _toast('Connection removed from both items.');
   }
@@ -251,7 +338,9 @@ class _ConnectionsListState extends State<_ConnectionsList> {
     }
     final reveal = row.resolved.reveal;
     if (reveal == null) return;
-    Navigator.of(context).pop();
+    // In the modal sheet, dismiss it before navigating; in the panel there's
+    // no route to pop (it stays up while you work).
+    if (!widget.embedded) Navigator.of(context).pop();
     // Element targets hand their ids to the destination canvas (scroll-to +
     // landing flash) via the one-shot pending-focus channel — consumed by the
     // same-canvas jump below or by the CanvasScreen the reveal opens.
@@ -298,7 +387,24 @@ class _ConnectionsListState extends State<_ConnectionsList> {
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
-    final rows = _rows;
+    // Panel (embedded): one consolidated action line (copy / add / tags) that
+    // stays visible above BOTH the connections rows and the injected graph.
+    if (widget.embedded) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_actionEndpoint != null) _embeddedActionLine(palette),
+          Expanded(
+            child: widget.body ??
+                ListView(
+                  padding: EdgeInsets.zero,
+                  children: [_rowsArea(palette, shrinkWrap: true)],
+                ),
+          ),
+        ],
+      );
+    }
+    // Modal sheet (mobile): title + copy/add header, tags strip, then rows.
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
       child: Column(
@@ -332,17 +438,18 @@ class _ConnectionsListState extends State<_ConnectionsList> {
                     ),
                   ),
                 ),
-                if (widget.endpoint != null) ...[
+                if (_actionEndpoint != null) ...[
                   IconButton(
                     tooltip: 'Copy link to this item',
                     icon: const Icon(Icons.link, size: 20),
                     onPressed: () =>
-                        copyLinkToClipboard(context, widget.endpoint!),
+                        copyLinkToClipboard(context, _actionEndpoint!),
                   ),
                   PopupMenuButton<String>(
                     tooltip: 'Add a connection',
                     icon: const Icon(Icons.add, size: 22),
-                    onSelected: (a) => a == 'paste' ? _pasteLink() : _chooseTarget(),
+                    onSelected: (a) =>
+                        a == 'paste' ? _pasteLink() : _chooseTarget(),
                     itemBuilder: (context) => [
                       iconMenuItem(
                           'paste', Icons.content_paste, 'Paste copied link'),
@@ -353,31 +460,154 @@ class _ConnectionsListState extends State<_ConnectionsList> {
               ],
             ),
           ),
-          if (rows == null)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-            )
-          else if (rows.isEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 20),
-              child: Text(
-                widget.endpoint != null
-                    ? 'No connections yet. Use "Copy link" on any item, then '
-                        'the + above to connect it here — the link works from '
-                        'both sides.'
-                    : 'Nothing inside this canvas is connected yet.',
-                style: TextStyle(fontSize: 13.5, color: palette.textDim),
-              ),
-            )
-          else
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: rows.length,
-                itemBuilder: (_, i) => _buildRow(palette, rows[i]),
+          if (_actionEndpoint != null) _buildTagsStrip(palette),
+          Flexible(child: _rowsArea(palette, shrinkWrap: true)),
+        ],
+      ),
+    );
+  }
+
+  /// Loading spinner / empty text / the connections rows (unwrapped).
+  Widget _rowsArea(AppPalette palette, {required bool shrinkWrap}) {
+    final rows = _rows;
+    if (rows == null) {
+      return const Padding(
+        padding: EdgeInsets.all(24),
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    if (rows.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 20),
+        child: Text(
+          widget.endpoint != null
+              ? 'No connections yet. Use "Copy link" on any item, then the + '
+                  'above to connect it here — the link works from both sides.'
+              : 'Nothing inside this canvas is connected yet.',
+          style: TextStyle(fontSize: 13.5, color: palette.textDim),
+        ),
+      );
+    }
+    return ListView.builder(
+      shrinkWrap: shrinkWrap,
+      padding: EdgeInsets.zero,
+      itemCount: rows.length,
+      itemBuilder: (_, i) => _buildRow(palette, rows[i]),
+    );
+  }
+
+  /// The single action line for the panel: copy link · add · tag chips —
+  /// horizontally scrollable, shown above both faces.
+  Widget _embeddedActionLine(AppPalette palette) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: palette.border)),
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 2, 6, 2),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Copy link to this item',
+            icon: const Icon(Icons.link, size: 19),
+            visualDensity: VisualDensity.compact,
+            onPressed: () => copyLinkToClipboard(context, _actionEndpoint!),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Add a connection',
+            icon: const Icon(Icons.add, size: 21),
+            padding: EdgeInsets.zero,
+            onSelected: (a) => a == 'paste' ? _pasteLink() : _chooseTarget(),
+            itemBuilder: (context) => [
+              iconMenuItem('paste', Icons.content_paste, 'Paste copied link'),
+              iconMenuItem('choose', Icons.search, 'Choose target…'),
+            ],
+          ),
+          Container(
+              width: 1, height: 20, color: palette.border,
+              margin: const EdgeInsets.symmetric(horizontal: 4)),
+          Icon(Icons.sell_outlined, size: 15, color: palette.textDim),
+          const SizedBox(width: 6),
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final t in _tags)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: Chip(
+                        label: Text(t.name,
+                            style: TextStyle(fontSize: 12, color: onSurface)),
+                        onDeleted: () => _removeTag(t),
+                        deleteIcon: const Icon(Icons.close, size: 14),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: palette.surface2,
+                        side: BorderSide(color: palette.border),
+                      ),
+                    ),
+                  ActionChip(
+                    label: Text(_tags.isEmpty ? 'Add tag' : 'Tag',
+                        style: TextStyle(fontSize: 12, color: palette.textDim)),
+                    avatar: Icon(Icons.add, size: 15, color: palette.textDim),
+                    onPressed: _manageTags,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    backgroundColor: Colors.transparent,
+                    side: BorderSide(color: palette.border),
+                  ),
+                ],
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The small "Tags" strip: the item's tag chips (✕ to remove) + a ＋ that
+  /// opens the manager (attach/create/rename/delete). Names only.
+  Widget _buildTagsStrip(AppPalette palette) {
+    final onSurface = Theme.of(context).colorScheme.onSurface;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 8, 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 6, right: 8),
+            child: Icon(Icons.sell_outlined, size: 15, color: palette.textDim),
+          ),
+          Expanded(
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                for (final t in _tags)
+                  Chip(
+                    label: Text(t.name, style: TextStyle(fontSize: 12, color: onSurface)),
+                    onDeleted: () => _removeTag(t),
+                    deleteIcon: const Icon(Icons.close, size: 14),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    backgroundColor: palette.surface2,
+                    side: BorderSide(color: palette.border),
+                  ),
+                ActionChip(
+                  label: Text(_tags.isEmpty ? 'Add tag' : 'Tag',
+                      style: TextStyle(fontSize: 12, color: palette.textDim)),
+                  avatar: Icon(Icons.add, size: 15, color: palette.textDim),
+                  onPressed: _manageTags,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                  backgroundColor: Colors.transparent,
+                  side: BorderSide(color: palette.border),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

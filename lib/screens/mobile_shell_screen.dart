@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import '../services/link_navigator.dart';
 import '../services/search_service.dart';
 import '../theme/app_theme.dart';
-import 'bin_screen.dart';
 import 'canvas_workspace_screen.dart';
+import 'graph_screen.dart';
 import 'home_screen.dart';
 import 'note_search.dart';
 import 'notebook_screen.dart';
@@ -29,7 +29,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // Order: Search sits at the far end (away from Notebooks) so its keyboard
   // never intrudes when you land on Notebooks — and it only focuses on entry.
   static const _kNotebooks = 0;
-  static const _kBin = 1;
+  static const _kGraph = 1; // Connections graph (Bin moved to the home app bar)
   static const _kSettings = 2;
   static const _kSearch = 3;
 
@@ -44,10 +44,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // adjacent tab. See _jumpToNotebooksTab + onPageChanged.
   bool _revealing = false;
   Timer? _revealTimer;
-
-  // Bumped each time the Bin tab is opened, so the kept-alive BinScreen
-  // reloads (something deleted elsewhere must appear when you switch back to it).
-  final ValueNotifier<int> _binRefresh = ValueNotifier(0);
 
   // Bumped when the Search tab is opened, so its field focuses ONLY then — the
   // field never autofocuses on build, which used to pop the keyboard when you
@@ -75,17 +71,16 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   bool _swipeEnabled = true;
   bool _recheckScheduled = false;
 
-  // Defers the (potentially whole-store) Bin reload until the tab slide has
-  // settled, so the scan never competes with the swipe animation for frames.
-  Timer? _binReloadTimer;
-
   void _scheduleSwipeRecheck() {
     if (_recheckScheduled) return;
     _recheckScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _recheckScheduled = false;
       if (!mounted) return;
-      final enabled = !(_navKeys[_index].currentState?.canPop() ?? false);
+      // The Graph tab owns horizontal drags (pan), so never let a swipe switch
+      // tabs while it's showing — same as when a tab is drilled in.
+      final enabled = _index != _kGraph &&
+          !(_navKeys[_index].currentState?.canPop() ?? false);
       if (enabled != _swipeEnabled) setState(() => _swipeEnabled = enabled);
     });
   }
@@ -185,9 +180,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     LinkNavigator().unregister(_revealFromLink);
     LinkNavigator().unregisterOpenCanvas(_revealSearchResult);
     _revealTimer?.cancel();
-    _binReloadTimer?.cancel();
     _pageController.dispose();
-    _binRefresh.dispose();
     _searchFocus.dispose();
     super.dispose();
   }
@@ -199,12 +192,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // entirely unless the store changed.
   void _onEnterTab(int i) {
     if (i == _kSearch) _searchFocus.value++;
-    if (i == _kBin) {
-      _binReloadTimer?.cancel();
-      _binReloadTimer = Timer(const Duration(milliseconds: 350), () {
-        if (mounted) _binRefresh.value++;
-      });
-    }
   }
 
   void _selectTab(int i) {
@@ -225,6 +212,11 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   /// Reveals a search result: switch to the Notebooks tab, rebuild its drill-in
   /// stack (so Back walks up the hierarchy), and open a canvas above the shell.
   void _revealSearchResult(SearchResult r) {
+    // Clear any canvas already open on the root navigator FIRST, so navigating
+    // (e.g. tapping graph nodes) replaces rather than stacks a new canvas on
+    // top — one set of widgets, never duplicates.
+    Navigator.of(context, rootNavigator: true)
+        .popUntil((route) => route.isFirst);
     _jumpToNotebooksTab();
     final nav = _navKeys[_kNotebooks].currentState;
     if (nav == null) return;
@@ -254,7 +246,7 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
 
   Widget _tabRoot(int i) => switch (i) {
         _kNotebooks => const HomeScreen(),
-        _kBin => BinScreen(refreshSignal: _binRefresh),
+        _kGraph => const GraphScreen(),
         _kSettings => const SettingsScreen(),
         _kSearch => NoteSearchView(
             onReveal: _revealSearchResult,
@@ -300,7 +292,13 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
           itemCount: 4,
           // Swipe between tabs only at a tab's root; once drilled in, lock it
           // so horizontal drags belong to the content, not tab-switching.
-          physics: _swipeEnabled
+          // Also lock it *hard* during a reveal: revealing a link/search target
+          // pops the full-bleed canvas and pushes into the Notebooks tab, which
+          // churns the PageView layout — without this the controller could
+          // spuriously settle onto the adjacent (Graph) tab, and the Graph tab's
+          // heavy first build would outrun the snap-back window. NeverScrollable
+          // prevents any drift while jumpToPage still positions us correctly.
+          physics: (_swipeEnabled && !_revealing)
               ? const ClampingScrollPhysics()
               : const NeverScrollableScrollPhysics(),
           onPageChanged: (i) {
@@ -398,8 +396,9 @@ class _MobileTabBar extends StatelessWidget {
           height: 60,
           child: Row(
             children: [
-              // Order: Notebooks · Bin · Settings · Search (Search last so its
-              // keyboard is never adjacent to Notebooks).
+              // Order: Notebooks · Graph · Settings · Search (Search last so its
+              // keyboard is never adjacent to Notebooks). Bin moved to the
+              // home-screen app bar.
               _TabItem(
                 icon: Icons.book_outlined,
                 activeIcon: Icons.book,
@@ -408,9 +407,9 @@ class _MobileTabBar extends StatelessWidget {
                 onTap: () => onSelect(0),
               ),
               _TabItem(
-                icon: Icons.delete_outline,
-                activeIcon: Icons.delete,
-                label: 'Bin',
+                icon: Icons.hub_outlined,
+                activeIcon: Icons.hub,
+                label: 'Graph',
                 active: index == 1,
                 onTap: () => onSelect(1),
               ),

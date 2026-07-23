@@ -19,6 +19,7 @@ import '../utils/pdf_export_ui.dart';
 import '../utils/quick_note_ui.dart';
 import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
+import 'bin_screen.dart';
 import 'notebook_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -219,9 +220,14 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('Notebooks'),
         actions: [
-          // Search and Settings now live in the bottom navigation bar. The
-          // app bar keeps the sync status + add, consistent with the desktop
-          // notebooks-pane header.
+          // Search and Settings live in the bottom navigation bar; the Graph
+          // took the Bin's old tab, so the Bin moved here to the home app bar.
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: 'Recycle bin',
+            onPressed: () =>
+                Navigator.of(context).push(slideRoute(const BinScreen())),
+          ),
           const QuickNoteButton(),
           const SyncStatusIcon(),
           PopupMenuButton<String>(

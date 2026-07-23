@@ -25,13 +25,14 @@ import '../utils/sync_target_ui.dart';
 import '../utils/notebook_share_ui.dart';
 import '../utils/new_canvas_ui.dart';
 import 'canvas_workspace_screen.dart';
+import 'graph_screen.dart';
 import 'note_search.dart';
 import '../widgets/action_sheet.dart';
 import 'bin_screen.dart';
 import 'settings_screen.dart';
 
 /// What the desktop shell's main (rightmost) pane is showing.
-enum _MainMode { canvas, search, bin, settings }
+enum _MainMode { canvas, search, graph, bin, settings }
 
 /// OneNote-desktop-style three-pane view. Sidebar: notebooks (reorderable) →
 /// each expands to its **section** tree (drag/reorder/color/group,
@@ -124,12 +125,16 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
 
   Future<void> _openCanvasFromResult(SearchResult r) async {
     // A quick note just created this canvas, so the section tree + canvas maps
-    // are stale — reload so the reveal finds it, then open it embedded.
-    await _loadAll();
+    // are stale — reload so the reveal finds it. But when the notebook is
+    // already loaded (e.g. a graph node tap), skip the full reload so nav stays
+    // snappy.
+    if (_notebooks == null || !_notebooks!.any((n) => n.id == r.notebook.id)) {
+      await _loadAll();
+    }
     if (!mounted) return;
     setState(() {
       _mainMode = _MainMode.canvas;
-      _sidebarCollapsed = false;
+      if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
     });
     await _revealSearchResult(r);
   }
@@ -149,7 +154,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   void _revealFromLink(SearchResult r) {
     setState(() {
       _mainMode = _MainMode.canvas;
-      _sidebarCollapsed = false;
+      if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
     });
     _revealSearchResult(r);
   }
@@ -338,6 +343,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   }
 
   Future<void> _selectSection(Section section) async {
+    // Publish the section as the local-graph recenter target (so recentering
+    // works when you're on a section, not only a canvas).
+    LocalGraphController().setCurrentLocation(
+        LinkEndpoint(notebookId: section.notebookId, sectionId: section.id),
+        section.name);
     // Cache hit → switch instantly, no disk read. The cache is dropped on any
     // data change (dataVersion) and refreshed on local edits, so it's fresh.
     final cached = _canvasCache[section.id];
@@ -838,7 +848,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          body: LayoutBuilder(
+          // StackFit.expand so the panes fill the body even while the (closed)
+          // LocalGraphPanel is a zero-size child — otherwise the Stack collapses
+          // to 0×0 and nothing renders.
+          body: Stack(fit: StackFit.expand, children: [
+            LayoutBuilder(
             builder: (context, constraints) {
               // The left icon nav rail is a fixed strip; the pane width math works
               // off the space that remains beside it.
@@ -897,7 +911,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                 ],
               );
             },
-          ),
+            ),
+            // Floating local-graph card — persists across pane navigation until
+            // closed; opened from any Connections menu.
+            const LocalGraphPanel(),
+          ]),
         ),
       ),
     );
@@ -980,6 +998,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
             'Quick note (hold for options)',
             onTap: () => createQuickNote(context),
             onLongPress: () => chooseAndCreateQuickNote(context),
+          ),
+          // Connections graph — an Obsidian-style view of every internal link.
+          _railButton(
+            palette,
+            Icons.hub_outlined,
+            'Connections graph',
+            active: _mainMode == _MainMode.graph,
+            onTap: () => _openMainMode(_MainMode.graph),
           ),
           const Spacer(),
           // Bin sits just above Settings at the bottom.
@@ -1071,11 +1097,15 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           onReveal: (r) {
             setState(() {
               _mainMode = _MainMode.canvas;
-              _sidebarCollapsed = false; // re-expand to show where we landed
+              // re-expand to show where we landed (unless the user turned the
+              // auto-expand-on-reveal setting off)
+              if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
             });
             _revealSearchResult(r);
           },
         );
+      case _MainMode.graph:
+        return const GraphScreen();
       case _MainMode.bin:
         return BinScreen(refreshSignal: _binRefresh);
       case _MainMode.settings:
@@ -1300,11 +1330,22 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                     // No leaf icon — the colored identity pill is enough.
                     selectedId: _selectedCanvas?.id,
                     glowId: _glowId,
-                    onOpen: (c) => setState(() {
-                      _selectedCanvas = c;
-                      _mainMode = _MainMode.canvas; // leave Search/Bin
-                      _pendingJumpPageId = null; // manual open: don't re-jump
-                    }),
+                    onOpen: (c) {
+                      setState(() {
+                        _selectedCanvas = c;
+                        _mainMode = _MainMode.canvas; // leave Search/Bin
+                        _pendingJumpPageId = null; // manual open: don't re-jump
+                      });
+                      // Tell the floating local graph where we are (for its
+                      // recenter / follow).
+                      LocalGraphController().setCurrentLocation(
+                        LinkEndpoint(
+                            notebookId: section.notebookId,
+                            sectionId: section.id,
+                            canvasId: c.id),
+                        c.name,
+                      );
+                    },
                     onConnectionsLeaf: (c) => showConnectionsSheet(
                       context,
                       title: c.name,
@@ -1506,14 +1547,21 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
                               ),
                             InkWell(
                               borderRadius: BorderRadius.circular(kRadius),
-                              onTap: () => setState(() {
-                                if (expanded) {
-                                  _expanded.remove(notebook.id);
-                                } else {
-                                  _expanded.add(notebook.id);
-                                  _everExpanded.add(notebook.id);
-                                }
-                              }),
+                              onTap: () {
+                                // Publish the notebook as the local-graph
+                                // recenter target.
+                                LocalGraphController().setCurrentLocation(
+                                    LinkEndpoint(notebookId: notebook.id),
+                                    notebook.name);
+                                setState(() {
+                                  if (expanded) {
+                                    _expanded.remove(notebook.id);
+                                  } else {
+                                    _expanded.add(notebook.id);
+                                    _everExpanded.add(notebook.id);
+                                  }
+                                });
+                              },
                               child: SizedBox(
                                 height: 44,
                                 child: Row(

@@ -41,6 +41,7 @@ import '../widgets/connections_sheet.dart';
 import '../widgets/edit_link_sheet.dart';
 import '../widgets/link_target_picker.dart';
 import '../widgets/sync_status_icon.dart';
+import 'graph_screen.dart' show LocalGraphController;
 import 'canvas_toolbar/adaptive_toolbar_row.dart';
 import 'canvas_toolbar/canvas_chrome_shared.dart';
 import 'canvas_toolbar/customize_toolbar_sheet.dart';
@@ -247,9 +248,19 @@ class _CanvasScreenState extends State<CanvasScreen>
       _controller = CanvasController(canvas: widget.canvas, pages: pages)
         ..systemCopyHook = _copySelectionToSystemClipboard
         ..systemPasteFallback = _pasteFromSystemClipboard
+        ..addTextLinkHook = _startTextLink
         ..eraserPartial = SettingsService().eraserPartial
         ..eraserSize = SettingsService().eraserSize;
     });
+    // Publish the current selection (or the canvas) to the floating graph panel
+    // so recenter / live-follow tracks the ELEMENT you have selected, else this
+    // canvas. Only runs while the panel is open (desktop); debounced.
+    _controller!.addListener(_publishGraphLocation);
+    // Also publish once on open — the listener only fires on later controller
+    // changes, so switching canvases (which builds a fresh screen) wouldn't
+    // otherwise refresh the panel until you drew/panned. Fixes "navigating
+    // between canvases via the list doesn't refresh the connections list".
+    _publishGraphLocation();
     // Jump to a requested page (e.g. a bookmark opened from search) once the
     // first layout has set the screen size, so the fit math has real bounds.
     // An element-link arrival (LinkNavigator's one-shot pending focus) refines
@@ -627,11 +638,61 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (!widget.embedded) {
       SyncService().dataVersion.removeListener(_onSyncData);
     }
+    _graphLocDebounce?.cancel();
     _canvasFocus.dispose();
     _controller?.dispose(); // flushes pending saves
     _titleFocusNode?.dispose();
     _titleController?.dispose();
     super.dispose();
+  }
+
+  Timer? _graphLocDebounce;
+
+  /// Publishes the current selection (element) — or this canvas when nothing is
+  /// selected — as the floating graph panel's current location, so recenter and
+  /// live-follow track exactly where you are. No-op while the panel is closed
+  /// (so it's free on mobile / when you're not using the graph). Debounced so a
+  /// stroke or a drag doesn't spam it.
+  void _publishGraphLocation() {
+    if (!LocalGraphController().open) return;
+    _graphLocDebounce?.cancel();
+    _graphLocDebounce = Timer(const Duration(milliseconds: 350), () async {
+      final c = _controller;
+      if (c == null || !mounted) return;
+      final nb = widget.canvas.notebookId, sec = widget.canvas.sectionId;
+      // The "current item" is the lasso selection, else the text box being
+      // edited, else the canvas itself.
+      var pageId = c.selectionPageId;
+      var ids = [for (final e in c.selection) e.id];
+      if (ids.isEmpty && _textEdit != null) {
+        pageId = _textEdit!.pageId;
+        ids = [_textEdit!.element.id];
+      }
+      if (ids.isNotEmpty && pageId != null) {
+        // If these elements are already part of a link, publish THAT endpoint so
+        // it's the same graph node + its Connections list finds the record
+        // (avoids "same item shows as two nodes" / asymmetric lists).
+        final canon = await LinkService().canonicalElementEndpoint(ids);
+        if (!mounted) return;
+        LocalGraphController().setCurrentLocation(
+          canon ??
+              LinkEndpoint(
+                notebookId: nb,
+                sectionId: sec,
+                canvasId: widget.canvas.id,
+                pageId: pageId,
+                elementIds: ids,
+              ),
+          'Selection in ${widget.canvas.name}',
+        );
+      } else {
+        LocalGraphController().setCurrentLocation(
+          LinkEndpoint(
+              notebookId: nb, sectionId: sec, canvasId: widget.canvas.id),
+          widget.canvas.name,
+        );
+      }
+    });
   }
 
   // ── Pointer routing ──────────────────────────────────────────────────
@@ -984,9 +1045,55 @@ class _CanvasScreenState extends State<CanvasScreen>
     final caret = sel.baseOffset;
     if (rc.text.substring(caret - 2, caret) != '[[') return;
 
+    _openLinkPicker(
+      pageId: session.pageId,
+      elementId: session.element.id,
+      caret: caret,
+      bracket: true,
+    );
+  }
+
+  /// The text toolbar's "add link" button. Opens the same picker as the `[[`
+  /// trigger, keyed off the current selection: a collapsed caret inserts the
+  /// target's name as a link (like `[[`); a range hyperlinks the SELECTED text
+  /// (it stays as the clickable display). Works while editing on both layouts.
+  void _startTextLink() {
+    final session = _textEdit;
+    if (session == null) return;
+    final sel = session.controller.selection;
+    if (!sel.isValid) return;
+    if (sel.isCollapsed) {
+      _openLinkPicker(
+          pageId: session.pageId,
+          elementId: session.element.id,
+          caret: sel.baseOffset);
+    } else {
+      _openLinkPicker(
+          pageId: session.pageId,
+          elementId: session.element.id,
+          selStart: sel.start,
+          selEnd: sel.end);
+    }
+  }
+
+  /// Shared link-insert flow for the `[[` trigger and the toolbar button. The
+  /// session is COMMITTED first (a modal picker's taps would kill it anyway),
+  /// then the pick is applied to the committed element by id: a [selStart]/
+  /// [selEnd] range gets the link applied over the selected text; a [bracket]
+  /// caret replaces the `[[` marker; a plain caret inserts the target's name.
+  /// A connection is registered either way (element endpoint → shows in the
+  /// target's Connections list; a pasted element link also drops a reciprocal
+  /// marker).
+  void _openLinkPicker({
+    required String pageId,
+    required String elementId,
+    int? caret,
+    int? selStart,
+    int? selEnd,
+    bool bracket = false,
+  }) {
+    if (_linkPickerBusy) return;
     _linkPickerBusy = true;
-    final pageId = session.pageId;
-    final elementId = session.element.id;
     // Post-frame: committing tears the session down, which must not happen
     // inside the controller's own change notification (same re-entrancy rule
     // as _handleTypingOverflow).
@@ -996,14 +1103,20 @@ class _CanvasScreenState extends State<CanvasScreen>
         return;
       }
       if (_textEdit?.element.id == elementId) _commitTextEdit();
-      showLinkTargetPicker(context).then((r) async {
+      showLinkTargetPicker(context).then((pick) async {
         _linkPickerBusy = false;
-        if (r == null || !mounted) return;
-        final target = endpointOfSearchResult(r);
-        if (target == null) return;
-        _controller?.insertLinkIntoText(
-            pageId, elementId, caret, r.title, target.toUri());
-        await LinkService().addLink(
+        if (pick == null || !mounted) return;
+        final c = _controller;
+        if (c == null) return;
+        final uri = pick.target.toUri();
+        if (selStart != null && selEnd != null) {
+          c.applyLinkToRange(pageId, elementId, selStart, selEnd, uri);
+        } else if (bracket && caret != null) {
+          c.insertLinkIntoText(pageId, elementId, caret, pick.title, uri);
+        } else if (caret != null) {
+          c.insertLinkAtCaret(pageId, elementId, caret, pick.title, uri);
+        }
+        await LinkService().addLinkWithReciprocalMarker(
           from: LinkEndpoint(
             notebookId: widget.canvas.notebookId,
             sectionId: widget.canvas.sectionId,
@@ -1011,9 +1124,9 @@ class _CanvasScreenState extends State<CanvasScreen>
             pageId: pageId,
             elementIds: [elementId],
           ),
-          to: target,
+          to: pick.target,
           fromName: 'Link in ${widget.canvas.name}',
-          toName: r.title,
+          toName: pick.title,
         );
       });
     });
@@ -2566,13 +2679,21 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
-  /// The canvas ⋯ menu's "All connections": every link touching anything in
-  /// this canvas (its pages, elements, bookmarks — or the canvas itself).
+  /// The canvas's "All connections": every link touching anything inside this
+  /// canvas (its pages, elements, bookmarks, or the canvas itself) — the
+  /// aggregate, as before — plus Copy link / Add / Tags for the canvas itself
+  /// (via selfEndpoint). A target inside this same canvas jumps in place.
   void _showCanvasConnections() {
     showConnectionsSheet(
       context,
       title: widget.canvas.name,
       aggregateCanvasId: widget.canvas.id,
+      selfEndpoint: LinkEndpoint(
+        notebookId: widget.canvas.notebookId,
+        sectionId: widget.canvas.sectionId,
+        canvasId: widget.canvas.id,
+      ),
+      selfName: widget.canvas.name,
       insideCanvasId: widget.canvas.id,
       onJumpInSameCanvas: _jumpInThisCanvas,
     );

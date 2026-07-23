@@ -120,6 +120,20 @@ class SettingsService {
     await _persist();
   }
 
+  /// Auto-expand the notebook/canvas list panes when navigating in-place via a
+  /// tapped link (Connections), a graph edge/node, or a search reveal. When on
+  /// (default), landing on a target re-expands a collapsed desktop sidebar so
+  /// you see where you landed; when off, the panes stay however you left them
+  /// (open the list manually to see the graph/tree). Device-local (never
+  /// synced). Managed under Settings for now.
+  bool autoExpandOnReveal = true;
+
+  Future<void> setAutoExpandOnReveal(bool value) async {
+    if (autoExpandOnReveal == value) return;
+    autoExpandOnReveal = value;
+    await _persist();
+  }
+
   /// Read-aloud scope: when true the reader speaks only the first page of each
   /// row (vertical pages only), skipping horizontal continuation pages.
   /// Device-local; default OFF (read every page). Toggled by the reader bar's
@@ -129,6 +143,60 @@ class SettingsService {
   Future<void> setReadAloudMainColumnOnly(bool value) async {
     if (readAloudMainColumnOnly == value) return;
     readAloudMainColumnOnly = value;
+    await _persist();
+  }
+
+  /// Connections-graph appearance + view toggles. Device-local (never synced —
+  /// how you *view* the graph is per-device, like zoom/pan and layout mode).
+  double graphNodeSize = 1.0;
+  double graphTextSize = 1.0;
+  double graphLinkThickness = 1.0;
+  double graphLinkOpacity = 0.6;
+  double graphLabelOpacity = 0.95;
+  bool graphAlwaysLabels = false;
+  bool graphAbstractItems = true;
+  bool graphShowExternal = true;
+  bool graphShowUnlinked = false;
+  bool graphSameCanvasLinks = true; // dashed links among same-canvas items
+  bool graphPinOnDrag = false; // dragging a node pins it in place (off = springs back)
+  bool graphAutoScale = true; // auto-fit/reframe the graph after it settles (off = keep your zoom/pan)
+
+  /// Free-form persisted graph-view state (device-local): selected/hidden
+  /// containers, tag filter, active project, and panel expand states. A blob so
+  /// the controller and panel can each patch their own keys.
+  Map<String, dynamic> graphView = {};
+
+  Future<void> patchGraphView(Map<String, dynamic> partial) async {
+    graphView = {...graphView, ...partial};
+    await _persist();
+  }
+
+  Future<void> saveGraphSettings({
+    double? nodeSize,
+    double? textSize,
+    double? linkThickness,
+    double? linkOpacity,
+    double? labelOpacity,
+    bool? alwaysLabels,
+    bool? abstractItems,
+    bool? showExternal,
+    bool? showUnlinked,
+    bool? sameCanvasLinks,
+    bool? pinOnDrag,
+    bool? autoScale,
+  }) async {
+    graphNodeSize = nodeSize ?? graphNodeSize;
+    graphTextSize = textSize ?? graphTextSize;
+    graphLinkThickness = linkThickness ?? graphLinkThickness;
+    graphLinkOpacity = linkOpacity ?? graphLinkOpacity;
+    graphLabelOpacity = labelOpacity ?? graphLabelOpacity;
+    graphAlwaysLabels = alwaysLabels ?? graphAlwaysLabels;
+    graphAbstractItems = abstractItems ?? graphAbstractItems;
+    graphShowExternal = showExternal ?? graphShowExternal;
+    graphShowUnlinked = showUnlinked ?? graphShowUnlinked;
+    graphSameCanvasLinks = sameCanvasLinks ?? graphSameCanvasLinks;
+    graphPinOnDrag = pinOnDrag ?? graphPinOnDrag;
+    graphAutoScale = autoScale ?? graphAutoScale;
     await _persist();
   }
 
@@ -415,7 +483,21 @@ class SettingsService {
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
+    autoExpandOnReveal = data['autoExpandOnReveal'] != false; // default ON
     readAloudMainColumnOnly = data['readAloudMainColumnOnly'] == true;
+    graphNodeSize = (data['graphNodeSize'] as num?)?.toDouble() ?? 1.0;
+    graphTextSize = (data['graphTextSize'] as num?)?.toDouble() ?? 1.0;
+    graphLinkThickness = (data['graphLinkThickness'] as num?)?.toDouble() ?? 1.0;
+    graphLinkOpacity = (data['graphLinkOpacity'] as num?)?.toDouble() ?? 0.6;
+    graphLabelOpacity = (data['graphLabelOpacity'] as num?)?.toDouble() ?? 0.95;
+    graphAlwaysLabels = data['graphAlwaysLabels'] == true; // default false
+    graphAbstractItems = data['graphAbstractItems'] != false; // default true
+    graphShowExternal = data['graphShowExternal'] != false; // default true
+    graphShowUnlinked = data['graphShowUnlinked'] == true; // default false
+    graphSameCanvasLinks = data['graphSameCanvasLinks'] != false; // default true
+    graphPinOnDrag = data['graphPinOnDrag'] == true; // default false
+    graphAutoScale = data['graphAutoScale'] != false; // default true
+    graphView = (data['graphView'] as Map?)?.cast<String, dynamic>() ?? {};
     ttsVoiceName = data['ttsVoiceName'] as String?;
     ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
     shapeToolKind = ShapeToolKind.values.firstWhere(
@@ -615,7 +697,21 @@ class SettingsService {
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
+        'autoExpandOnReveal': autoExpandOnReveal,
         'readAloudMainColumnOnly': readAloudMainColumnOnly,
+        'graphNodeSize': graphNodeSize,
+        'graphTextSize': graphTextSize,
+        'graphLinkThickness': graphLinkThickness,
+        'graphLinkOpacity': graphLinkOpacity,
+        'graphLabelOpacity': graphLabelOpacity,
+        'graphAlwaysLabels': graphAlwaysLabels,
+        'graphAbstractItems': graphAbstractItems,
+        'graphShowExternal': graphShowExternal,
+        'graphShowUnlinked': graphShowUnlinked,
+        'graphSameCanvasLinks': graphSameCanvasLinks,
+        'graphPinOnDrag': graphPinOnDrag,
+        'graphAutoScale': graphAutoScale,
+        'graphView': graphView,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
         'eraserPartial': eraserPartial,

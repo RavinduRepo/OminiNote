@@ -38,11 +38,30 @@ class CanvasSyncListener {
           String pageId, List<String> nearIds, String uri, String title)?
       onInsertMarker;
 
+  /// Called to delete standalone link markers among [ids] on [pageId] of this
+  /// OPEN canvas — the marker-cleanup half of a connection removal (Model A),
+  /// done in memory so the canvas's own autosave can't clobber a disk write.
+  final Future<void> Function(String pageId, List<String> ids)? onRemoveMarker;
+
+  /// Called to rewrite link-run URIs on [pageId] of this OPEN canvas that point
+  /// at a moved element — the cross-canvas half of "a linked item moved pages"
+  /// when the far canvas is open in a split (done in memory, not on disk).
+  final Future<void> Function(String pageId, Set<String> movedIds,
+      String movedCanvasId, String fromPage, String toPage)? onRemapMarkerUris;
+
+  /// Called to flash + scroll to elements of this OPEN canvas (a graph node tap
+  /// targeting the already-open canvas) — so the glow re-fires on every tap,
+  /// including items in the current canvas, where opening it would no-op.
+  final void Function(String pageId, List<String> elementIds)? onFocusElements;
+
   const CanvasSyncListener({
     required this.onPage,
     required this.onStructure,
     this.onRestorePage,
     this.onInsertMarker,
+    this.onRemoveMarker,
+    this.onRemapMarkerUris,
+    this.onFocusElements,
   });
 }
 
@@ -131,6 +150,42 @@ class SyncService {
     final cb = _canvasListeners[canvasId]?.onInsertMarker;
     if (cb == null) return (handled: false, markerId: null);
     return (handled: true, markerId: await cb(pageId, nearIds, uri, title));
+  }
+
+  /// If the named canvas is open, delete the standalone link markers among
+  /// [ids] on [pageId] through its live controller and return true; false means
+  /// "not open" so the caller edits the page file. Mirrors
+  /// [insertMarkerInOpenCanvas].
+  Future<bool> removeMarkersInOpenCanvas(
+      String canvasId, String pageId, List<String> ids) async {
+    final cb = _canvasListeners[canvasId]?.onRemoveMarker;
+    if (cb == null) return false;
+    await cb(pageId, ids);
+    return true;
+  }
+
+  /// If the named canvas is open, rewrite its link-run URIs pointing at the
+  /// moved element through its live controller and return true; false → not
+  /// open (the caller edits the page file). Mirrors [removeMarkersInOpenCanvas].
+  Future<bool> remapMarkerUrisInOpenCanvas(String canvasId, String pageId,
+      Set<String> movedIds, String movedCanvasId, String fromPage,
+      String toPage) async {
+    final cb = _canvasListeners[canvasId]?.onRemapMarkerUris;
+    if (cb == null) return false;
+    await cb(pageId, movedIds, movedCanvasId, fromPage, toPage);
+    return true;
+  }
+
+  /// If the named canvas is open, flash + scroll to [elementIds] on [pageId]
+  /// through its live controller and return true; false → not open (the caller
+  /// navigates + hands off a pending focus instead). Lets a graph node tap
+  /// re-glow the current canvas on every tap.
+  bool focusElementsInOpenCanvas(
+      String canvasId, String pageId, List<String> elementIds) {
+    final cb = _canvasListeners[canvasId]?.onFocusElements;
+    if (cb == null) return false;
+    cb(pageId, elementIds);
+    return true;
   }
 
   // Per-account sync state, keyed by account id (Google `sub`).
@@ -445,10 +500,13 @@ class SyncService {
           await batchedSave();
           continue;
         }
-        if (rel == 'links.json') {
-          // Connections registry: uploaded whole to every account (records are
-          // tiny id tuples; the union merge makes any account's copy safe to
-          // reconcile against, and endpoints an account lacks resolve as dead).
+        if (rel == 'links.json' ||
+            rel == 'tags.json' ||
+            rel == 'projects.json') {
+          // Connections + tag + project registries: uploaded whole to every account
+          // (records are tiny id tuples; the union merge makes any account's
+          // copy safe to reconcile against, and endpoints an account lacks
+          // resolve as dead).
           final file = NotebookService().fileForRelPath(rel);
           if (await file.exists()) {
             final content = await file.readAsString();
@@ -633,7 +691,10 @@ class SyncService {
       // Push local files this account OWNS that its Drive lacks.
       for (final rel in localPaths) {
         if (remote.containsKey(rel)) continue;
-        if (rel == 'notebooks.json' || rel == 'links.json') {
+        if (rel == 'notebooks.json' ||
+            rel == 'links.json' ||
+            rel == 'tags.json' ||
+            rel == 'projects.json') {
           _dirty.add(rel); // uploaded per-account by the push drain
           continue;
         }

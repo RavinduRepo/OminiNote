@@ -776,6 +776,12 @@ Widget buildTextStyleRow(
                 cycle: true,
               ),
             ),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Add link (select text to link it, or link at the caret)',
+              icon: const Icon(Icons.link, size: 18),
+              onPressed: () => c.addTextLinkHook?.call(),
+            ),
           ],
           divider(),
           for (final preset in _presetColors)
