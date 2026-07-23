@@ -8,6 +8,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/app_toast.dart';
@@ -136,6 +137,10 @@ class _CanvasScreenState extends State<CanvasScreen>
   // "Recordings" action, or kept up while a take plays). Replaces the old
   // Recordings bottom sheet.
   bool _audioPlayerOpen = false;
+
+  // The video whose floating player is open (asset id + display name), or null.
+  String? _videoAssetId;
+  String? _videoName;
 
   // Tap tracking for the text tool (placement happens on tap-up).
   Offset? _downPosition;
@@ -1373,6 +1378,10 @@ class _CanvasScreenState extends State<CanvasScreen>
         return;
       }
     }
+    if (el.mime.startsWith('video/')) {
+      await _openVideoPlayer(el.assetId, el.name);
+      return;
+    }
     final file = _service.assetFile(widget.canvas, el.assetId);
     if (!await file.exists()) {
       _toast(
@@ -2158,6 +2167,13 @@ class _CanvasScreenState extends State<CanvasScreen>
                 subtitle: const Text('From files'),
                 onTap: () => Navigator.pop(context, 'image'),
               ),
+            if (shown('video'))
+              ListTile(
+                leading: const Icon(Icons.movie_outlined),
+                title: const Text('Video'),
+                subtitle: const Text('Play a video file over the canvas'),
+                onTap: () => Navigator.pop(context, 'video'),
+              ),
             if (Platform.isAndroid || Platform.isIOS)
               ListTile(
                 leading: const Icon(Icons.photo_camera_outlined),
@@ -2220,6 +2236,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         await _insertPdfFlow();
       case 'image':
         await _insertImageFlow();
+      case 'video':
+        await _importVideoFlow();
       case 'camera':
         await _capturePhotoFlow();
       case 'paste':
@@ -2263,6 +2281,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
         if (shown('image'))
           iconMenuItem('image', Icons.image_outlined, 'Insert image'),
+        if (shown('video'))
+          iconMenuItem('video', Icons.movie_outlined, 'Import video'),
         // Same gate as the mobile Add sheet — an Android/iOS device in the
         // desktop *layout* has a camera; true desktop OSes (no image_picker
         // camera support) don't show it.
@@ -2440,6 +2460,55 @@ class _CanvasScreenState extends State<CanvasScreen>
   String _stripExtension(String fileName) {
     final dot = fileName.lastIndexOf('.');
     return dot > 0 ? fileName.substring(0, dot) : fileName;
+  }
+
+  /// Imports a video file: stored as an attachment + a tappable chip, then the
+  /// floating video player opens on it.
+  Future<void> _importVideoFlow() async {
+    final c = _controller;
+    if (c == null) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'],
+    );
+    final picked = result?.files.single;
+    final path = picked?.path;
+    if (path == null || !mounted) return;
+    final name = _stripExtension(picked!.name);
+    final att = await c.importVideo(path, name);
+    if (!mounted) return;
+    if (att == null) {
+      _toast('Couldn’t read that video file');
+      return;
+    }
+    _openVideoPlayer(att.assetId, att.name);
+  }
+
+  /// Opens the floating video player on [assetId], guarding a not-yet-synced
+  /// asset.
+  Future<void> _openVideoPlayer(String assetId, String name) async {
+    final c = _controller;
+    if (c == null) return;
+    final file = c.assetFileOf(assetId);
+    if (!await file.exists()) {
+      _toast('Video not available yet (still syncing?)');
+      return;
+    }
+    setState(() {
+      _videoAssetId = assetId;
+      _videoName = name;
+    });
+    await c.videoPlayback.play(assetId, file.path);
+  }
+
+  void _closeVideoPlayer() {
+    _controller?.videoPlayback.stop();
+    if (mounted) {
+      setState(() {
+        _videoAssetId = null;
+        _videoName = null;
+      });
+    }
   }
 
   /// Captures a photo with the device camera and drops it on the page.
@@ -3115,6 +3184,9 @@ class _CanvasScreenState extends State<CanvasScreen>
                               Navigator.pop(context);
                               setState(() => _audioPlayerOpen = true);
                               await _playRecording(c, e.recording!);
+                            } else if (e.kind == _MediaKind.video) {
+                              Navigator.pop(context);
+                              await _openVideoPlayer(e.assetId, e.name);
                             } else if (e.pageId != null) {
                               Navigator.pop(context);
                               c.jumpToPage(e.pageId!);
@@ -3129,6 +3201,9 @@ class _CanvasScreenState extends State<CanvasScreen>
                                   Navigator.pop(context);
                                   setState(() => _audioPlayerOpen = true);
                                   await _playRecording(c, e.recording!);
+                                case 'play_video':
+                                  Navigator.pop(context);
+                                  await _openVideoPlayer(e.assetId, e.name);
                                 case 'jump':
                                   Navigator.pop(context);
                                   c.jumpToPage(e.pageId!);
@@ -3166,6 +3241,11 @@ class _CanvasScreenState extends State<CanvasScreen>
                               if (e.recording != null)
                                 const PopupMenuItem(
                                   value: 'play',
+                                  child: Text('Play'),
+                                ),
+                              if (e.kind == _MediaKind.video)
+                                const PopupMenuItem(
+                                  value: 'play_video',
                                   child: Text('Play'),
                                 ),
                               if (e.pageId != null)
@@ -3995,6 +4075,20 @@ class _CanvasScreenState extends State<CanvasScreen>
                           onRename: (rec) => _renameRecording(c, rec),
                           onDelete: (rec) => _deleteRecording(c, rec),
                           onClose: _closeAudioPlayer,
+                        ),
+                      ),
+                    ),
+                  ),
+                // Floating video player.
+                if (_videoAssetId != null)
+                  Positioned.fill(
+                    child: _DraggableFloatingBar(
+                      initialAlignment: Alignment.center,
+                      child: _absorbTaps(
+                        _VideoPlayerBar(
+                          controller: c,
+                          name: _videoName ?? 'Video',
+                          onClose: _closeVideoPlayer,
                         ),
                       ),
                     ),
@@ -5049,6 +5143,178 @@ class _ReaderBar extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The floating video player — a small movable panel showing the media_kit
+/// video surface with a scrubber, ±10s skips, play/pause, a cycling speed chip,
+/// and a close button. Mirrors [_AudioPlayerBar]'s look.
+class _VideoPlayerBar extends StatelessWidget {
+  final CanvasController controller;
+  final String name;
+  final VoidCallback onClose;
+
+  const _VideoPlayerBar({
+    required this.controller,
+    required this.name,
+    required this.onClose,
+  });
+
+  static const List<double> _speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final playback = controller.videoPlayback;
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 8),
+          decoration: BoxDecoration(
+            color: palette.surface2,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: palette.border),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: palette.textDim,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Close',
+                    onPressed: onClose,
+                  ),
+                ],
+              ),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Video(
+                    controller: playback.controller,
+                    controls: NoVideoControls,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              ValueListenableBuilder<Duration>(
+                valueListenable: playback.duration,
+                builder: (context, dur, _) {
+                  final maxMs =
+                      dur.inMilliseconds <= 0 ? 1 : dur.inMilliseconds;
+                  return ValueListenableBuilder<Duration>(
+                    valueListenable: playback.position,
+                    builder: (context, pos, _) => Row(
+                      children: [
+                        Text(
+                          _fmtDuration(pos),
+                          style: TextStyle(fontSize: 11, color: palette.textDim),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: pos.inMilliseconds
+                                .clamp(0, maxMs)
+                                .toDouble(),
+                            max: maxMs.toDouble(),
+                            onChanged: (v) => playback.seek(
+                              Duration(milliseconds: v.round()),
+                            ),
+                          ),
+                        ),
+                        Text(
+                          _fmtDuration(dur),
+                          style: TextStyle(fontSize: 11, color: palette.textDim),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.replay_10, size: 22),
+                    tooltip: 'Back 10s',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () =>
+                        playback.skip(const Duration(seconds: -10)),
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: playback.playing,
+                    builder: (context, playing, _) => IconButton(
+                      icon: Icon(
+                        playing ? Icons.pause : Icons.play_arrow,
+                        size: 26,
+                      ),
+                      color: palette.accent,
+                      tooltip: playing ? 'Pause' : 'Play',
+                      onPressed: playback.togglePlay,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.forward_10, size: 22),
+                    tooltip: 'Forward 10s',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => playback.skip(const Duration(seconds: 10)),
+                  ),
+                  const Spacer(),
+                  ValueListenableBuilder<double>(
+                    valueListenable: playback.speed,
+                    builder: (context, sp, _) => InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        final i = _speeds.indexOf(sp);
+                        final next = _speeds[(i + 1) % _speeds.length];
+                        playback.setSpeed(next);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        child: Text(
+                          '$sp×',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: palette.textDim,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

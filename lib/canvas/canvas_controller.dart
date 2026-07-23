@@ -11,6 +11,7 @@ import '../models/link.dart';
 import '../models/shape_template.dart';
 import '../services/audio_playback_service.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/video_playback_service.dart';
 import '../services/link_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
@@ -4426,6 +4427,59 @@ class CanvasController extends ChangeNotifier {
     return _playback!;
   }
 
+  VideoPlaybackService? _videoPlayback;
+
+  /// Lazily-created video playback service (one media_kit Player per open
+  /// canvas). Created on first use so canvases with no video never touch the
+  /// plugin.
+  VideoPlaybackService get videoPlayback =>
+      _videoPlayback ??= VideoPlaybackService();
+
+  /// Imports a video file [srcPath] onto this canvas: stores it as a
+  /// content-addressed asset, records it as an [Attachment] (so it lists in the
+  /// Attachments sheet + syncs via canvas.json), and drops a tappable video
+  /// chip on the current page. Returns the attachment, or null on read failure.
+  Future<Attachment?> importVideo(String srcPath, String name) async {
+    final ext = srcPath.contains('.')
+        ? srcPath.split('.').last.toLowerCase()
+        : 'mp4';
+    final String assetId;
+    try {
+      final bytes = await File(srcPath).readAsBytes();
+      assetId = await _service.putAsset(canvas, bytes, ext);
+    } catch (_) {
+      return null;
+    }
+    final att = Attachment(
+      id: newModelId('att'),
+      name: name.isEmpty ? 'Video' : name,
+      assetId: assetId,
+      mime: _videoMimeForExt(ext),
+      addedAt: DateTime.now(),
+    );
+    addAttachment(att);
+    addAttachmentChip(assetId, att.name, att.mime);
+    return att;
+  }
+
+  String _videoMimeForExt(String ext) {
+    switch (ext) {
+      case 'mp4':
+      case 'm4v':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'webm':
+        return 'video/webm';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'avi':
+        return 'video/x-msvideo';
+      default:
+        return 'video/mp4';
+    }
+  }
+
   void _updateAudioPlayhead() {
     final p = _playback;
     if (p == null || !p.playing.value) {
@@ -5107,6 +5161,7 @@ class CanvasController extends ChangeNotifier {
     _saveTimer?.cancel();
     unawaited(_recorder?.dispose());
     unawaited(_playback?.dispose());
+    unawaited(_videoPlayback?.dispose());
     _saveReadingPosition();
     unawaited(_tts?.dispose());
     _pdfTextCache?.clear();

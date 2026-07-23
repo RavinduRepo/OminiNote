@@ -35,6 +35,7 @@ const List<ToolbarActionSpec> kAddActionSpecs = [
   ToolbarActionSpec('horizontal', Icons.swap_horiz, 'Horizontal page'),
   ToolbarActionSpec('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
   ToolbarActionSpec('image', Icons.image_outlined, 'Insert image'),
+  ToolbarActionSpec('video', Icons.movie_outlined, 'Import video'),
   ToolbarActionSpec('paste', Icons.content_paste, 'Paste'),
   // Audio capture/playback are content additions, so they live in the "+"
   // menu alongside the other insert actions.
