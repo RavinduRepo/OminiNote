@@ -3966,15 +3966,13 @@ class _CanvasScreenState extends State<CanvasScreen>
                 // this area is shared). Wrapped in an opaque Listener so taps on
                 // the whole card — including gaps between its buttons — are
                 // absorbed and never reach the canvas below.
-                Positioned(
-                  top: 8,
-                  left: 0,
-                  right: 0,
+                Positioned.fill(
                   child: ValueListenableBuilder<bool>(
                     valueListenable: c.isRecordingAudioNotifier,
                     builder: (context, recording, _) => recording
-                        ? Align(
-                            alignment: Alignment.topCenter,
+                        ? _DraggableFloatingBar(
+                            initialAlignment: Alignment.topCenter,
+                            margin: const EdgeInsets.only(top: 8),
                             child: _absorbTaps(
                               _RecordingBar(
                                 startedAt: c.audioRecordingStartedAt,
@@ -3988,12 +3986,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                 ),
                 // Floating audio player (replaces the Recordings sheet).
                 if (_audioPlayerOpen)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 12,
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
+                  Positioned.fill(
+                    child: _DraggableFloatingBar(
                       child: _absorbTaps(
                         _AudioPlayerBar(
                           controller: c,
@@ -4009,12 +4003,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                 ValueListenableBuilder<bool>(
                   valueListenable: c.readAloudActive,
                   builder: (context, active, _) => active
-                      ? Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 12,
-                          child: Align(
-                            alignment: Alignment.bottomCenter,
+                      ? Positioned.fill(
+                          child: _DraggableFloatingBar(
                             child: _absorbTaps(
                               _ReaderBar(
                                 controller: c,
@@ -4464,6 +4454,91 @@ class _ToolOptionsPanel extends StatelessWidget {
 
 // _HintRow, _SelAction, _ToggleChip, _ColorDot, _WheelDot now live in
 // canvas_toolbar/tool_option_rows.dart (private to that file).
+
+/// Wraps a floating canvas bar (audio player, recorder, reader, video player)
+/// so the user can reposition it by dragging a small grip handle. Only the
+/// handle initiates the drag — never the bar body — so the bar's own controls
+/// (scrubber slider, buttons) keep working. It rests at [initialAlignment]
+/// within the canvas area and clamps so it can't be dragged fully off-screen.
+/// Placed as a `Positioned.fill` child of the canvas Stack; the empty space
+/// around the bar stays click-through because the Stack only hit-tests the bar
+/// and its handle.
+class _DraggableFloatingBar extends StatefulWidget {
+  final Widget child;
+  final Alignment initialAlignment;
+  final EdgeInsets margin;
+  const _DraggableFloatingBar({
+    required this.child,
+    this.initialAlignment = Alignment.bottomCenter,
+    this.margin = const EdgeInsets.all(12),
+  });
+
+  @override
+  State<_DraggableFloatingBar> createState() => _DraggableFloatingBarState();
+}
+
+class _DraggableFloatingBarState extends State<_DraggableFloatingBar> {
+  Offset _offset = Offset.zero;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Soft clamp: keep the bar's grab point roughly within the canvas area
+        // without needing to measure the bar's exact size.
+        final maxDx =
+            (constraints.maxWidth / 2 - 24).clamp(0.0, double.infinity);
+        final maxDy =
+            (constraints.maxHeight / 2 - 24).clamp(0.0, double.infinity);
+        final clamped = Offset(
+          _offset.dx.clamp(-maxDx, maxDx),
+          _offset.dy.clamp(-maxDy, maxDy),
+        );
+        return Align(
+          alignment: widget.initialAlignment,
+          child: Padding(
+            padding: widget.margin,
+            child: Transform.translate(
+              offset: clamped,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanUpdate: (d) =>
+                        setState(() => _offset = clamped + d.delta),
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.move,
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 2,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: palette.surface2,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: palette.border),
+                        ),
+                        child: Icon(
+                          Icons.drag_indicator,
+                          size: 18,
+                          color: palette.textDim,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Flexible(child: widget.child),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
 
 /// Floating pill shown while a voice recording runs: a pulsing red dot, a live
 /// elapsed timer, and Stop / discard controls. Overlaid on the canvas so the
