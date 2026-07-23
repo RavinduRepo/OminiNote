@@ -2881,6 +2881,106 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
+  /// Gathers every piece of media this canvas references, from any source
+  /// (recordings, attachment records, PDF-backed pages, on-page images/chips),
+  /// deduped by asset so a multi-page PDF or a twice-used asset lists once.
+  List<_MediaEntry> _collectMedia(CanvasController c) {
+    final entries = <_MediaEntry>[];
+    final seen = <String>{};
+    // Recordings (voice + imported audio) are the canonical audio items.
+    for (final rec in c.canvas.recordings) {
+      entries.add(_MediaEntry(
+        kind: _MediaKind.audio,
+        name: rec.name,
+        assetId: rec.assetId,
+        mime: 'audio/mp4',
+        recording: rec,
+      ));
+      seen.add(rec.assetId);
+    }
+    // Explicit attachment records (PDFs added "as attachment", future files).
+    for (final att in c.canvas.attachments) {
+      if (!seen.add(att.assetId)) continue;
+      entries.add(_MediaEntry(
+        kind: _mediaKindFromMime(att.mime),
+        name: att.name,
+        assetId: att.assetId,
+        mime: att.mime,
+        attachment: att,
+      ));
+    }
+    // Media drawn on pages: PDF-backed pages, images, and attachment chips not
+    // already covered above.
+    for (final pl in c.layout.pages) {
+      final page = c.pages[pl.pageId];
+      if (page == null) continue;
+      final src = page.source;
+      if (src != null && seen.add(src.assetId)) {
+        entries.add(_MediaEntry(
+          kind: _MediaKind.pdf,
+          name: 'PDF (view)',
+          assetId: src.assetId,
+          mime: 'application/pdf',
+          pageId: pl.pageId,
+          pdfView: true,
+        ));
+      }
+      for (final el in page.objects) {
+        if (el is ImageElement && seen.add(el.assetId)) {
+          entries.add(_MediaEntry(
+            kind: _MediaKind.image,
+            name: 'Image',
+            assetId: el.assetId,
+            mime: 'image/*',
+            pageId: pl.pageId,
+          ));
+        } else if (el is AttachmentElement && seen.add(el.assetId)) {
+          entries.add(_MediaEntry(
+            kind: _mediaKindFromMime(el.mime),
+            name: el.name,
+            assetId: el.assetId,
+            mime: el.mime,
+            pageId: pl.pageId,
+          ));
+        }
+      }
+    }
+    return entries;
+  }
+
+  String _mediaSubtitle(_MediaEntry e) {
+    if (e.recording != null && e.recording!.durationMs > 0) {
+      return _fmtDuration(Duration(milliseconds: e.recording!.durationMs));
+    }
+    switch (e.kind) {
+      case _MediaKind.audio:
+        return 'Audio';
+      case _MediaKind.image:
+        return 'Image';
+      case _MediaKind.pdf:
+        return e.pdfView ? 'PDF · in pages' : 'PDF';
+      case _MediaKind.video:
+        return 'Video';
+      case _MediaKind.other:
+        return 'File';
+    }
+  }
+
+  /// Opens an asset externally (OpenFilex), inferring the type from the
+  /// extension when the mime is a wildcard placeholder.
+  Future<void> _openMediaExternally(_MediaEntry e) async {
+    final f = _service.assetFile(widget.canvas, e.assetId);
+    if (!await f.exists()) {
+      _toast('File not available yet (still syncing?)');
+      return;
+    }
+    final type = e.mime.contains('*') ? null : e.mime;
+    OpenFilex.open(f.path, type: type);
+  }
+
+  /// The Attachments sheet — now an aggregate of ALL media on the canvas
+  /// (recordings, imported audio, attachment files, PDFs, and on-page images),
+  /// each with a kind-appropriate primary tap and action menu.
   Future<void> _showAttachments() async {
     final c = _controller!;
     await showAdaptiveMenu<void>(
@@ -2891,7 +2991,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         child: ListenableBuilder(
           listenable: c,
           builder: (context, _) {
-            final items = c.canvas.attachments;
+            final items = _collectMedia(c);
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -2900,7 +3000,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                 if (items.isEmpty)
                   const Padding(
                     padding: EdgeInsets.all(24),
-                    child: Text('No attachments yet'),
+                    child: Text('No media on this canvas yet'),
                   )
                 else
                   Flexible(
@@ -2908,55 +3008,89 @@ class _CanvasScreenState extends State<CanvasScreen>
                       shrinkWrap: true,
                       itemCount: items.length,
                       itemBuilder: (context, i) {
-                        final att = items[i];
-                        final isPdf = att.mime == 'application/pdf';
+                        final e = items[i];
                         return ListTile(
-                          leading: Icon(
-                            isPdf
-                                ? Icons.picture_as_pdf_outlined
-                                : Icons.attach_file,
-                          ),
-                          title: Text(att.name),
+                          leading: Icon(_mediaKindIcon(e.kind)),
+                          title: Text(e.name),
+                          subtitle: Text(_mediaSubtitle(e)),
+                          onTap: () async {
+                            if (e.recording != null) {
+                              Navigator.pop(context);
+                              setState(() => _audioPlayerOpen = true);
+                              await _playRecording(c, e.recording!);
+                            } else if (e.pageId != null) {
+                              Navigator.pop(context);
+                              c.jumpToPage(e.pageId!);
+                            } else {
+                              await _openMediaExternally(e);
+                            }
+                          },
                           trailing: PopupMenuButton<String>(
                             onSelected: (action) async {
-                              if (action == 'open') {
-                                final f = _service.assetFile(
-                                  widget.canvas,
-                                  att.assetId,
-                                );
-                                if (await f.exists()) {
-                                  OpenFilex.open(f.path, type: att.mime);
-                                }
-                              } else if (action == 'insert' && isPdf) {
-                                Navigator.pop(context);
-                                final sizes = await c.renderCache.pdfPageSizes(
-                                  _service
-                                      .assetFile(widget.canvas, att.assetId)
-                                      .path,
-                                );
-                                c.insertPdfPages(
-                                  att.assetId,
-                                  sizes,
-                                  InsertPosition.end,
-                                );
-                              } else if (action == 'remove') {
-                                c.removeAttachment(att);
+                              switch (action) {
+                                case 'play':
+                                  Navigator.pop(context);
+                                  setState(() => _audioPlayerOpen = true);
+                                  await _playRecording(c, e.recording!);
+                                case 'jump':
+                                  Navigator.pop(context);
+                                  c.jumpToPage(e.pageId!);
+                                case 'open':
+                                  await _openMediaExternally(e);
+                                case 'insert':
+                                  Navigator.pop(context);
+                                  final sizes =
+                                      await c.renderCache.pdfPageSizes(
+                                    _service
+                                        .assetFile(widget.canvas, e.assetId)
+                                        .path,
+                                  );
+                                  c.insertPdfPages(
+                                    e.assetId,
+                                    sizes,
+                                    InsertPosition.end,
+                                  );
+                                case 'rename':
+                                  Navigator.pop(context);
+                                  await _renameRecording(c, e.recording!);
+                                case 'remove':
+                                  if (e.recording != null) {
+                                    c.deleteRecording(e.recording!);
+                                  } else if (e.attachment != null) {
+                                    c.removeAttachment(e.attachment!);
+                                  }
                               }
                             },
                             itemBuilder: (context) => [
+                              if (e.recording != null)
+                                const PopupMenuItem(
+                                  value: 'play',
+                                  child: Text('Play'),
+                                ),
+                              if (e.pageId != null)
+                                const PopupMenuItem(
+                                  value: 'jump',
+                                  child: Text('Jump to it'),
+                                ),
                               const PopupMenuItem(
                                 value: 'open',
                                 child: Text('Open'),
                               ),
-                              if (isPdf)
+                              if (e.kind == _MediaKind.pdf && !e.pdfView)
                                 const PopupMenuItem(
                                   value: 'insert',
                                   child: Text('Insert with view'),
                                 ),
-                              const PopupMenuItem(
-                                value: 'remove',
-                                child: Text('Remove'),
-                              ),
+                              if (e.recording != null)
+                                const PopupMenuItem(
+                                  value: 'rename',
+                                  child: Text('Rename'),
+                                ),
+                              if (e.recording != null || e.attachment != null)
+                                const PopupMenuItem(
+                                  value: 'remove',
+                                  child: Text('Remove'),
+                                ),
                             ],
                           ),
                         );
@@ -4345,6 +4479,69 @@ String _fmtDuration(Duration d) {
   final m = d.inMinutes;
   final s = d.inSeconds % 60;
   return '$m:${s.toString().padLeft(2, '0')}';
+}
+
+/// The media families the Attachments sheet groups everything into.
+enum _MediaKind { audio, image, pdf, video, other }
+
+/// One row in the aggregated Attachments sheet — a single piece of media this
+/// canvas references, from any source (a voice/imported recording, an explicit
+/// attachment record, a PDF inserted as annotatable pages, or an image/chip
+/// placed on a page). Deduped by [assetId] so a multi-page PDF or a
+/// twice-referenced asset shows once.
+class _MediaEntry {
+  final _MediaKind kind;
+  final String name;
+  final String assetId;
+  final String mime;
+
+  /// Set when this row is a playable audio recording (voice or imported).
+  final AudioRecording? recording;
+
+  /// Set when this row is backed by an explicit [Attachment] record.
+  final Attachment? attachment;
+
+  /// A page this media sits on, so the row can "jump to" it. Null for
+  /// recordings and attachment-only records that aren't drawn on a page.
+  final String? pageId;
+
+  /// True when this is a PDF inserted as annotatable pages (vs. a PDF kept only
+  /// as an attachment file).
+  final bool pdfView;
+
+  const _MediaEntry({
+    required this.kind,
+    required this.name,
+    required this.assetId,
+    required this.mime,
+    this.recording,
+    this.attachment,
+    this.pageId,
+    this.pdfView = false,
+  });
+}
+
+_MediaKind _mediaKindFromMime(String mime) {
+  if (mime == 'application/pdf') return _MediaKind.pdf;
+  if (mime.startsWith('audio/')) return _MediaKind.audio;
+  if (mime.startsWith('image/')) return _MediaKind.image;
+  if (mime.startsWith('video/')) return _MediaKind.video;
+  return _MediaKind.other;
+}
+
+IconData _mediaKindIcon(_MediaKind kind) {
+  switch (kind) {
+    case _MediaKind.audio:
+      return Icons.audiotrack;
+    case _MediaKind.image:
+      return Icons.image_outlined;
+    case _MediaKind.pdf:
+      return Icons.picture_as_pdf_outlined;
+    case _MediaKind.video:
+      return Icons.movie_outlined;
+    case _MediaKind.other:
+      return Icons.attach_file;
+  }
 }
 
 /// The small, non-distracting floating audio player (replaces the old
