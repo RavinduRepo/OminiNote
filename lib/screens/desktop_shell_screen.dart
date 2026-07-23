@@ -134,7 +134,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (!mounted) return;
     setState(() {
       _mainMode = _MainMode.canvas;
-      _sidebarCollapsed = false;
+      if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
     });
     await _revealSearchResult(r);
   }
@@ -154,7 +154,7 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   void _revealFromLink(SearchResult r) {
     setState(() {
       _mainMode = _MainMode.canvas;
-      _sidebarCollapsed = false;
+      if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
     });
     _revealSearchResult(r);
   }
@@ -1097,7 +1097,9 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
           onReveal: (r) {
             setState(() {
               _mainMode = _MainMode.canvas;
-              _sidebarCollapsed = false; // re-expand to show where we landed
+              // re-expand to show where we landed (unless the user turned the
+              // auto-expand-on-reveal setting off)
+              if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
             });
             _revealSearchResult(r);
           },

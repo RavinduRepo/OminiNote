@@ -157,6 +157,7 @@ class GraphController extends ChangeNotifier {
   bool alwaysShowLabels = false; // keep labels visible however far you zoom out
   bool sameCanvasLinks = true; // dashed grouping links among same-canvas items
   bool pinOnDrag = false; // dragging a node pins it in place (off = springs back)
+  bool autoScale = true; // auto-fit/reframe after the layout settles (off = keep zoom/pan)
 
   GraphController() {
     // Seed appearance + view toggles from device-local settings.
@@ -169,6 +170,7 @@ class GraphController extends ChangeNotifier {
     alwaysShowLabels = s.graphAlwaysLabels;
     sameCanvasLinks = s.graphSameCanvasLinks;
     pinOnDrag = s.graphPinOnDrag;
+    autoScale = s.graphAutoScale;
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
     showUnlinked = s.graphShowUnlinked;
@@ -1026,6 +1028,13 @@ class GraphController extends ChangeNotifier {
     if (persist) SettingsService().saveGraphSettings(pinOnDrag: v);
   }
 
+  void setAutoScale(bool v, {bool persist = true}) {
+    if (autoScale == v) return;
+    autoScale = v;
+    _bumpUi(); // appearance panel rebuilds on uiVersion
+    if (persist) SettingsService().saveGraphSettings(autoScale: v);
+  }
+
   /// Releases a single node back into the force layout (double-tap).
   void unfix(GraphSimNode node) {
     if (!node.fixed) return;
@@ -1114,9 +1123,10 @@ class _GraphScreenState extends State<GraphScreen>
   /// Fit the graph once the sim has had a moment to settle after a change
   /// (debounced, so a burst of filter toggles coalesces into one fit).
   void _scheduleAutoFit() {
+    if (!_controller.autoScale) return; // user turned off auto-scaling
     _fitDebounce?.cancel();
     _fitDebounce = Timer(const Duration(milliseconds: 700), () {
-      if (mounted) _controller.fitToScreen();
+      if (mounted && _controller.autoScale) _controller.fitToScreen();
     });
   }
 
@@ -2676,6 +2686,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               (v) => c.setSameCanvasLinks(v)),
           _toggle(palette, 'Pin nodes where you drag them', c.pinOnDrag,
               (v) => c.setPinOnDrag(v)),
+          _toggle(palette, 'Auto-scale graph to fit', c.autoScale,
+              (v) => c.setAutoScale(v)),
           const SizedBox(height: 4),
         ],
       ],
@@ -2817,6 +2829,8 @@ List<Widget> graphAppearanceControls(
         c.sameCanvasLinks, (v) => c.setSameCanvasLinks(v)),
     _graphToggle(context, palette, 'Pin nodes where you drag them', c.pinOnDrag,
         (v) => c.setPinOnDrag(v)),
+    _graphToggle(context, palette, 'Auto-scale graph to fit', c.autoScale,
+        (v) => c.setAutoScale(v)),
   ];
 }
 
@@ -3169,9 +3183,10 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       if (mounted && !_ticker.isActive) _ticker.start();
     };
     _g.onContentChanged = () {
+      if (!_g.autoScale) return; // user turned off auto-scaling
       _fit?.cancel();
       _fit = Timer(const Duration(milliseconds: 500), () {
-        if (mounted) _g.fitToScreen();
+        if (mounted && _g.autoScale) _g.fitToScreen();
       });
     };
     _lgc.addListener(_onLgc);

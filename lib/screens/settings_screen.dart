@@ -62,6 +62,69 @@ class _LayoutSection extends StatelessWidget {
   }
 }
 
+/// Navigation + graph behavior toggles (device-local). Parked here for now —
+/// "throw them at Settings, manage placement later". Both are plain bools on
+/// [SettingsService] (not ValueNotifiers), so this section owns local setState.
+class _NavGraphSection extends StatefulWidget {
+  const _NavGraphSection();
+
+  @override
+  State<_NavGraphSection> createState() => _NavGraphSectionState();
+}
+
+class _NavGraphSectionState extends State<_NavGraphSection> {
+  final _settings = SettingsService();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _SectionLabel('Navigation & graph'),
+        _Card(
+          child: Column(
+            children: [
+              SwitchListTile.adaptive(
+                value: _settings.autoExpandOnReveal,
+                onChanged: (v) async {
+                  await _settings.setAutoExpandOnReveal(v);
+                  if (mounted) setState(() {});
+                },
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                title: const Text('Auto-open list on navigate'),
+                subtitle: Text(
+                  'When following a link, graph edge, or search result, '
+                  're-open the collapsed notebook/canvas list to show where you '
+                  'landed. Off = keep the panes as you left them.',
+                  style: TextStyle(
+                      fontSize: 12, color: palette.textDim, height: 1.35),
+                ),
+              ),
+              const Divider(height: 1),
+              SwitchListTile.adaptive(
+                value: _settings.graphAutoScale,
+                onChanged: (v) async {
+                  await _settings.saveGraphSettings(autoScale: v);
+                  if (mounted) setState(() {});
+                },
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                title: const Text('Auto-scale graph to fit'),
+                subtitle: Text(
+                  'Reframe the connections graph to fit the view after it '
+                  'settles. Off = keep your own zoom and pan.',
+                  style: TextStyle(
+                      fontSize: 12, color: palette.textDim, height: 1.35),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Android multi-window entry: renders a "Multi-window" section with an "Open
 /// new window" tile, but only where the OS supports it (Android N+). Renders
 /// nothing otherwise, so it never appears on unsupported platforms.
@@ -198,6 +261,8 @@ class SettingsScreen extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 24),
+          const _NavGraphSection(),
           // Multi-window isn't an appearance/visual setting, so it lives at the
           // top level rather than inside the Appearance group. (Renders nothing
           // on platforms without multi-window support.)

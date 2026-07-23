@@ -120,6 +120,20 @@ class SettingsService {
     await _persist();
   }
 
+  /// Auto-expand the notebook/canvas list panes when navigating in-place via a
+  /// tapped link (Connections), a graph edge/node, or a search reveal. When on
+  /// (default), landing on a target re-expands a collapsed desktop sidebar so
+  /// you see where you landed; when off, the panes stay however you left them
+  /// (open the list manually to see the graph/tree). Device-local (never
+  /// synced). Managed under Settings for now.
+  bool autoExpandOnReveal = true;
+
+  Future<void> setAutoExpandOnReveal(bool value) async {
+    if (autoExpandOnReveal == value) return;
+    autoExpandOnReveal = value;
+    await _persist();
+  }
+
   /// Read-aloud scope: when true the reader speaks only the first page of each
   /// row (vertical pages only), skipping horizontal continuation pages.
   /// Device-local; default OFF (read every page). Toggled by the reader bar's
@@ -145,6 +159,7 @@ class SettingsService {
   bool graphShowUnlinked = false;
   bool graphSameCanvasLinks = true; // dashed links among same-canvas items
   bool graphPinOnDrag = false; // dragging a node pins it in place (off = springs back)
+  bool graphAutoScale = true; // auto-fit/reframe the graph after it settles (off = keep your zoom/pan)
 
   /// Free-form persisted graph-view state (device-local): selected/hidden
   /// containers, tag filter, active project, and panel expand states. A blob so
@@ -168,6 +183,7 @@ class SettingsService {
     bool? showUnlinked,
     bool? sameCanvasLinks,
     bool? pinOnDrag,
+    bool? autoScale,
   }) async {
     graphNodeSize = nodeSize ?? graphNodeSize;
     graphTextSize = textSize ?? graphTextSize;
@@ -180,6 +196,7 @@ class SettingsService {
     graphShowUnlinked = showUnlinked ?? graphShowUnlinked;
     graphSameCanvasLinks = sameCanvasLinks ?? graphSameCanvasLinks;
     graphPinOnDrag = pinOnDrag ?? graphPinOnDrag;
+    graphAutoScale = autoScale ?? graphAutoScale;
     await _persist();
   }
 
@@ -466,6 +483,7 @@ class SettingsService {
     layoutMode.value = _parseLayoutMode(data['layoutMode']);
     fingerDraw = data['fingerDraw'] == true;
     shapeSnap = data['shapeSnap'] != false; // default ON
+    autoExpandOnReveal = data['autoExpandOnReveal'] != false; // default ON
     readAloudMainColumnOnly = data['readAloudMainColumnOnly'] == true;
     graphNodeSize = (data['graphNodeSize'] as num?)?.toDouble() ?? 1.0;
     graphTextSize = (data['graphTextSize'] as num?)?.toDouble() ?? 1.0;
@@ -478,6 +496,7 @@ class SettingsService {
     graphShowUnlinked = data['graphShowUnlinked'] == true; // default false
     graphSameCanvasLinks = data['graphSameCanvasLinks'] != false; // default true
     graphPinOnDrag = data['graphPinOnDrag'] == true; // default false
+    graphAutoScale = data['graphAutoScale'] != false; // default true
     graphView = (data['graphView'] as Map?)?.cast<String, dynamic>() ?? {};
     ttsVoiceName = data['ttsVoiceName'] as String?;
     ttsVoiceLocale = data['ttsVoiceLocale'] as String?;
@@ -678,6 +697,7 @@ class SettingsService {
         'layoutMode': layoutMode.value.name,
         'fingerDraw': fingerDraw,
         'shapeSnap': shapeSnap,
+        'autoExpandOnReveal': autoExpandOnReveal,
         'readAloudMainColumnOnly': readAloudMainColumnOnly,
         'graphNodeSize': graphNodeSize,
         'graphTextSize': graphTextSize,
@@ -690,6 +710,7 @@ class SettingsService {
         'graphShowUnlinked': graphShowUnlinked,
         'graphSameCanvasLinks': graphSameCanvasLinks,
         'graphPinOnDrag': graphPinOnDrag,
+        'graphAutoScale': graphAutoScale,
         'graphView': graphView,
         'shapeToolKind': shapeToolKind.name,
         'shapeTemplates': [for (final t in shapeTemplates) t.toJson()],
