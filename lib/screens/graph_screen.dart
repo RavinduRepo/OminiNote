@@ -185,15 +185,25 @@ class GraphController extends ChangeNotifier {
     projectPlusLinks = gv['projLinks'] == true;
   }
 
+  /// When false, view-selection changes (hidden containers / tags / active
+  /// project) are NOT written to the shared device-local blob. The local graph
+  /// panel sets this — its filters are per-session and must not leak into the
+  /// global graph, which seeds from that blob. Appearance settings persist
+  /// regardless (they're deliberately shared global↔local via saveGraphSettings).
+  bool persistView = true;
+
   /// Persists the selection/filter/project state to the device-local blob.
-  void _saveView() => SettingsService().patchGraphView({
-        'hidden': hiddenContainers.toList(),
-        'tagInc': tagInclude.toList(),
-        'tagExc': tagExclude.toList(),
-        'tagAll': tagMatchAll,
-        'project': activeProjectId,
-        'projLinks': projectPlusLinks,
-      });
+  void _saveView() {
+    if (!persistView) return;
+    SettingsService().patchGraphView({
+      'hidden': hiddenContainers.toList(),
+      'tagInc': tagInclude.toList(),
+      'tagExc': tagExclude.toList(),
+      'tagAll': tagMatchAll,
+      'project': activeProjectId,
+      'projLinks': projectPlusLinks,
+    });
+  }
 
   bool get hasActiveProject => activeProjectId != null;
 
@@ -2804,94 +2814,6 @@ class _ShapeIconPainter extends CustomPainter {
       old.shape != shape || old.color != color;
 }
 
-/// Appearance/visual controls (sliders + toggles) for a [GraphController] —
-/// the local panel's settings popup shows these so it exposes the same visual
-/// settings as the global graph. Changes persist (shared device-local graph
-/// settings), so the two stay consistent.
-List<Widget> graphAppearanceControls(
-    BuildContext context, GraphController c, AppPalette palette) {
-  return [
-    _graphSlider(palette, 'Node size', c.nodeSizeScale, 0.5, 2.5,
-        c.setNodeSizeScale),
-    _graphSlider(palette, 'Text size', c.textSizeScale, 0.6, 2.0,
-        c.setTextSizeScale),
-    _graphSlider(palette, 'Text opacity', c.labelOpacity, 0.15, 1.0,
-        c.setLabelOpacity),
-    _graphSlider(palette, 'Link thickness', c.linkThickness, 0.4, 3.0,
-        c.setLinkThickness),
-    _graphSlider(palette, 'Link opacity', c.linkOpacity, 0.1, 1.0,
-        c.setLinkOpacity),
-    _graphToggle(context, palette, 'Always show labels', c.alwaysShowLabels,
-        (v) => c.setAlwaysShowLabels(v)),
-    _graphToggle(context, palette, 'Expand items inside canvases',
-        !c.abstractInsideItems, (v) => c.setAbstractInsideItems(!v)),
-    _graphToggle(context, palette, 'Link items in same canvas',
-        c.sameCanvasLinks, (v) => c.setSameCanvasLinks(v)),
-    _graphToggle(context, palette, 'Pin nodes where you drag them', c.pinOnDrag,
-        (v) => c.setPinOnDrag(v)),
-    _graphToggle(context, palette, 'Auto-scale graph to fit', c.autoScale,
-        (v) => c.setAutoScale(v)),
-  ];
-}
-
-Widget _graphSlider(AppPalette palette, String label, double value, double min,
-    double max, ValueChanged<double> onChanged) {
-  return Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 14),
-    child: Row(
-      children: [
-        SizedBox(
-          width: 92,
-          child: Text(label,
-              style: TextStyle(fontSize: 11.5, color: palette.textDim)),
-        ),
-        Expanded(
-          child: SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 2,
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-            ),
-            child: Slider(
-              value: value.clamp(min, max),
-              min: min,
-              max: max,
-              onChanged: onChanged,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-Widget _graphToggle(BuildContext context, AppPalette palette, String label,
-    bool value, ValueChanged<bool> onChanged) {
-  return InkWell(
-    onTap: () => onChanged(!value),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 1),
-      child: Row(
-        children: [
-          Expanded(
-              child: Text(label,
-                  style: TextStyle(
-                      fontSize: 12.5,
-                      color: Theme.of(context).colorScheme.onSurface))),
-          Transform.scale(
-            scale: 0.72,
-            child: Switch(
-              value: value,
-              onChanged: onChanged,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
 /// The floating Connections panel's two faces: the connections LIST or the
 /// local GRAPH (the same global engine, scoped to the current item + depth).
 enum ConnPanelView { list, graph }
@@ -3162,6 +3084,11 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   late final Ticker _ticker;
   Timer? _fit;
   int _builtRev = -1;
+  // Feature E: the local settings panel needs the store structure + tags +
+  // projects in `_g` (loaded lazily on first graph build / settings open, then
+  // refreshed on store changes while the panel is open).
+  bool _filtersLoaded = false;
+  Timer? _filterReload;
 
   GraphSimNode? _dragNode;
   bool _moved = false;
@@ -3171,7 +3098,9 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   void initState() {
     super.initState();
     _g = GraphController();
-    // A local graph ignores the main view's filters.
+    // A local graph ignores the main view's filters, and its own filter choices
+    // (Feature E) must NOT leak into the shared blob the global graph seeds from.
+    _g.persistView = false;
     _g.hiddenContainers.clear();
     _g.tagInclude.clear();
     _g.tagExclude.clear();
@@ -3190,16 +3119,56 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       });
     };
     _lgc.addListener(_onLgc);
+    SyncService().dataVersion.addListener(_onFilterData);
     _maybeRebuild();
   }
 
   @override
   void dispose() {
     _lgc.removeListener(_onLgc);
+    SyncService().dataVersion.removeListener(_onFilterData);
+    _filterReload?.cancel();
     _fit?.cancel();
     _ticker.dispose();
     _g.dispose();
     super.dispose();
+  }
+
+  /// A store change may add/remove containers, tags, or projects — refresh the
+  /// filter data feeding `_g` (only while the panel is open; debounced so a sync
+  /// burst coalesces). The graph nodes themselves refresh via `_maybeRebuild`.
+  void _onFilterData() {
+    if (!_lgc.open || !_filtersLoaded) return;
+    _filterReload?.cancel();
+    _filterReload = Timer(const Duration(milliseconds: 400), _loadFilters);
+  }
+
+  /// Loads the store structure + tags + projects into this panel's engine so the
+  /// settings panel's filter tree / tag chips / project list are populated —
+  /// mirrors `_GraphScreenState._load` but for the local `_g`. The active
+  /// project (if any) starts cleared for a local graph, so its members are only
+  /// refreshed once the user activates one here.
+  Future<void> _loadFilters() async {
+    final structure = await GraphService().buildStructure();
+    if (!mounted) return;
+    _g.setStructure(structure);
+    final tags = await TagService().allTags();
+    final tagsByLeaf = await TagService().tagIdsByLeaf();
+    if (!mounted) return;
+    _g.setTagData(tags, tagsByLeaf);
+    final projs = await ProjectService().allProjects();
+    if (!mounted) return;
+    _g.setProjects(projs);
+    final active = _g.activeProjectId;
+    if (active != null) {
+      final items = await ProjectService().membersOf(active);
+      if (!mounted) return;
+      final inc =
+          items.where((i) => !i.excluded).map((i) => i.endpoint.leafId).toSet();
+      final exc =
+          items.where((i) => i.excluded).map((i) => i.endpoint.leafId).toSet();
+      _g.setActiveProject(active, inc, exc);
+    }
   }
 
   void _onLgc() {
@@ -3223,6 +3192,12 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     if (!_lgc.open || _lgc.view != ConnPanelView.graph) return;
     if (_lgc.revision == _builtRev) return;
     _builtRev = _lgc.revision;
+    // Populate the settings panel's filter data (structure/tags/projects) the
+    // first time the graph is built for this session (cheap; center-independent).
+    if (!_filtersLoaded) {
+      _filtersLoaded = true;
+      unawaited(_loadFilters());
+    }
     final center = _lgc.center;
     if (center == null) return;
     final data = await GraphService().buildGraph();
@@ -3641,32 +3616,31 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   /// The graph settings popup — the same visual controls the global graph has,
   /// operating on the local `_g` (and persisting, so both stay consistent).
   void _openGraphSettings() {
-    final palette = Theme.of(context).extension<AppPalette>()!;
+    // Feature E: the local graph's settings expose the SAME full panel as the
+    // global graph — the filter-items tree (groups/containers), tags, projects,
+    // AND appearance — operating on this panel's own engine (`_g`). Its
+    // structure/tags/projects are loaded lazily (see `_loadFilters`), so make
+    // sure they're present before showing the panel.
+    if (!_filtersLoaded) {
+      _filtersLoaded = true;
+      _loadFilters();
+    }
+    final h = (MediaQuery.of(context).size.height * 0.8).clamp(340.0, 640.0);
     showDialog<void>(
       context: context,
       builder: (ctx) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 340),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            child: ListenableBuilder(
-              listenable: _g,
-              builder: (_, _) => Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                    child: Text('Graph settings',
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: palette.textDim)),
-                  ),
-                  ...graphAppearanceControls(ctx, _g, palette),
-                ],
-              ),
-            ),
+        child: SizedBox(
+          width: 360,
+          height: h,
+          // _GraphFilterPanel filters `_g` (container tree / tags / projects)
+          // AND composes with the center+depth scope in `_rebuildActive`; a link
+          // created here re-fetches the local graph via onReload.
+          child: _GraphFilterPanel(
+            controller: _g,
+            onReload: () {
+              _builtRev = -1;
+              _maybeRebuild();
+            },
           ),
         ),
       ),
