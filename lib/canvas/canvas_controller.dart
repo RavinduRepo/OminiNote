@@ -2378,9 +2378,27 @@ class CanvasController extends ChangeNotifier {
   /// BuildContext (a modal picker) and the screen's link-registration plumbing.
   VoidCallback? addTextLinkHook;
 
-  void deleteSelection() {
+  /// Set by the screen: when a delete would remove attachment/media chips, the
+  /// screen intercepts to ask whether to also remove the underlying media (the
+  /// recording/attachment) or just the on-canvas icon. Kept as a hook because
+  /// it needs a BuildContext (a confirm dialog). The hook is responsible for
+  /// actually performing the delete (via `deleteSelection(force: true)`) and,
+  /// if chosen, `deleteMediaCompletely`.
+  void Function(List<AttachmentElement> chips)? onDeleteMediaChips;
+
+  void deleteSelection({bool force = false}) {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
+    // Deleting a media chip: let the screen ask "also remove the file, or just
+    // the icon?" before we commit. `force` (cut, or the hook's own follow-up
+    // call) skips the prompt.
+    if (!force && onDeleteMediaChips != null) {
+      final chips = selection.whereType<AttachmentElement>().toList();
+      if (chips.isNotEmpty) {
+        onDeleteMediaChips!(chips);
+        return;
+      }
+    }
     final page = pages[pageId]!;
     final slots = <_ElSlot>[];
     // Standalone link markers among the deleted elements: deleting a marker
@@ -2423,7 +2441,22 @@ class CanvasController extends ChangeNotifier {
 
   void cutSelection() {
     copySelection();
-    deleteSelection();
+    deleteSelection(force: true);
+  }
+
+  /// Permanently removes the recording and/or attachment record backed by
+  /// [assetId] (the underlying media, not just its on-canvas chip). The chip
+  /// itself is removed separately via [deleteSelection]. The asset file is left
+  /// on disk (content-addressed, may be shared — matches image/recording delete).
+  void deleteMediaCompletely(String assetId) {
+    final hadRec = canvas.recordings.any((r) => r.assetId == assetId);
+    final hadAtt = canvas.attachments.any((a) => a.assetId == assetId);
+    if (!hadRec && !hadAtt) return;
+    canvas.recordings.removeWhere((r) => r.assetId == assetId);
+    canvas.attachments.removeWhere((a) => a.assetId == assetId);
+    _markDirty(const {}, structural: true);
+    unawaited(_flushThenReindex());
+    notifyListeners();
   }
 
   void duplicateSelection() {

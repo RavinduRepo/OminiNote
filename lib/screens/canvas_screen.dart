@@ -249,6 +249,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         ..systemCopyHook = _copySelectionToSystemClipboard
         ..systemPasteFallback = _pasteFromSystemClipboard
         ..addTextLinkHook = _startTextLink
+        ..onDeleteMediaChips = _confirmDeleteMediaChips
         ..eraserPartial = SettingsService().eraserPartial
         ..eraserSize = SettingsService().eraserSize;
     });
@@ -1291,6 +1292,64 @@ class _CanvasScreenState extends State<CanvasScreen>
       }
     }
     return null;
+  }
+
+  /// Confirms whether deleting media chip(s) should also remove the underlying
+  /// recording/attachment, or just the on-canvas icon. Wired as the controller's
+  /// `onDeleteMediaChips` hook (fires from any delete path). The hook owns the
+  /// actual delete, so a "Cancel" leaves everything intact.
+  Future<void> _confirmDeleteMediaChips(List<AttachmentElement> chips) async {
+    final c = _controller;
+    if (c == null) return;
+    // Only chips whose asset is actually backed by a recording/attachment give
+    // the "remove everywhere" choice; a bare chip just deletes the icon.
+    final backed = chips
+        .where((ch) =>
+            c.canvas.recordings.any((r) => r.assetId == ch.assetId) ||
+            c.canvas.attachments.any((a) => a.assetId == ch.assetId))
+        .toList();
+    if (backed.isEmpty) {
+      c.deleteSelection(force: true);
+      return;
+    }
+    final n = chips.length;
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(n == 1 ? 'Remove this media?' : 'Remove these media?'),
+        content: Text(
+          'Delete just the on-canvas icon, or also remove the '
+          '${n == 1 ? 'file' : 'files'} from this canvas’s Attachments?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'icon'),
+            child: const Text('Just the icon'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'all'),
+            child: const Text('Remove everywhere'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || choice == null || choice == 'cancel') return;
+    c.deleteSelection(force: true); // removes the chip(s) + any co-selected
+    if (choice == 'all') {
+      for (final ch in backed) {
+        // Stop playback if a take being removed is the one playing.
+        for (final r in c.canvas.recordings) {
+          if (r.assetId == ch.assetId && c.audioPlayback.isCurrent(r.id)) {
+            c.audioPlayback.stop();
+          }
+        }
+        c.deleteMediaCompletely(ch.assetId);
+      }
+    }
   }
 
   /// The audio recording backed by [assetId], if any (chips resolve their take
