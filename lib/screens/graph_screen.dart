@@ -120,6 +120,35 @@ class GraphController extends ChangeNotifier {
   Set<String> _projExcludes = {};
   bool projectPlusLinks = false; // also show members' linked neighbors
 
+  // ── Per-project saved layout (Feature F) ──
+  /// Whether the active project pins its saved [_projLayout]. When true,
+  /// [_rebuildActive] places matching nodes at their saved position and fixes
+  /// them; dragging a node updates the saved position and fires
+  /// [onProjectLayoutDirty] so the host can persist it (synced via the project).
+  bool projPinLayout = false;
+
+  /// The active project's saved node positions (canonical key → world Offset),
+  /// decoded from [ProjectDef.layout]. Empty when no project / no saved layout.
+  Map<String, Offset> _projLayout = {};
+
+  /// Fired when a pinned-project node is dragged (position changed) — the global
+  /// graph host debounces this and persists [captureLayout] to the project.
+  VoidCallback? onProjectLayoutDirty;
+
+  static Map<String, Offset> _decodeLayout(Map<String, List<double>>? raw) {
+    if (raw == null) return {};
+    final out = <String, Offset>{};
+    for (final e in raw.entries) {
+      if (e.value.length >= 2) out[e.key] = Offset(e.value[0], e.value[1]);
+    }
+    return out;
+  }
+
+  /// The current visible node positions as a savable map (canonical key →
+  /// `[dx, dy]`). The host persists this to the active project.
+  Map<String, List<double>> captureLayout() =>
+      {for (final n in _nodes) n.data.key: [n.pos.dx, n.pos.dy]};
+
   /// Container id → its ancestry [self, parent, …, notebook], nearest first.
   /// Built from the store structure so folder/group levels are honored (an
   /// endpoint URI alone doesn't carry its parent folder). Rebuilt in
@@ -516,7 +545,11 @@ class GraphController extends ChangeNotifier {
       final data = lookup[key];
       if (data == null) continue; // abstract target filtered/absent
       final prev = old[key];
-      final pos = prev?.pos ??
+      // Feature F: a pinned project restores each node to its saved position
+      // (canonical key) and holds it fixed there.
+      final saved = projPinLayout ? _projLayout[key] : null;
+      final pos = saved ??
+          prev?.pos ??
           Offset(math.cos(i * 2.399) * (30 + i * 6),
                   math.sin(i * 2.399) * (30 + i * 6)) +
               Offset(rnd.nextDouble() * 8, rnd.nextDouble() * 8);
@@ -524,6 +557,10 @@ class GraphController extends ChangeNotifier {
       if (prev != null) {
         sim.vel = prev.vel;
         sim.fixed = prev.fixed; // keep a user-pinned node pinned across rebuilds
+      }
+      if (saved != null) {
+        sim.fixed = true;
+        sim.vel = Offset.zero;
       }
       _nodes.add(sim);
       _byKey[key] = sim;
@@ -686,14 +723,65 @@ class GraphController extends ChangeNotifier {
   void setActiveProject(
       String? id, Set<String> includes, Set<String> excludes) {
     final changed = id != activeProjectId;
+    final wasPinned = projPinLayout;
     activeProjectId = id;
     _projIncludes = id == null ? {} : includes;
     _projExcludes = id == null ? {} : excludes;
+    // Feature F: adopt the project's saved layout + pin flag (from its def).
+    ProjectDef? def;
+    if (id != null) {
+      for (final d in projects) {
+        if (d.id == id) {
+          def = d;
+          break;
+        }
+      }
+    }
+    projPinLayout = def?.pinLayout ?? false;
+    // Re-decode the saved layout only when the project changed or we weren't
+    // already pinned — a same-project refresh (e.g. a background data reload)
+    // keeps the LIVE positions so in-progress drags aren't snapped back to the
+    // last-persisted arrangement (the drag auto-save is debounced).
+    if (!projPinLayout) {
+      _projLayout = {};
+    } else if (changed || !wasPinned) {
+      _projLayout = _decodeLayout(def?.layout);
+    }
+    // Leaving a pinned arrangement (deactivate, or switch to a non-pinned
+    // project) releases the pins so the force layout resumes; _rebuildActive
+    // copies `fixed` by key, so clear it on the outgoing nodes first.
+    if (!projPinLayout) {
+      for (final n in _nodes) {
+        n.fixed = false;
+      }
+    }
     // Switching INTO a project starts with all its items shown (checked); a
     // plain refresh (same id, e.g. on reload) preserves the user's unchecks.
     if (id != null && changed) hiddenContainers.clear();
     _rebuildActive();
     _saveView();
+  }
+
+  /// Turns the active project's pin-layout on/off *live* (from the panel toggle).
+  /// ON captures the current arrangement + fixes every node; OFF releases them.
+  /// The host persists the change to the project (positions on ON).
+  void setProjectPinLayoutActive(bool v) {
+    if (activeProjectId == null || projPinLayout == v) return;
+    projPinLayout = v;
+    if (v) {
+      _projLayout = {for (final n in _nodes) n.data.key: n.pos};
+      for (final n in _nodes) {
+        n.fixed = true;
+      }
+    } else {
+      _projLayout = {};
+      for (final n in _nodes) {
+        n.fixed = false;
+      }
+      onWake?.call();
+    }
+    notifyListeners();
+    _bumpUi();
   }
 
   void setProjectPlusLinks(bool v) {
@@ -1016,10 +1104,18 @@ class GraphController extends ChangeNotifier {
   }
 
   void endDrag() {
-    // With "pin nodes on drag" on, dropping a node keeps it where placed (it no
-    // longer springs back); clearFixed releases them. Off (default) → the node
-    // rejoins the force layout as before.
-    if (pinOnDrag) _pinned?.fixed = true;
+    final p = _pinned;
+    // Pinning is per-project when a project is active (Feature F): its own
+    // pin-layout flag governs, and a drop updates that project's saved layout.
+    // With no project, the global "pin nodes on drag" fallback applies. Off →
+    // the node rejoins the force layout as before.
+    final pinning =
+        activeProjectId != null ? projPinLayout : pinOnDrag;
+    if (pinning) p?.fixed = true;
+    if (p != null && activeProjectId != null && projPinLayout) {
+      _projLayout[p.data.key] = p.pos;
+      onProjectLayoutDirty?.call(); // host persists captureLayout() to the project
+    }
     _pinned = null;
     onWake?.call();
   }
@@ -1106,6 +1202,7 @@ class _GraphScreenState extends State<GraphScreen>
   GraphSimNode? _dragCandidate;
   bool _movedDuringGesture = false;
   double _lastScale = 1.0;
+  Timer? _layoutSaveDebounce; // persist a pinned project's arrangement after drags
 
   @override
   void initState() {
@@ -1116,6 +1213,9 @@ class _GraphScreenState extends State<GraphScreen>
     };
     // Auto-fit the graph after any filter/data change (once the layout settles).
     _controller.onContentChanged = _scheduleAutoFit;
+    // Feature F: persist the active project's arrangement when a pinned node is
+    // dragged (debounced so a flurry of drags coalesces into one synced write).
+    _controller.onProjectLayoutDirty = _scheduleLayoutSave;
     _load();
     SyncService().dataVersion.addListener(_onData);
   }
@@ -1125,9 +1225,20 @@ class _GraphScreenState extends State<GraphScreen>
     SyncService().dataVersion.removeListener(_onData);
     _reloadDebounce?.cancel();
     _fitDebounce?.cancel();
+    _layoutSaveDebounce?.cancel();
     _ticker.dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  void _scheduleLayoutSave() {
+    _layoutSaveDebounce?.cancel();
+    _layoutSaveDebounce = Timer(const Duration(milliseconds: 600), () {
+      final id = _controller.activeProjectId;
+      if (id == null || !_controller.projPinLayout) return;
+      ProjectService().setProjectLayout(id, _controller.captureLayout(),
+          pinLayout: true);
+    });
   }
 
   /// Fit the graph once the sim has had a moment to settle after a change
@@ -1277,7 +1388,9 @@ class _GraphScreenState extends State<GraphScreen>
                     border: Border(right: BorderSide(color: palette.border)),
                   ),
                   child: _GraphFilterPanel(
-                      controller: _controller, onReload: _load),
+                      controller: _controller,
+                      onReload: _load,
+                      layoutControls: true),
                 ),
                 Expanded(child: graph),
               ],
@@ -1343,7 +1456,10 @@ class _GraphScreenState extends State<GraphScreen>
             ),
           ),
           Expanded(
-            child: _GraphFilterPanel(controller: _controller, onReload: _load),
+            child: _GraphFilterPanel(
+                controller: _controller,
+                onReload: _load,
+                layoutControls: true),
           ),
         ],
       ),
@@ -1772,7 +1888,14 @@ class _GraphFilterPanel extends StatefulWidget {
   /// Rebuilds the graph after a link is created here (LinkService persists but
   /// doesn't bump dataVersion).
   final VoidCallback? onReload;
-  const _GraphFilterPanel({required this.controller, this.onReload});
+
+  /// Feature F: show the per-project "pin & save arrangement" control. Only the
+  /// GLOBAL graph enables it — the local graph is depth-scoped, so capturing its
+  /// positions would corrupt the project's full-graph layout, and it doesn't
+  /// wire the drag→persist callback.
+  final bool layoutControls;
+  const _GraphFilterPanel(
+      {required this.controller, this.onReload, this.layoutControls = false});
 
   @override
   State<_GraphFilterPanel> createState() => _GraphFilterPanelState();
@@ -1983,6 +2106,28 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
             // confusing duplicate here and is removed.
             _toggle(palette, 'Include linked neighbors', c.projectPlusLinks,
                 (v) => c.setProjectPlusLinks(v)),
+          if (active != null && widget.layoutControls) ...[
+            // Feature F: pin this project's node arrangement. Turning it on
+            // captures the current positions + fixes the nodes; they're saved to
+            // the project (synced), so the layout returns on any device. While
+            // pinned, dragging a node auto-saves (debounced) and "Save
+            // arrangement" re-captures explicitly.
+            _toggle(palette, 'Pin & save arrangement', c.projPinLayout,
+                (v) => _setProjectPinLayout(active, v)),
+            if (c.projPinLayout)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => _saveProjectArrangement(active),
+                  icon: const Icon(Icons.push_pin_outlined, size: 15),
+                  label: const Text('Save arrangement',
+                      style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 6)),
+                ),
+              ),
+          ],
           for (final p in c.projects)
             _projectRow(palette, onSurface, p, p.id == active),
           Align(
@@ -2053,6 +2198,28 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     final exc =
         items.where((i) => i.excluded).map((i) => i.endpoint.leafId).toSet();
     c.setActiveProject(p.id, inc, exc);
+  }
+
+  /// Feature F: toggle the active project's pin-layout. ON captures + fixes the
+  /// current arrangement and persists it (synced); OFF releases the pins but
+  /// keeps the saved positions so re-enabling restores them.
+  Future<void> _setProjectPinLayout(String projectId, bool v) async {
+    c.setProjectPinLayoutActive(v);
+    if (v) {
+      await ProjectService()
+          .setProjectLayout(projectId, c.captureLayout(), pinLayout: true);
+    } else {
+      await ProjectService().setProjectPinLayout(projectId, false);
+    }
+  }
+
+  /// Re-capture the current node positions into the project (while pinned).
+  Future<void> _saveProjectArrangement(String projectId) async {
+    await ProjectService()
+        .setProjectLayout(projectId, c.captureLayout(), pinLayout: true);
+    if (mounted) {
+      showAppToast(context, 'Arrangement saved');
+    }
   }
 
   void _startNewProject() => setState(() {

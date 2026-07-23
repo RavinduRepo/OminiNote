@@ -84,6 +84,34 @@ class ProjectService {
     await _persist();
   }
 
+  /// Feature F: saves [projectId]'s arranged node [layout] (canonical node key →
+  /// `[dx, dy]`) and its [pinLayout] flag. Synced via projects.json (LWW on the
+  /// def). Used when the user turns pinning on or re-saves the arrangement.
+  Future<void> setProjectLayout(
+    String projectId,
+    Map<String, List<double>> layout, {
+    required bool pinLayout,
+  }) async {
+    await _ensureLoaded();
+    final d = _defs[projectId];
+    if (d == null) return;
+    d.layout = layout;
+    d.pinLayout = pinLayout;
+    d.bumpRev(_dev);
+    await _persist();
+  }
+
+  /// Toggles a project's [pinLayout] flag WITHOUT touching its saved positions —
+  /// so turning it back on restores the same arrangement.
+  Future<void> setProjectPinLayout(String projectId, bool pinLayout) async {
+    await _ensureLoaded();
+    final d = _defs[projectId];
+    if (d == null || d.pinLayout == pinLayout) return;
+    d.pinLayout = pinLayout;
+    d.bumpRev(_dev);
+    await _persist();
+  }
+
   /// Tombstones the project + all its memberships.
   Future<void> deleteProject(String id) async {
     await _ensureLoaded();

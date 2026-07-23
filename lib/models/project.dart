@@ -20,6 +20,19 @@ class ProjectDef {
   String name;
   final DateTime createdAt;
 
+  /// When true, activating this project restores its saved node [layout] and
+  /// pins those nodes in place (instead of running the force layout). A
+  /// per-project alternative to the global "pin on drag" — synced, so an
+  /// arrangement made on one device comes back on another. Default false.
+  bool pinLayout;
+
+  /// Saved node positions for this project's graph: canonical node key
+  /// (endpoint URI) → `[dx, dy]` in graph/world coordinates. Applied only when
+  /// [pinLayout] is on. Kept even while unpinned so toggling back on restores
+  /// the same arrangement. Omitted from JSON when empty (byte-stable vs. old
+  /// data). Whole-map LWW on the def (rare concurrent arranging — one wins).
+  Map<String, List<double>> layout;
+
   ProjectDef({
     this.schemaVersion = 1,
     required this.id,
@@ -29,8 +42,11 @@ class ProjectDef {
     this.deletedAt,
     required this.name,
     DateTime? createdAt,
+    this.pinLayout = false,
+    Map<String, List<double>>? layout,
   })  : updatedAt = updatedAt ?? DateTime.now(),
-        createdAt = createdAt ?? DateTime.now();
+        createdAt = createdAt ?? DateTime.now(),
+        layout = layout ?? {};
 
   void bumpRev(String newDeviceId) {
     rev += 1;
@@ -48,11 +64,27 @@ class ProjectDef {
         'deletedAt': deletedAt?.millisecondsSinceEpoch,
         'name': name,
         'createdAt': createdAt.millisecondsSinceEpoch,
+        if (pinLayout) 'pinLayout': true,
+        if (layout.isNotEmpty) 'layout': layout,
       };
 
   static ProjectDef? tryFromJson(Map<String, dynamic> json) {
     final id = json['id'];
     if (id is! String) return null;
+    Map<String, List<double>>? layout;
+    final rawLayout = json['layout'];
+    if (rawLayout is Map) {
+      layout = {};
+      for (final e in rawLayout.entries) {
+        final v = e.value;
+        if (e.key is String && v is List && v.length >= 2) {
+          layout[e.key as String] = [
+            (v[0] as num).toDouble(),
+            (v[1] as num).toDouble(),
+          ];
+        }
+      }
+    }
     return ProjectDef(
       schemaVersion: json['schemaVersion'] ?? 1,
       id: id,
@@ -68,6 +100,8 @@ class ProjectDef {
       createdAt: json['createdAt'] != null
           ? DateTime.fromMillisecondsSinceEpoch(json['createdAt'])
           : DateTime.now(),
+      pinLayout: json['pinLayout'] == true,
+      layout: layout,
     );
   }
 }
