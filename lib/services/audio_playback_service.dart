@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
@@ -43,6 +45,32 @@ class AudioPlaybackService {
   }
 
   bool isCurrent(String id) => currentId.value == id;
+
+  /// Reads the total duration of an audio file on a throwaway player, without
+  /// touching the live playback state. Used when importing an audio file (which,
+  /// unlike an in-app recording, doesn't already know its length). Returns null
+  /// if the length can't be determined within a short window.
+  static Future<Duration?> probeDuration(String filePath) async {
+    final p = AudioPlayer();
+    final completer = Completer<Duration?>();
+    StreamSubscription<Duration>? sub;
+    try {
+      sub = p.onDurationChanged.listen((d) {
+        if (!completer.isCompleted) completer.complete(d);
+      });
+      await p.setSourceDeviceFile(filePath);
+      // Some platforms populate the duration synchronously after setSource.
+      final direct = await p.getDuration();
+      if (direct != null && !completer.isCompleted) completer.complete(direct);
+      return await completer.future
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
+    } catch (_) {
+      return null;
+    } finally {
+      await sub?.cancel();
+      await p.dispose();
+    }
+  }
 
   /// Plays [filePath] as recording [id]. Resumes when it's the paused current
   /// recording; otherwise starts fresh from the top (or from a prior scrub via

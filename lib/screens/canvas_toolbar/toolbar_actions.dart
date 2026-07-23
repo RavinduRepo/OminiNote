@@ -39,6 +39,7 @@ const List<ToolbarActionSpec> kAddActionSpecs = [
   // Audio capture/playback are content additions, so they live in the "+"
   // menu alongside the other insert actions.
   ToolbarActionSpec('record_audio', Icons.mic_none, 'Record audio'),
+  ToolbarActionSpec('import_audio', Icons.audio_file_outlined, 'Import audio'),
   ToolbarActionSpec('recordings', Icons.graphic_eq, 'Recordings'),
 ];
 

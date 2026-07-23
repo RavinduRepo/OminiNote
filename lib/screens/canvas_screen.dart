@@ -2103,6 +2103,13 @@ class _CanvasScreenState extends State<CanvasScreen>
                 subtitle: const Text('Capture voice over this canvas'),
                 onTap: () => Navigator.pop(context, 'record_audio'),
               ),
+            if (shown('import_audio'))
+              ListTile(
+                leading: const Icon(Icons.audio_file_outlined),
+                title: const Text('Import audio'),
+                subtitle: const Text('Add an audio file to play back'),
+                onTap: () => Navigator.pop(context, 'import_audio'),
+              ),
             if (shown('recordings'))
               ListTile(
                 leading: const Icon(Icons.graphic_eq),
@@ -2144,6 +2151,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         _toast('Page pasted at the end');
       case 'record_audio':
         await _startAudioRecording();
+      case 'import_audio':
+        await _importAudioFlow();
       case 'recordings':
         _openAudioPlayer();
     }
@@ -2191,6 +2200,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         if (shown('record_audio') &&
             !(_controller?.isRecordingAudio ?? false))
           iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
+        if (shown('import_audio'))
+          iconMenuItem('import_audio', Icons.audio_file_outlined, 'Import audio'),
         if (shown('recordings'))
           iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
       ],
@@ -2315,6 +2326,42 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (path == null || !mounted) return;
     final bytes = await File(path).readAsBytes();
     await _placeImageFromFileBytes(bytes, path.split('.').last.toLowerCase());
+  }
+
+  /// Imports an audio file so it plays back like an in-app recording (shown in
+  /// the Recordings player). The file's length is probed, so show a brief
+  /// progress ring in case that takes a moment.
+  Future<void> _importAudioFlow() async {
+    final c = _controller;
+    if (c == null) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['m4a', 'mp3', 'wav', 'aac', 'ogg', 'flac', 'opus'],
+    );
+    final picked = result?.files.single;
+    final path = picked?.path;
+    if (path == null || !mounted) return;
+    final name = _stripExtension(picked!.name);
+    final progress = ProgressOverlay.show(context, 'Importing audio…');
+    AudioRecording? rec;
+    try {
+      rec = await c.importAudio(path, name);
+    } finally {
+      progress.close();
+    }
+    if (!mounted) return;
+    if (rec == null) {
+      _toast('Couldn’t read that audio file');
+      return;
+    }
+    _toast('Imported "${rec.name}"');
+    _openAudioPlayer();
+  }
+
+  /// Drops the trailing extension from a filename for a cleaner display label.
+  String _stripExtension(String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    return dot > 0 ? fileName.substring(0, dot) : fileName;
   }
 
   /// Captures a photo with the device camera and drops it on the page.

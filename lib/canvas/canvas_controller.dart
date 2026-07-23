@@ -4743,6 +4743,43 @@ class CanvasController extends ChangeNotifier {
     return rec;
   }
 
+  /// Imports an existing audio file [srcPath] as a recording on this canvas
+  /// (stored content-addressed like an in-app take, so it shows in the player
+  /// and syncs via canvas.json). [name] is the display label. The file's length
+  /// is probed so the scrubber is correct before first play. Returns the new
+  /// recording, or null if the file couldn't be read.
+  Future<AudioRecording?> importAudio(String srcPath, String name) async {
+    final ext = srcPath.contains('.')
+        ? srcPath.split('.').last.toLowerCase()
+        : 'm4a';
+    final String assetId;
+    try {
+      final bytes = await File(srcPath).readAsBytes();
+      assetId = await _service.putAsset(canvas, bytes, ext);
+    } catch (_) {
+      return null;
+    }
+    // Probe from the stored asset (a stable path) rather than the picked temp.
+    final probed =
+        await AudioPlaybackService.probeDuration(assetFileOf(assetId).path);
+    final rec = AudioRecording(
+      id: newModelId('rec'),
+      name: name.isEmpty ? 'Audio ${canvas.recordings.length + 1}' : name,
+      assetId: assetId,
+      // Imported audio has no correlated ink, so audio-sync glow won't apply
+      // (that's what the action-recording track is for); startedAt is only a
+      // placeholder anchor here.
+      startedAt: DateTime.now(),
+      durationMs: probed?.inMilliseconds ?? 0,
+      createdAt: DateTime.now(),
+    );
+    canvas.recordings.add(rec);
+    _markDirty(const {}, structural: true);
+    unawaited(_flushThenReindex());
+    notifyListeners();
+    return rec;
+  }
+
   /// Aborts an in-progress recording without saving anything.
   Future<void> cancelAudioRecording() async {
     await _audio.cancel();
