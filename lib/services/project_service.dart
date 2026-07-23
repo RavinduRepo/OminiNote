@@ -86,16 +86,20 @@ class ProjectService {
 
   /// Feature F: saves [projectId]'s arranged node [layout] (canonical node key →
   /// `[dx, dy]`) and its [pinLayout] flag. Synced via projects.json (LWW on the
-  /// def). Used when the user turns pinning on or re-saves the arrangement.
+  /// def). By default [merge]s the given positions INTO the stored layout
+  /// (updating supplied nodes, keeping the rest) — so a "Save arrangement" from a
+  /// depth-scoped local graph, which only sees a subset of nodes, doesn't drop
+  /// the positions of nodes it isn't showing. Pass merge:false to replace whole.
   Future<void> setProjectLayout(
     String projectId,
     Map<String, List<double>> layout, {
     required bool pinLayout,
+    bool merge = true,
   }) async {
     await _ensureLoaded();
     final d = _defs[projectId];
     if (d == null) return;
-    d.layout = layout;
+    d.layout = merge ? {...d.layout, ...layout} : layout;
     d.pinLayout = pinLayout;
     d.bumpRev(_dev);
     await _persist();
