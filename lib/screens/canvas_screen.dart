@@ -4868,6 +4868,58 @@ String _fmtDuration(Duration d) {
   return '$m:${s.toString().padLeft(2, '0')}';
 }
 
+/// A small "record actions" toggle for the media players. While active, ink
+/// drawn as the media plays is anchored to playback time (via a device-local
+/// anchor) and glows back in sync on replay. Tap toggles recording; long-press
+/// clears the saved track. [positionMs] reads the media's current position;
+/// [ensurePlaying] resumes playback so ink correlates as it advances.
+Widget _actionRecordButton(
+  BuildContext context,
+  AppPalette palette,
+  CanvasController controller,
+  String mediaId,
+  int Function() positionMs,
+  VoidCallback ensurePlaying,
+) {
+  // Rebuild on controller changes too, so hasActionTrack refreshes when a track
+  // is created/cleared (the video bar isn't otherwise wrapped in the controller).
+  return ListenableBuilder(
+    listenable: Listenable.merge(
+        [controller, controller.actionRecordingNotifier]),
+    builder: (context, _) {
+      final recording = controller.actionRecordingNotifier.value == mediaId;
+      final hasTrack = controller.hasActionTrack(mediaId);
+      final color = recording
+          ? Colors.red
+          : (hasTrack ? palette.accent : palette.textDim);
+      return GestureDetector(
+        onLongPress: () => controller.clearActionTrack(mediaId),
+        child: IconButton(
+          icon: Icon(
+            recording ? Icons.fiber_manual_record : Icons.gesture,
+            size: 20,
+            color: color,
+          ),
+          visualDensity: VisualDensity.compact,
+          tooltip: recording
+              ? 'Stop recording actions'
+              : (hasTrack
+                  ? 'Re-record actions (long-press to clear)'
+                  : 'Record actions — draw while it plays'),
+          onPressed: () {
+            if (recording) {
+              controller.stopActionRecording();
+            } else {
+              controller.startActionRecording(mediaId, positionMs());
+              ensurePlaying();
+            }
+          },
+        ),
+      );
+    },
+  );
+}
+
 /// The media families the Attachments sheet groups everything into.
 enum _MediaKind { audio, image, pdf, video, other }
 
@@ -5421,6 +5473,23 @@ class _VideoPlayerBar extends StatelessWidget {
                       ),
                     ),
                   ),
+                  ValueListenableBuilder<String?>(
+                    valueListenable: playback.currentId,
+                    builder: (context, assetId, _) => assetId == null
+                        ? const SizedBox.shrink()
+                        : _actionRecordButton(
+                            context,
+                            palette,
+                            controller,
+                            CanvasController.videoActionMediaId(assetId),
+                            () => playback.position.value.inMilliseconds,
+                            () {
+                              if (!playback.playing.value) {
+                                playback.togglePlay();
+                              }
+                            },
+                          ),
+                  ),
                 ],
               ),
             ],
@@ -5701,6 +5770,17 @@ class _AudioPlayerBar extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (current != null)
+                    _actionRecordButton(
+                      context,
+                      palette,
+                      controller,
+                      current.id,
+                      () => playback.position.value.inMilliseconds,
+                      () {
+                        if (!playback.playing.value) onPlay(current);
+                      },
+                    ),
                 ],
               ),
             ],

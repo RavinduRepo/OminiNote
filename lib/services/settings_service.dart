@@ -431,6 +431,34 @@ class SettingsService {
   Map<String, dynamic> _canvasViewports = {};
   static const int _kMaxViewports = 300;
 
+  /// Action-recording anchors: for a media (a recording id, or `video:<assetId>`)
+  /// on a canvas, the wall-clock ms that maps to media position 0. Replay glows
+  /// the ink drawn during the recording pass (its `createdAt` maps back through
+  /// this anchor to a media position). Device-local like the viewport — an
+  /// action pass is re-recordable per device — so it never syncs. Capped.
+  Map<String, dynamic> _actionAnchors = {};
+  static const int _kMaxActionAnchors = 500;
+
+  int? actionAnchorFor(String canvasId, String mediaId) {
+    final v = _actionAnchors['$canvasId:$mediaId'];
+    return (v as num?)?.toInt();
+  }
+
+  Future<void> setActionAnchor(
+      String canvasId, String mediaId, int wallclockMs) async {
+    final key = '$canvasId:$mediaId';
+    _actionAnchors.remove(key);
+    _actionAnchors[key] = wallclockMs;
+    while (_actionAnchors.length > _kMaxActionAnchors) {
+      _actionAnchors.remove(_actionAnchors.keys.first);
+    }
+    await _persist();
+  }
+
+  Future<void> clearActionAnchor(String canvasId, String mediaId) async {
+    if (_actionAnchors.remove('$canvasId:$mediaId') != null) await _persist();
+  }
+
   ({double zoom, double panX, double panY})? viewportFor(String canvasId) {
     final v = _canvasViewports[canvasId];
     if (v is! Map) return null;
@@ -544,6 +572,9 @@ class SettingsService {
       _canvasViewports = Map<String, dynamic>.from(
         data['canvasViewports'] as Map,
       );
+    }
+    if (data['actionAnchors'] is Map<String, dynamic>) {
+      _actionAnchors = Map<String, dynamic>.from(data['actionAnchors'] as Map);
     }
     if (data['readingPositions'] is Map<String, dynamic>) {
       _readingPositions = Map<String, dynamic>.from(
@@ -728,6 +759,7 @@ class SettingsService {
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'defaultNotebookId': defaultNotebookId,
         'canvasViewports': _canvasViewports,
+        'actionAnchors': _actionAnchors,
         'readingPositions': _readingPositions,
         'ttsVoiceName': ttsVoiceName,
         'ttsVoiceLocale': ttsVoiceLocale,

@@ -4432,8 +4432,16 @@ class CanvasController extends ChangeNotifier {
   /// Lazily-created video playback service (one media_kit Player per open
   /// canvas). Created on first use so canvases with no video never touch the
   /// plugin.
-  VideoPlaybackService get videoPlayback =>
-      _videoPlayback ??= VideoPlaybackService();
+  VideoPlaybackService get videoPlayback {
+    if (_videoPlayback == null) {
+      final v = VideoPlaybackService();
+      v.position.addListener(_updateVideoPlayhead);
+      v.currentId.addListener(_updateVideoPlayhead);
+      v.playing.addListener(_updateVideoPlayhead);
+      _videoPlayback = v;
+    }
+    return _videoPlayback!;
+  }
 
   /// Imports a video file [srcPath] onto this canvas: stores it as a
   /// content-addressed asset, records it as an [Attachment] (so it lists in the
@@ -4494,9 +4502,89 @@ class CanvasController extends ChangeNotifier {
         break;
       }
     }
-    final playhead = rec?.startedAt.add(p.position.value);
+    if (rec == null) {
+      audioPlayheadNotifier.value = null;
+      return;
+    }
+    // Prefer a device-local action-recording anchor (set by a "record actions"
+    // pass — works for imported audio too); fall back to the take's own
+    // wall-clock start (a voice recording drawn over while recording).
+    final anchorMs = SettingsService().actionAnchorFor(canvas.id, rec.id);
+    final startedAt = anchorMs != null
+        ? DateTime.fromMillisecondsSinceEpoch(anchorMs)
+        : rec.startedAt;
+    final playhead = startedAt.add(p.position.value);
     audioPlayheadNotifier.value = playhead;
-    if (playhead != null) _followAudioGlow(playhead);
+    _followAudioGlow(playhead);
+  }
+
+  /// Media id used for a video's action-recording anchor.
+  static String videoActionMediaId(String assetId) => 'video:$assetId';
+
+  void _updateVideoPlayhead() {
+    final v = _videoPlayback;
+    if (v == null || !v.playing.value) {
+      // Only clear if a video is the current media (don't stomp audio's state).
+      if (v != null && v.currentId.value != null) {
+        audioPlayheadNotifier.value = null;
+      }
+      return;
+    }
+    final assetId = v.currentId.value;
+    if (assetId == null) return;
+    // Video has no wall-clock ink correlation, so it glows only after a
+    // "record actions" pass gives it an anchor.
+    final anchorMs =
+        SettingsService().actionAnchorFor(canvas.id, videoActionMediaId(assetId));
+    if (anchorMs == null) {
+      audioPlayheadNotifier.value = null;
+      return;
+    }
+    final playhead = DateTime.fromMillisecondsSinceEpoch(
+        anchorMs + v.position.value.inMilliseconds);
+    audioPlayheadNotifier.value = playhead;
+    _followAudioGlow(playhead);
+  }
+
+  // ── Action recording (glow ink drawn while a media plays) ──────────────
+
+  /// The media id ('rec…' or 'video:…') currently being action-recorded, or
+  /// null. Drives the "record actions" button state on the players.
+  final ValueNotifier<String?> actionRecordingNotifier = ValueNotifier(null);
+
+  /// Whether [mediaId] has a saved action track (an anchor) on this device.
+  bool hasActionTrack(String mediaId) =>
+      SettingsService().actionAnchorFor(canvas.id, mediaId) != null;
+
+  /// Arms an action-recording pass for [mediaId]: pins the anchor so the media
+  /// position [positionMs] maps to *now*, so ink drawn from here on (at 1×)
+  /// glows at the matching position on replay. Forces 1× while recording so the
+  /// wall-clock ↔ position mapping stays linear.
+  Future<void> startActionRecording(String mediaId, int positionMs) async {
+    final anchor = DateTime.now().millisecondsSinceEpoch - positionMs;
+    await SettingsService().setActionAnchor(canvas.id, mediaId, anchor);
+    if (mediaId.startsWith('video:')) {
+      await _videoPlayback?.setSpeed(1.0);
+    } else {
+      await _playback?.setSpeed(1.0);
+    }
+    actionRecordingNotifier.value = mediaId;
+    notifyListeners();
+  }
+
+  /// Ends the action-recording pass (the anchor persists as the track).
+  void stopActionRecording() {
+    actionRecordingNotifier.value = null;
+    notifyListeners();
+  }
+
+  /// Deletes [mediaId]'s action track (no more glow); stops recording it.
+  Future<void> clearActionTrack(String mediaId) async {
+    await SettingsService().clearActionAnchor(canvas.id, mediaId);
+    if (actionRecordingNotifier.value == mediaId) {
+      actionRecordingNotifier.value = null;
+    }
+    notifyListeners();
   }
 
   // ── Connections: navigate-to-element landing flash ─────────────────────
@@ -5205,6 +5293,7 @@ class CanvasController extends ChangeNotifier {
     clipboardNotifier.dispose();
     isRecordingAudioNotifier.dispose();
     audioPlayheadNotifier.dispose();
+    actionRecordingNotifier.dispose();
     _linkFlashTimer?.cancel();
     linkFlashNotifier.dispose();
     readAloudActive.dispose();
