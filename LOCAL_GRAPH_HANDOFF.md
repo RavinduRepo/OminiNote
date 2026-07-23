@@ -168,6 +168,20 @@ the panel's engine `_g`.
   drop it entirely (one-liner).
 - Test: `test/project_model_test.dart`.
 
+**F rework (`cceb368`, user feedback):** the pin is a per-project-ROW **pin
+icon** (before edit/delete; glows when pinned; tap toggles, tapping a non-active
+project activates it first). Toggling ON **restores** the saved arrangement +
+locks it; OFF frees the nodes — **neither captures**, so a toggle never loses
+the saved layout. **"Save arrangement"** (per active project) is the ONLY thing
+that persists (captures visible + `updateSavedLayout` in-memory +
+`ProjectService.setProjectLayout(merge:true)` — a depth-scoped LOCAL save keeps
+off-screen nodes). Removed drag auto-save (button-only now). Removed the
+`layoutControls` flag → pin/save/restore work in the **local** graph too, so a
+global arrangement carries into the local graph when pinned there. Local-graph
+caveats reported to the user (kept, not removed): "Show items without links" is
+a no-op in the depth-scoped local graph; activating a Project scopes to members
+∩ depth (can lose the center); "Include linked neighbors" inherits that.
+
 ### Lower priority / "maybe"
 - Global graph **pin → tap-node → spawn the local panel** on that node.
 - **Mobile** list ⟷ graph toggle inside the bottom sheet (the floating panel is
