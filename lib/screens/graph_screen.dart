@@ -120,6 +120,30 @@ class GraphController extends ChangeNotifier {
   Set<String> _projExcludes = {};
   bool projectPlusLinks = false; // also show members' linked neighbors
 
+  // ── Per-project saved layout (Feature F) ──
+  /// Whether the active project pins its saved [_projLayout]. When true,
+  /// [_rebuildActive] holds saved-position nodes fixed and the pin toggle
+  /// restores them; the saved layout only CHANGES via "Save arrangement".
+  bool projPinLayout = false;
+
+  /// The active project's saved node positions (canonical key → world Offset),
+  /// decoded from [ProjectDef.layout]. Empty when no project / no saved layout.
+  Map<String, Offset> _projLayout = {};
+
+  static Map<String, Offset> _decodeLayout(Map<String, List<double>>? raw) {
+    if (raw == null) return {};
+    final out = <String, Offset>{};
+    for (final e in raw.entries) {
+      if (e.value.length >= 2) out[e.key] = Offset(e.value[0], e.value[1]);
+    }
+    return out;
+  }
+
+  /// The current visible node positions as a savable map (canonical key →
+  /// `[dx, dy]`). The host persists this to the active project.
+  Map<String, List<double>> captureLayout() =>
+      {for (final n in _nodes) n.data.key: [n.pos.dx, n.pos.dy]};
+
   /// Container id → its ancestry [self, parent, …, notebook], nearest first.
   /// Built from the store structure so folder/group levels are honored (an
   /// endpoint URI alone doesn't carry its parent folder). Rebuilt in
@@ -157,6 +181,7 @@ class GraphController extends ChangeNotifier {
   bool alwaysShowLabels = false; // keep labels visible however far you zoom out
   bool sameCanvasLinks = true; // dashed grouping links among same-canvas items
   bool pinOnDrag = false; // dragging a node pins it in place (off = springs back)
+  bool autoScale = true; // auto-fit/reframe after the layout settles (off = keep zoom/pan)
 
   GraphController() {
     // Seed appearance + view toggles from device-local settings.
@@ -169,6 +194,7 @@ class GraphController extends ChangeNotifier {
     alwaysShowLabels = s.graphAlwaysLabels;
     sameCanvasLinks = s.graphSameCanvasLinks;
     pinOnDrag = s.graphPinOnDrag;
+    autoScale = s.graphAutoScale;
     abstractInsideItems = s.graphAbstractItems;
     showExternal = s.graphShowExternal;
     showUnlinked = s.graphShowUnlinked;
@@ -183,15 +209,25 @@ class GraphController extends ChangeNotifier {
     projectPlusLinks = gv['projLinks'] == true;
   }
 
+  /// When false, view-selection changes (hidden containers / tags / active
+  /// project) are NOT written to the shared device-local blob. The local graph
+  /// panel sets this — its filters are per-session and must not leak into the
+  /// global graph, which seeds from that blob. Appearance settings persist
+  /// regardless (they're deliberately shared global↔local via saveGraphSettings).
+  bool persistView = true;
+
   /// Persists the selection/filter/project state to the device-local blob.
-  void _saveView() => SettingsService().patchGraphView({
-        'hidden': hiddenContainers.toList(),
-        'tagInc': tagInclude.toList(),
-        'tagExc': tagExclude.toList(),
-        'tagAll': tagMatchAll,
-        'project': activeProjectId,
-        'projLinks': projectPlusLinks,
-      });
+  void _saveView() {
+    if (!persistView) return;
+    SettingsService().patchGraphView({
+      'hidden': hiddenContainers.toList(),
+      'tagInc': tagInclude.toList(),
+      'tagExc': tagExclude.toList(),
+      'tagAll': tagMatchAll,
+      'project': activeProjectId,
+      'projLinks': projectPlusLinks,
+    });
+  }
 
   bool get hasActiveProject => activeProjectId != null;
 
@@ -504,7 +540,14 @@ class GraphController extends ChangeNotifier {
       final data = lookup[key];
       if (data == null) continue; // abstract target filtered/absent
       final prev = old[key];
+      // Feature F: under a pinned project, a node with a saved position is held
+      // fixed there. Existing nodes keep their LIVE position (prev.pos) so a
+      // rebuild doesn't snap unsaved drags back; a NEW node seeds at its saved
+      // spot. Fresh activation / pin-toggle-on snap everything via
+      // [_applySavedLayout].
+      final saved = projPinLayout ? _projLayout[key] : null;
       final pos = prev?.pos ??
+          saved ??
           Offset(math.cos(i * 2.399) * (30 + i * 6),
                   math.sin(i * 2.399) * (30 + i * 6)) +
               Offset(rnd.nextDouble() * 8, rnd.nextDouble() * 8);
@@ -512,6 +555,10 @@ class GraphController extends ChangeNotifier {
       if (prev != null) {
         sim.vel = prev.vel;
         sim.fixed = prev.fixed; // keep a user-pinned node pinned across rebuilds
+      }
+      if (saved != null) {
+        sim.fixed = true;
+        if (prev == null) sim.vel = Offset.zero;
       }
       _nodes.add(sim);
       _byKey[key] = sim;
@@ -677,11 +724,82 @@ class GraphController extends ChangeNotifier {
     activeProjectId = id;
     _projIncludes = id == null ? {} : includes;
     _projExcludes = id == null ? {} : excludes;
+    // Feature F: adopt the project's saved layout + pin flag (from its def). The
+    // saved layout is ALWAYS held (so a later pin-toggle can restore it without
+    // a reload); it's only *applied* to node positions on a fresh activation
+    // when pinned (see below). Toggling the pin never captures — only the
+    // explicit "Save arrangement" persists positions.
+    ProjectDef? def;
+    if (id != null) {
+      for (final d in projects) {
+        if (d.id == id) {
+          def = d;
+          break;
+        }
+      }
+    }
+    projPinLayout = def?.pinLayout ?? false;
+    _projLayout = def == null ? {} : _decodeLayout(def.layout);
+    // Leaving a pinned arrangement (deactivate, or switch to a non-pinned
+    // project) releases the pins so the force layout resumes; _rebuildActive
+    // copies `fixed` by key, so clear it on the outgoing nodes first.
+    if (!projPinLayout) {
+      for (final n in _nodes) {
+        n.fixed = false;
+      }
+    }
     // Switching INTO a project starts with all its items shown (checked); a
     // plain refresh (same id, e.g. on reload) preserves the user's unchecks.
     if (id != null && changed) hiddenContainers.clear();
     _rebuildActive();
-    _saveView();
+    // Restore the saved arrangement only on a FRESH activation — a same-project
+    // refresh (background reload) keeps live positions so unsaved drags survive.
+    if (projPinLayout && changed) _applySavedLayout();
+  }
+
+  /// Snaps every node that has a saved position to it and fixes it (used on a
+  /// fresh pinned activation and when the pin toggle is turned on). Does NOT
+  /// capture/overwrite the saved layout — only "Save arrangement" does that.
+  void _applySavedLayout() {
+    for (final n in _nodes) {
+      final p = _projLayout[n.data.key];
+      if (p != null) {
+        n.pos = p;
+        n.vel = Offset.zero;
+        n.fixed = true;
+      }
+    }
+    notifyListeners();
+  }
+
+  /// Turns the active project's pin-layout on/off *live* (from the per-project
+  /// pin toggle). ON restores the previously-saved arrangement and pins it; OFF
+  /// releases the nodes so you can rearrange freely. Neither captures — the
+  /// saved layout stays put until you press "Save arrangement" again.
+  void setProjectPinLayoutActive(bool v) {
+    if (activeProjectId == null || projPinLayout == v) return;
+    projPinLayout = v;
+    if (v) {
+      _applySavedLayout();
+    } else {
+      for (final n in _nodes) {
+        n.fixed = false;
+      }
+      onWake?.call();
+    }
+    notifyListeners();
+    _bumpUi();
+  }
+
+  /// Merges [layout] (canonical key → world Offset) into the active project's
+  /// in-memory saved arrangement, so a subsequent pin-toggle restores what was
+  /// just saved without waiting for a store reload. The host persists it too.
+  void updateSavedLayout(Map<String, List<double>> layout) {
+    for (final e in layout.entries) {
+      if (e.value.length >= 2) {
+        _projLayout[e.key] = Offset(e.value[0], e.value[1]);
+      }
+    }
   }
 
   void setProjectPlusLinks(bool v) {
@@ -1004,10 +1122,13 @@ class GraphController extends ChangeNotifier {
   }
 
   void endDrag() {
-    // With "pin nodes on drag" on, dropping a node keeps it where placed (it no
-    // longer springs back); clearFixed releases them. Off (default) → the node
-    // rejoins the force layout as before.
-    if (pinOnDrag) _pinned?.fixed = true;
+    final p = _pinned;
+    // With a project active you can always drag to ARRANGE — a dropped node
+    // stays where placed (in-session) so you can lay the graph out, then press
+    // "Save arrangement" to persist it. Dragging never auto-saves. With no
+    // project active, the global "pin nodes on drag" fallback applies.
+    final pinning = activeProjectId != null ? true : pinOnDrag;
+    if (pinning) p?.fixed = true;
     _pinned = null;
     onWake?.call();
   }
@@ -1024,6 +1145,13 @@ class GraphController extends ChangeNotifier {
     notifyListeners();
     _bumpUi(); // the filter/appearance panel rebuilds on uiVersion, not this
     if (persist) SettingsService().saveGraphSettings(pinOnDrag: v);
+  }
+
+  void setAutoScale(bool v, {bool persist = true}) {
+    if (autoScale == v) return;
+    autoScale = v;
+    _bumpUi(); // appearance panel rebuilds on uiVersion
+    if (persist) SettingsService().saveGraphSettings(autoScale: v);
   }
 
   /// Releases a single node back into the force layout (double-tap).
@@ -1114,9 +1242,10 @@ class _GraphScreenState extends State<GraphScreen>
   /// Fit the graph once the sim has had a moment to settle after a change
   /// (debounced, so a burst of filter toggles coalesces into one fit).
   void _scheduleAutoFit() {
+    if (!_controller.autoScale) return; // user turned off auto-scaling
     _fitDebounce?.cancel();
     _fitDebounce = Timer(const Duration(milliseconds: 700), () {
-      if (mounted) _controller.fitToScreen();
+      if (mounted && _controller.autoScale) _controller.fitToScreen();
     });
   }
 
@@ -1323,7 +1452,8 @@ class _GraphScreenState extends State<GraphScreen>
             ),
           ),
           Expanded(
-            child: _GraphFilterPanel(controller: _controller, onReload: _load),
+            child: _GraphFilterPanel(
+                controller: _controller, onReload: _load),
           ),
         ],
       ),
@@ -1963,6 +2093,24 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
             // confusing duplicate here and is removed.
             _toggle(palette, 'Include linked neighbors', c.projectPlusLinks,
                 (v) => c.setProjectPlusLinks(v)),
+          if (active != null)
+            // Feature F: the pin (restore/lock) is the per-project pin icon on
+            // each row. Arranging is always free while a project is active
+            // (drag → stays); "Save arrangement" persists the current layout to
+            // this project (synced) — it's the ONLY thing that overwrites the
+            // saved positions, so a pin-toggle never loses them.
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => _saveProjectArrangement(active),
+                icon: const Icon(Icons.save_outlined, size: 15),
+                label: const Text('Save arrangement',
+                    style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 6)),
+              ),
+            ),
           for (final p in c.projects)
             _projectRow(palette, onSurface, p, p.id == active),
           Align(
@@ -2002,6 +2150,19 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
                       color: active ? palette.accent : onSurface,
                       fontWeight: active ? FontWeight.w600 : FontWeight.w400)),
             ),
+            // Feature F: per-project pin. Glows (filled + accent) when this
+            // project's saved arrangement is pinned; tap to toggle. Turning it
+            // on restores the saved positions and locks them; off frees the
+            // nodes. Never overwrites the saved layout — that's "Save
+            // arrangement" only. Tapping a non-active project's pin activates it.
+            IconButton(
+              icon: Icon(p.pinLayout ? Icons.push_pin : Icons.push_pin_outlined,
+                  size: 15),
+              color: p.pinLayout ? palette.accent : palette.textDim,
+              visualDensity: VisualDensity.compact,
+              tooltip: p.pinLayout ? 'Unpin arrangement' : 'Pin arrangement',
+              onPressed: () => _togglePinForProject(p),
+            ),
             IconButton(
               icon: const Icon(Icons.edit_outlined, size: 15),
               color: palette.textDim,
@@ -2033,6 +2194,35 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     final exc =
         items.where((i) => i.excluded).map((i) => i.endpoint.leafId).toSet();
     c.setActiveProject(p.id, inc, exc);
+  }
+
+  /// Feature F: the per-project pin toggle. Turning it ON restores that
+  /// project's saved arrangement and locks it; OFF frees the nodes. It NEVER
+  /// captures positions (so the saved layout is untouched until "Save
+  /// arrangement"); it only flips the persisted `pinLayout` flag. Tapping a
+  /// non-active project's pin activates it first so the restore is visible.
+  Future<void> _togglePinForProject(ProjectDef p) async {
+    final newVal = !p.pinLayout;
+    if (c.activeProjectId != p.id) {
+      await _activate(p); // make it active so restore/release applies live
+      if (!mounted) return;
+    }
+    if (c.activeProjectId == p.id) c.setProjectPinLayoutActive(newVal);
+    await ProjectService().setProjectPinLayout(p.id, newVal);
+    if (mounted) setState(() {}); // refresh the pin glow
+  }
+
+  /// Persist the current node arrangement to [projectId] (merged into its saved
+  /// layout, so a depth-scoped local save keeps off-screen nodes). This is the
+  /// only path that overwrites saved positions. Keeps the current pin state.
+  Future<void> _saveProjectArrangement(String projectId) async {
+    final captured = c.captureLayout();
+    c.updateSavedLayout(captured); // so a pin-toggle restores what we just saved
+    await ProjectService()
+        .setProjectLayout(projectId, captured, pinLayout: c.projPinLayout);
+    if (mounted) {
+      showAppToast(context, 'Arrangement saved');
+    }
   }
 
   void _startNewProject() => setState(() {
@@ -2676,6 +2866,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
               (v) => c.setSameCanvasLinks(v)),
           _toggle(palette, 'Pin nodes where you drag them', c.pinOnDrag,
               (v) => c.setPinOnDrag(v)),
+          _toggle(palette, 'Auto-scale graph to fit', c.autoScale,
+              (v) => c.setAutoScale(v)),
           const SizedBox(height: 4),
         ],
       ],
@@ -2790,92 +2982,6 @@ class _ShapeIconPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ShapeIconPainter old) =>
       old.shape != shape || old.color != color;
-}
-
-/// Appearance/visual controls (sliders + toggles) for a [GraphController] —
-/// the local panel's settings popup shows these so it exposes the same visual
-/// settings as the global graph. Changes persist (shared device-local graph
-/// settings), so the two stay consistent.
-List<Widget> graphAppearanceControls(
-    BuildContext context, GraphController c, AppPalette palette) {
-  return [
-    _graphSlider(palette, 'Node size', c.nodeSizeScale, 0.5, 2.5,
-        c.setNodeSizeScale),
-    _graphSlider(palette, 'Text size', c.textSizeScale, 0.6, 2.0,
-        c.setTextSizeScale),
-    _graphSlider(palette, 'Text opacity', c.labelOpacity, 0.15, 1.0,
-        c.setLabelOpacity),
-    _graphSlider(palette, 'Link thickness', c.linkThickness, 0.4, 3.0,
-        c.setLinkThickness),
-    _graphSlider(palette, 'Link opacity', c.linkOpacity, 0.1, 1.0,
-        c.setLinkOpacity),
-    _graphToggle(context, palette, 'Always show labels', c.alwaysShowLabels,
-        (v) => c.setAlwaysShowLabels(v)),
-    _graphToggle(context, palette, 'Expand items inside canvases',
-        !c.abstractInsideItems, (v) => c.setAbstractInsideItems(!v)),
-    _graphToggle(context, palette, 'Link items in same canvas',
-        c.sameCanvasLinks, (v) => c.setSameCanvasLinks(v)),
-    _graphToggle(context, palette, 'Pin nodes where you drag them', c.pinOnDrag,
-        (v) => c.setPinOnDrag(v)),
-  ];
-}
-
-Widget _graphSlider(AppPalette palette, String label, double value, double min,
-    double max, ValueChanged<double> onChanged) {
-  return Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 14),
-    child: Row(
-      children: [
-        SizedBox(
-          width: 92,
-          child: Text(label,
-              style: TextStyle(fontSize: 11.5, color: palette.textDim)),
-        ),
-        Expanded(
-          child: SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 2,
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-            ),
-            child: Slider(
-              value: value.clamp(min, max),
-              min: min,
-              max: max,
-              onChanged: onChanged,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-Widget _graphToggle(BuildContext context, AppPalette palette, String label,
-    bool value, ValueChanged<bool> onChanged) {
-  return InkWell(
-    onTap: () => onChanged(!value),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 1),
-      child: Row(
-        children: [
-          Expanded(
-              child: Text(label,
-                  style: TextStyle(
-                      fontSize: 12.5,
-                      color: Theme.of(context).colorScheme.onSurface))),
-          Transform.scale(
-            scale: 0.72,
-            child: Switch(
-              value: value,
-              onChanged: onChanged,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
 }
 
 /// The floating Connections panel's two faces: the connections LIST or the
@@ -3148,6 +3254,11 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   late final Ticker _ticker;
   Timer? _fit;
   int _builtRev = -1;
+  // Feature E: the local settings panel needs the store structure + tags +
+  // projects in `_g` (loaded lazily on first graph build / settings open, then
+  // refreshed on store changes while the panel is open).
+  bool _filtersLoaded = false;
+  Timer? _filterReload;
 
   GraphSimNode? _dragNode;
   bool _moved = false;
@@ -3157,7 +3268,9 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   void initState() {
     super.initState();
     _g = GraphController();
-    // A local graph ignores the main view's filters.
+    // A local graph ignores the main view's filters, and its own filter choices
+    // (Feature E) must NOT leak into the shared blob the global graph seeds from.
+    _g.persistView = false;
     _g.hiddenContainers.clear();
     _g.tagInclude.clear();
     _g.tagExclude.clear();
@@ -3169,22 +3282,63 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
       if (mounted && !_ticker.isActive) _ticker.start();
     };
     _g.onContentChanged = () {
+      if (!_g.autoScale) return; // user turned off auto-scaling
       _fit?.cancel();
       _fit = Timer(const Duration(milliseconds: 500), () {
-        if (mounted) _g.fitToScreen();
+        if (mounted && _g.autoScale) _g.fitToScreen();
       });
     };
     _lgc.addListener(_onLgc);
+    SyncService().dataVersion.addListener(_onFilterData);
     _maybeRebuild();
   }
 
   @override
   void dispose() {
     _lgc.removeListener(_onLgc);
+    SyncService().dataVersion.removeListener(_onFilterData);
+    _filterReload?.cancel();
     _fit?.cancel();
     _ticker.dispose();
     _g.dispose();
     super.dispose();
+  }
+
+  /// A store change may add/remove containers, tags, or projects — refresh the
+  /// filter data feeding `_g` (only while the panel is open; debounced so a sync
+  /// burst coalesces). The graph nodes themselves refresh via `_maybeRebuild`.
+  void _onFilterData() {
+    if (!_lgc.open || !_filtersLoaded) return;
+    _filterReload?.cancel();
+    _filterReload = Timer(const Duration(milliseconds: 400), _loadFilters);
+  }
+
+  /// Loads the store structure + tags + projects into this panel's engine so the
+  /// settings panel's filter tree / tag chips / project list are populated —
+  /// mirrors `_GraphScreenState._load` but for the local `_g`. The active
+  /// project (if any) starts cleared for a local graph, so its members are only
+  /// refreshed once the user activates one here.
+  Future<void> _loadFilters() async {
+    final structure = await GraphService().buildStructure();
+    if (!mounted) return;
+    _g.setStructure(structure);
+    final tags = await TagService().allTags();
+    final tagsByLeaf = await TagService().tagIdsByLeaf();
+    if (!mounted) return;
+    _g.setTagData(tags, tagsByLeaf);
+    final projs = await ProjectService().allProjects();
+    if (!mounted) return;
+    _g.setProjects(projs);
+    final active = _g.activeProjectId;
+    if (active != null) {
+      final items = await ProjectService().membersOf(active);
+      if (!mounted) return;
+      final inc =
+          items.where((i) => !i.excluded).map((i) => i.endpoint.leafId).toSet();
+      final exc =
+          items.where((i) => i.excluded).map((i) => i.endpoint.leafId).toSet();
+      _g.setActiveProject(active, inc, exc);
+    }
   }
 
   void _onLgc() {
@@ -3208,6 +3362,12 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     if (!_lgc.open || _lgc.view != ConnPanelView.graph) return;
     if (_lgc.revision == _builtRev) return;
     _builtRev = _lgc.revision;
+    // Populate the settings panel's filter data (structure/tags/projects) the
+    // first time the graph is built for this session (cheap; center-independent).
+    if (!_filtersLoaded) {
+      _filtersLoaded = true;
+      unawaited(_loadFilters());
+    }
     final center = _lgc.center;
     if (center == null) return;
     final data = await GraphService().buildGraph();
@@ -3626,32 +3786,31 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
   /// The graph settings popup — the same visual controls the global graph has,
   /// operating on the local `_g` (and persisting, so both stay consistent).
   void _openGraphSettings() {
-    final palette = Theme.of(context).extension<AppPalette>()!;
+    // Feature E: the local graph's settings expose the SAME full panel as the
+    // global graph — the filter-items tree (groups/containers), tags, projects,
+    // AND appearance — operating on this panel's own engine (`_g`). Its
+    // structure/tags/projects are loaded lazily (see `_loadFilters`), so make
+    // sure they're present before showing the panel.
+    if (!_filtersLoaded) {
+      _filtersLoaded = true;
+      _loadFilters();
+    }
+    final h = (MediaQuery.of(context).size.height * 0.8).clamp(340.0, 640.0);
     showDialog<void>(
       context: context,
       builder: (ctx) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 340),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            child: ListenableBuilder(
-              listenable: _g,
-              builder: (_, _) => Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                    child: Text('Graph settings',
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: palette.textDim)),
-                  ),
-                  ...graphAppearanceControls(ctx, _g, palette),
-                ],
-              ),
-            ),
+        child: SizedBox(
+          width: 360,
+          height: h,
+          // _GraphFilterPanel filters `_g` (container tree / tags / projects)
+          // AND composes with the center+depth scope in `_rebuildActive`; a link
+          // created here re-fetches the local graph via onReload.
+          child: _GraphFilterPanel(
+            controller: _g,
+            onReload: () {
+              _builtRev = -1;
+              _maybeRebuild();
+            },
           ),
         ),
       ),
