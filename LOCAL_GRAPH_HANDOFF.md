@@ -109,52 +109,64 @@ unless noted):
 
 ---
 
-## 3. TO DO NEXT (the two large features the user asked for)
+## 3. TO DO NEXT
 
-### Feature E — full filter options in the LOCAL graph settings
-Right now the local settings gear only shows **appearance** (sliders + a few
-toggles). The user wants **all the global-graph options** too: selecting a
-group / container (the filter-items tree), tags, projects.
+> **Update 2026-07-23 (branch `polishing-graph`, off `feature/connections-graph-view`):**
+> Features **E and F are DONE** (analyze-clean + a model test; NOT device-tested),
+> plus two settings toggles. Commits on `polishing-graph`:
+> - `f05579e` — settings toggles: **auto-open list on navigate**
+>   (`SettingsService.autoExpandOnReveal`, gates the 3 desktop-shell reveal
+>   sites) + **auto-scale graph to fit** (`graphAutoScale` /
+>   `GraphController.autoScale`, gates the debounced auto-fit in both the global
+>   screen and the local panel). Both in a new "Navigation & graph" Settings
+>   section; auto-scale is also a toggle in the graph Appearance panel.
+> - `b2498c5` — **Feature E**.
+> - `39aaa8e` — **Feature F**.
+>
+> `polishing-graph` will be merged back to `feature/connections-graph-view` as it
+> stabilizes on device, then that branch to main later.
 
-- The local panel's `_g` (its own `GraphController`) currently only gets `setData`
-  — it never gets `setStructure` / `setTagData` / `setProjects`, so the filter
-  tree / tag chips / project list would be empty.
-- Plan: after building the local graph, also load + feed the store structure +
-  tags + projects into `_g` (mirror what `GraphScreen._load` does for the
-  global controller). Then reuse `_GraphFilterPanel` (or extract its sections)
-  in the settings popup, operating on `_g`. `_GraphFilterPanel` is currently
-  tied to `_GraphScreenState` with several callbacks — extracting it standalone
-  is the bulk of the work.
-- Decision to confirm with the user: does a container filter compose with the
-  depth scope, or replace it?
+### Feature E — full filter options in the LOCAL graph settings ✅ DONE (b2498c5)
+The local settings gear now opens the SAME full `_GraphFilterPanel` as the
+global graph (filter-items tree / Tags / Projects / Appearance), operating on
+the panel's engine `_g`.
+- `_LocalGraphPanelState._loadFilters()` loads store structure + tags + projects
+  into `_g` (lazily on first graph build / settings open; refreshed debounced on
+  `dataVersion` while open).
+- `_openGraphSettings` hosts `_GraphFilterPanel(controller: _g)` in a bounded
+  dialog; the appearance-only `graphAppearanceControls`/`_graphSlider`/
+  `_graphToggle` were removed (dead — the panel's own `_appearanceSection`
+  covers it).
+- **Decision made:** a container/tag/project filter **composes** with the
+  depth scope (both applied in `_rebuildActive`), it does not replace it.
+- **`GraphController.persistView`** guards `_saveView`; the local `_g` sets it
+  false so its per-session filter/tag/project selection never leaks into the
+  shared device-local blob the global graph seeds from (appearance still
+  persists — shared by design).
 
-### Feature F — pin-on-drag PER-PROJECT + saved/synced node layout (BIG)
-The user's exact intent: **pin-on-drag should NOT be a global appearance
-toggle. It belongs to each PROJECT.** Each project should **save the node
-positions you arranged (the "structure")**, **synced**, so you can:
-- activate a project → arrange its graph → the layout is saved,
-- toggle pin on/off per project,
-- come back later (any device) and the structure/positions are intact.
-
-This is a GLOBAL-graph + projects feature (activate a project in the global
-graph → arrange → save → return), not the local panel per se.
-
-Design sketch:
-- Store per project: a `pinLayout` bool + a map `nodeKey (endpoint URI) →
-  Offset`. Put it in the synced `projects.json` (new `ProjectDef` fields, or a
-  new `t:'pl'` record type) — merges like the rest (union + LWW + tombstone).
-  See `lib/models/project.dart` + `lib/services/project_service.dart`.
-- When a project is active in the `GraphController`: on layout settle (or on
-  drag-drop) save each node's position keyed by its endpoint URI; on activate,
-  restore saved positions and set `fixed=true` for saved nodes when the
-  project's pin flag is on.
-- Move the pin toggle out of global Appearance into the **project row/section**
-  in `_GraphFilterPanel` (per-project). Remove `graphPinOnDrag` from global
-  settings (or keep as a fallback for no-project).
-- Watch: node keys are now CANONICAL (post-merge, `_canonicalKeys`) — save
-  positions by the canonical key so they survive marker growth. Also the graph
-  is depth-scoped in the local panel but full in the global; the project layout
-  is for the GLOBAL (project-scoped) graph.
+### Feature F — per-project pinned + saved/synced node layout ✅ DONE (39aaa8e)
+- `ProjectDef` gains `pinLayout` (bool) + `layout` (canonical node key →
+  `[dx,dy]`), synced via `projects.json` (whole-record LWW — no merge change;
+  both omitted from JSON when empty so old data stays byte-stable).
+- `ProjectService.setProjectLayout(id, layout, pinLayout:)` +
+  `setProjectPinLayout(id, bool)`.
+- `GraphController`: `projPinLayout` + `_projLayout` (adopted in
+  `setActiveProject`; a same-project refresh keeps LIVE positions so a
+  background reload can't snap in-progress drags back); `_rebuildActive` places
+  pinned nodes at their saved position + fixes them; `endDrag` pins per-project
+  when a project is active (global `pinOnDrag` stays the no-project fallback) +
+  updates `_projLayout` + fires `onProjectLayoutDirty`; `setProjectPinLayoutActive`
+  (live toggle) + `captureLayout()`.
+- `GraphScreen` wires `onProjectLayoutDirty` → debounced
+  `ProjectService.setProjectLayout` (drag auto-save).
+- `_GraphFilterPanel.layoutControls` (GLOBAL graph only — the local panel is
+  depth-scoped): the active project shows **"Pin & save arrangement"** + a
+  **"Save arrangement"** re-capture button.
+- **OPEN DECISION for the user:** the global "Pin nodes where you drag them"
+  Appearance toggle is **KEPT** as the no-project fallback (and for the local
+  graph), not removed as the original ask implied — confirm on device whether to
+  drop it entirely (one-liner).
+- Test: `test/project_model_test.dart`.
 
 ### Lower priority / "maybe"
 - Global graph **pin → tap-node → spawn the local panel** on that node.
