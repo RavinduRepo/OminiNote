@@ -4595,36 +4595,48 @@ class _DraggableFloatingBarState extends State<_DraggableFloatingBar> {
             padding: widget.margin,
             child: Transform.translate(
               offset: clamped,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanUpdate: (d) =>
-                        setState(() => _offset = clamped + d.delta),
-                    child: MouseRegion(
-                      cursor: SystemMouseCursors.move,
-                      child: Container(
-                        margin: const EdgeInsets.only(right: 4),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 2,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: palette.surface2,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: palette.border),
-                        ),
-                        child: Icon(
-                          Icons.drag_indicator,
-                          size: 18,
-                          color: palette.textDim,
+              // One opaque Listener around the WHOLE bar (handle + card, no
+              // seams) so NO pointer over the bar's bounds — pen included — can
+              // fall through to the canvas behind it. This is what stops the
+              // stray-ink leak; the child's own buttons still get their taps
+              // (they're hit first as descendants).
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Drag handle. Uses raw pointer events (a Listener, not a
+                    // GestureDetector) so the move can never be lost to the
+                    // canvas's gesture arena — the drag was "immovable
+                    // sometimes" when the pan recognizer competed for the pen.
+                    Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerMove: (e) =>
+                          setState(() => _offset = clamped + e.delta),
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.move,
+                        child: Container(
+                          margin: const EdgeInsets.only(right: 4),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: palette.surface2,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: palette.border),
+                          ),
+                          child: Icon(
+                            Icons.drag_indicator,
+                            size: 18,
+                            color: palette.textDim,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  Flexible(child: widget.child),
-                ],
+                    Flexible(child: widget.child),
+                  ],
+                ),
               ),
             ),
           ),
