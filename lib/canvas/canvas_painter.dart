@@ -294,8 +294,26 @@ class CanvasPainter extends CustomPainter {
     }
   }
 
-  /// The attachment chip: rounded rect, a small "document" glyph with a
-  /// folded corner, and the file name. Tap-to-open is handled by the screen.
+  /// Icon + tint for an attachment chip, chosen by the file's mime family so
+  /// audio/image/video/PDF/other chips are distinguishable at a glance.
+  (IconData, Color) _attachmentGlyph(String mime) {
+    if (mime == 'application/pdf') {
+      return (Icons.picture_as_pdf, const Color(0xFFD9534F));
+    }
+    if (mime.startsWith('audio/')) {
+      return (Icons.audiotrack, const Color(0xFF7E57C2));
+    }
+    if (mime.startsWith('image/')) {
+      return (Icons.image, const Color(0xFF2E9E8F));
+    }
+    if (mime.startsWith('video/')) {
+      return (Icons.movie, const Color(0xFF3F51B5));
+    }
+    return (Icons.insert_drive_file, const Color(0xFF8A8A8A));
+  }
+
+  /// The attachment chip: rounded rect, a media glyph tinted by file kind, and
+  /// the file name. Tap-to-open/play is handled by the screen.
   void _paintAttachment(Canvas canvas, AttachmentElement el) {
     final r = el.rect;
     canvas.save();
@@ -315,29 +333,27 @@ class CanvasPainter extends CustomPainter {
         ..color = const Color(0xFFB9B2A4),
     );
 
-    // Document glyph with folded corner, sized to the chip height.
+    // Media glyph — the icon depends on the file kind (audio/image/video/pdf/
+    // file) — sized to the chip height and painted from the icon font.
+    final (glyphIcon, glyphColor) = _attachmentGlyph(el.mime);
     final gh = r.height * 0.62;
-    final gw = gh * 0.78;
     final gx = r.left + r.height * 0.22;
-    final gy = r.center.dy - gh / 2;
-    const fold = 0.32;
-    final doc = Path()
-      ..moveTo(gx, gy)
-      ..lineTo(gx + gw * (1 - fold), gy)
-      ..lineTo(gx + gw, gy + gh * fold)
-      ..lineTo(gx + gw, gy + gh)
-      ..lineTo(gx, gy + gh)
-      ..close();
-    canvas.drawPath(doc, Paint()..color = const Color(0xFFD9534F));
-    final foldPath = Path()
-      ..moveTo(gx + gw * (1 - fold), gy)
-      ..lineTo(gx + gw * (1 - fold), gy + gh * fold)
-      ..lineTo(gx + gw, gy + gh * fold)
-      ..close();
-    canvas.drawPath(foldPath, Paint()..color = const Color(0xFFB23C38));
+    final glyph = TextPainter(
+      text: TextSpan(
+        text: String.fromCharCode(glyphIcon.codePoint),
+        style: TextStyle(
+          fontFamily: glyphIcon.fontFamily,
+          package: glyphIcon.fontPackage,
+          fontSize: gh,
+          color: glyphColor,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    glyph.paint(canvas, Offset(gx, r.center.dy - glyph.height / 2));
 
     // File name, ellipsized to the remaining width.
-    final textLeft = gx + gw + r.height * 0.2;
+    final textLeft = gx + glyph.width + r.height * 0.2;
     final maxW = r.right - textLeft - 8;
     if (maxW > 12) {
       final tp = TextPainter(

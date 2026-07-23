@@ -4734,6 +4734,10 @@ class CanvasController extends ChangeNotifier {
       canvas.recordings.add(rec);
       _markDirty(const {}, structural: true);
       unawaited(_flushThenReindex());
+      // Drop a tappable audio chip so the recording has an on-canvas presence
+      // (tapping it plays the take). Deleting the chip leaves the recording in
+      // the Attachments list; it can be re-added from there.
+      addAttachmentChip(assetId, rec.name, 'audio/mp4');
     } finally {
       try {
         await file.delete();
@@ -4776,8 +4780,31 @@ class CanvasController extends ChangeNotifier {
     canvas.recordings.add(rec);
     _markDirty(const {}, structural: true);
     unawaited(_flushThenReindex());
+    // Drop a tappable audio chip (same rationale as a recorded take).
+    addAttachmentChip(assetId, rec.name, _audioMimeForExt(ext));
     notifyListeners();
     return rec;
+  }
+
+  /// Best-effort audio mime for a file extension — used only for the on-canvas
+  /// chip's glyph/open type; playback resolves the recording by asset id.
+  String _audioMimeForExt(String ext) {
+    switch (ext) {
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'm4a':
+      case 'aac':
+        return 'audio/mp4';
+      case 'wav':
+        return 'audio/wav';
+      case 'ogg':
+      case 'opus':
+        return 'audio/ogg';
+      case 'flac':
+        return 'audio/flac';
+      default:
+        return 'audio/mpeg';
+    }
   }
 
   /// Aborts an in-progress recording without saving anything.

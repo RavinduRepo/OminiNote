@@ -1293,8 +1293,27 @@ class _CanvasScreenState extends State<CanvasScreen>
     return null;
   }
 
-  /// Opens an attachment chip's file with the platform's default handler.
+  /// The audio recording backed by [assetId], if any (chips resolve their take
+  /// by asset id so no back-reference field is needed on the element).
+  AudioRecording? _recordingForAsset(CanvasController c, String assetId) {
+    for (final r in c.canvas.recordings) {
+      if (r.assetId == assetId) return r;
+    }
+    return null;
+  }
+
+  /// Handles a tap on an attachment chip. Audio chips play in the floating
+  /// player; everything else opens with the platform's default handler.
   Future<void> _openAttachment(AttachmentElement el) async {
+    final c = _controller;
+    if (c != null && el.mime.startsWith('audio/')) {
+      final rec = _recordingForAsset(c, el.assetId);
+      if (rec != null) {
+        setState(() => _audioPlayerOpen = true);
+        await _playRecording(c, rec);
+        return;
+      }
+    }
     final file = _service.assetFile(widget.canvas, el.assetId);
     if (!await file.exists()) {
       _toast(
@@ -2885,6 +2904,23 @@ class _CanvasScreenState extends State<CanvasScreen>
   /// (recordings, attachment records, PDF-backed pages, on-page images/chips),
   /// deduped by asset so a multi-page PDF or a twice-used asset lists once.
   List<_MediaEntry> _collectMedia(CanvasController c) {
+    // Pre-scan pages so recordings/attachments know whether they already have
+    // an on-canvas icon (→ "Find on canvas" vs "Add to canvas").
+    final firstPageOf = <String, String>{};
+    for (final pl in c.layout.pages) {
+      final page = c.pages[pl.pageId];
+      if (page == null) continue;
+      final src = page.source;
+      if (src != null) firstPageOf.putIfAbsent(src.assetId, () => pl.pageId);
+      for (final el in page.objects) {
+        if (el is ImageElement) {
+          firstPageOf.putIfAbsent(el.assetId, () => pl.pageId);
+        } else if (el is AttachmentElement) {
+          firstPageOf.putIfAbsent(el.assetId, () => pl.pageId);
+        }
+      }
+    }
+
     final entries = <_MediaEntry>[];
     final seen = <String>{};
     // Recordings (voice + imported audio) are the canonical audio items.
@@ -2895,6 +2931,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         assetId: rec.assetId,
         mime: 'audio/mp4',
         recording: rec,
+        pageId: firstPageOf[rec.assetId],
       ));
       seen.add(rec.assetId);
     }
@@ -2907,6 +2944,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         assetId: att.assetId,
         mime: att.mime,
         attachment: att,
+        pageId: firstPageOf[att.assetId],
       ));
     }
     // Media drawn on pages: PDF-backed pages, images, and attachment chips not
@@ -3035,6 +3073,10 @@ class _CanvasScreenState extends State<CanvasScreen>
                                 case 'jump':
                                   Navigator.pop(context);
                                   c.jumpToPage(e.pageId!);
+                                case 'add_to_canvas':
+                                  Navigator.pop(context);
+                                  c.addAttachmentChip(e.assetId, e.name, e.mime);
+                                  _toast('Added "${e.name}" to the canvas');
                                 case 'open':
                                   await _openMediaExternally(e);
                                 case 'insert':
@@ -3070,7 +3112,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                               if (e.pageId != null)
                                 const PopupMenuItem(
                                   value: 'jump',
-                                  child: Text('Jump to it'),
+                                  child: Text('Find on canvas'),
+                                ),
+                              if (e.pageId == null)
+                                const PopupMenuItem(
+                                  value: 'add_to_canvas',
+                                  child: Text('Add to canvas'),
                                 ),
                               const PopupMenuItem(
                                 value: 'open',
