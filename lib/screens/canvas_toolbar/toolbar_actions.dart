@@ -51,6 +51,7 @@ const List<ToolbarActionSpec> kOverflowActionSpecs = [
   ToolbarActionSpec('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
   ToolbarActionSpec('navigator', Icons.grid_view_outlined, 'Pages'),
   ToolbarActionSpec('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+  ToolbarActionSpec('contents', Icons.toc, 'Contents (PDF)'),
   ToolbarActionSpec('attachments', Icons.attach_file, 'Attachments'),
   ToolbarActionSpec(
       'page_settings', Icons.description_outlined, 'Page settings'),

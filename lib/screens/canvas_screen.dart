@@ -34,6 +34,7 @@ import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/pdf_export_isolate.dart';
 import '../services/pdf_exporter.dart';
+import '../services/render_cache.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
@@ -1955,6 +1956,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Bookmarks',
                 onTap: _showBookmarks,
               ),
+            if (shown('contents'))
+              ActionSheetItem(
+                icon: Icons.toc,
+                label: 'Contents (PDF)',
+                onTap: _showPdfOutline,
+              ),
             if (shown('attachments'))
               ActionSheetItem(
                 icon: Icons.attach_file,
@@ -2031,6 +2038,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showNavigator();
           case 'bookmarks':
             _showBookmarks();
+          case 'contents':
+            _showPdfOutline();
           case 'attachments':
             _showAttachments();
           case 'page_settings':
@@ -2073,6 +2082,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('navigator', Icons.grid_view_outlined, 'Pages'),
         if (shown('bookmarks'))
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+        if (shown('contents'))
+          iconMenuItem('contents', Icons.toc, 'Contents (PDF)'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         if (shown('page_settings'))
@@ -2904,6 +2915,93 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
   }
 
+  /// Shows the imported PDF's table of contents (its own outline/bookmarks) as
+  /// a jumpable tree. Targets the current page's PDF, else the first PDF in the
+  /// canvas. Hints when there's no PDF or the PDF carries no outline.
+  Future<void> _showPdfOutline() async {
+    final c = _controller;
+    if (c == null) return;
+    final assetId = c.outlinePdfAssetId;
+    if (assetId == null) {
+      _toast('No PDF on this canvas');
+      return;
+    }
+    final progress = ProgressOverlay.show(context, 'Reading contents…');
+    List<PdfOutlineEntry> outline;
+    try {
+      outline = await c.renderCache.pdfOutline(c.assetFileOf(assetId).path);
+    } finally {
+      progress.close();
+    }
+    if (!mounted) return;
+    if (outline.isEmpty) {
+      _toast('This PDF has no table of contents');
+      return;
+    }
+    // Flatten the tree to (entry, depth) rows for a simple indented list.
+    final flat = <({PdfOutlineEntry e, int depth})>[];
+    void walk(List<PdfOutlineEntry> nodes, int depth) {
+      for (final n in nodes) {
+        flat.add((e: n, depth: depth));
+        walk(n.children, depth + 1);
+      }
+    }
+
+    walk(outline, 0);
+
+    await showAdaptiveMenu<void>(
+      context,
+      desktop: widget.embedded,
+      builder: (context) => cappedSheetBody(
+        context,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            const _SheetLabel('Contents'),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: flat.length,
+                itemBuilder: (context, i) {
+                  final item = flat[i];
+                  final pageIndex = item.e.pageIndex;
+                  return ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.only(
+                      left: 16.0 + item.depth * 16.0,
+                      right: 16,
+                    ),
+                    leading: Icon(
+                      item.e.children.isEmpty
+                          ? Icons.article_outlined
+                          : Icons.folder_outlined,
+                      size: 18,
+                    ),
+                    title: Text(
+                      item.e.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: pageIndex == null
+                        ? null
+                        : () {
+                            Navigator.pop(context);
+                            if (!c.jumpToPdfPage(assetId, pageIndex)) {
+                              _toast('That page isn’t in this canvas');
+                            }
+                          },
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _showBookmarks() async {
     final c = _controller!;
     await showAdaptiveMenu<void>(
@@ -3568,6 +3666,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         return tbBtn(Icons.grid_view_outlined, 'Pages', _showNavigator);
       case 'bookmarks':
         return tbBtn(Icons.bookmark_border, 'Bookmarks', _showBookmarks);
+      case 'contents':
+        return tbBtn(Icons.toc, 'Contents (PDF)', _showPdfOutline);
       case 'attachments':
         return tbBtn(Icons.attach_file, 'Attachments', _showAttachments);
       case 'page_settings':

@@ -17,6 +17,7 @@ class RenderCache {
   final void Function() onUpdated;
 
   final _docs = <String, Future<PdfDocument>>{};
+  final _outlines = <String, Future<List<PdfOutlineEntry>>>{};
   // Insertion-ordered map used as an LRU (re-insert on touch, evict oldest).
   final _pdfImages = <String, _CachedPdfImage>{};
   final _pdfPending = <String>{};
@@ -36,6 +37,28 @@ class RenderCache {
     final doc = await _open(path);
     return [for (final p in doc.pages) ui.Size(p.width, p.height)];
   }
+
+  /// The PDF's document outline (table of contents) as an app-level tree, with
+  /// pdfrx's 1-based destination page numbers converted to 0-based page
+  /// indices. Cached per path; an outline-less or unreadable PDF yields `[]`.
+  Future<List<PdfOutlineEntry>> pdfOutline(String path) =>
+      _outlines.putIfAbsent(path, () async {
+        try {
+          final doc = await _open(path);
+          return _mapOutline(await doc.loadOutline());
+        } catch (_) {
+          return const [];
+        }
+      });
+
+  static List<PdfOutlineEntry> _mapOutline(List<PdfOutlineNode> nodes) => [
+        for (final n in nodes)
+          PdfOutlineEntry(
+            title: n.title,
+            pageIndex: n.dest != null ? n.dest!.pageNumber - 1 : null,
+            children: _mapOutline(n.children),
+          ),
+      ];
 
   static double _bucketFor(double scale) => _scaleBuckets.firstWhere(
     (b) => b >= scale,
@@ -155,4 +178,17 @@ class _CachedPdfImage {
   final ui.Image image;
   final double bucket;
   _CachedPdfImage(this.image, this.bucket);
+}
+
+/// One node of a PDF's table of contents, flattened from pdfrx's outline. A
+/// null [pageIndex] means the entry has no jump destination (a plain header).
+class PdfOutlineEntry {
+  final String title;
+  final int? pageIndex; // 0-based into the PDF
+  final List<PdfOutlineEntry> children;
+  const PdfOutlineEntry({
+    required this.title,
+    required this.pageIndex,
+    required this.children,
+  });
 }

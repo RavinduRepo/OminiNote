@@ -4918,6 +4918,35 @@ class CanvasController extends ChangeNotifier {
     unawaited(_flushThenReindex());
   }
 
+  /// The PDF asset id to show a table-of-contents for: the current page's PDF
+  /// if it's PDF-backed, else the first PDF-backed page in the canvas. Null when
+  /// the canvas has no imported PDF pages.
+  String? get outlinePdfAssetId {
+    final cur = currentPageLayout;
+    if (cur != null) {
+      final p = pages[cur.pageId];
+      if (p?.source != null) return p!.source!.assetId;
+    }
+    for (final pl in layout.pages) {
+      final p = pages[pl.pageId];
+      if (p?.source != null) return p!.source!.assetId;
+    }
+    return null;
+  }
+
+  /// Jumps to the canvas page rendering [assetId]'s [pageIndex]. Returns false
+  /// if no such page is in the canvas (e.g. that PDF page wasn't inserted).
+  bool jumpToPdfPage(String assetId, int pageIndex) {
+    for (final pl in layout.pages) {
+      final src = pages[pl.pageId]?.source;
+      if (src != null && src.assetId == assetId && src.pageIndex == pageIndex) {
+        jumpToPage(pl.pageId);
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Jumps to a bookmark's page (no-op if that page is gone).
   void jumpToBookmark(Bookmark bm) {
     if (layout.layoutOf(bm.pageId) == null) return;
