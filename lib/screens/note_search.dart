@@ -41,13 +41,23 @@ Future<void> openNoteSearch(
 // the text field's default arrow/enter behaviour (nearest Shortcuts wins).
 /// The user-facing result categories the search screen can filter to. Each maps
 /// to one or more [SearchKind]s (super-sections travel with sections).
-enum _ResultFilter { notebooks, sections, canvases, bookmarks }
+enum _ResultFilter { notebooks, sections, canvases, bookmarks, things }
+
+/// The four name-level filters (everything except content). "Things" is handled
+/// on a separate path (content index), so it's excluded here.
+const List<_ResultFilter> _nameFilters = [
+  _ResultFilter.notebooks,
+  _ResultFilter.sections,
+  _ResultFilter.canvases,
+  _ResultFilter.bookmarks,
+];
 
 Set<SearchKind> _kindsFor(_ResultFilter f) => switch (f) {
       _ResultFilter.notebooks => {SearchKind.notebook},
       _ResultFilter.sections => {SearchKind.section, SearchKind.superSection},
       _ResultFilter.canvases => {SearchKind.canvas},
       _ResultFilter.bookmarks => {SearchKind.bookmark},
+      _ResultFilter.things => {SearchKind.thing},
     };
 
 String _filterLabel(_ResultFilter f) => switch (f) {
@@ -55,6 +65,7 @@ String _filterLabel(_ResultFilter f) => switch (f) {
       _ResultFilter.sections => 'Sections',
       _ResultFilter.canvases => 'Canvases',
       _ResultFilter.bookmarks => 'Bookmarks',
+      _ResultFilter.things => 'Things',
     };
 
 class _NextIntent extends Intent {
@@ -108,8 +119,16 @@ class _SearchScreenState extends State<_SearchScreen> {
   bool _navigated = false; // guards against Enter firing open twice
   Timer? _filterDebounce;
 
-  /// Selected type filters. All selected (the default) means "no restriction".
-  final Set<_ResultFilter> _filters = {..._ResultFilter.values};
+  /// Lazily-built content index (typed + PDF text), and a flag while it builds.
+  /// Only populated once the "Things" filter is turned on — it's much heavier
+  /// than the name index, so it stays off the default path.
+  List<ContentEntry>? _contentIndex;
+  bool _contentBuilding = false;
+
+  /// Selected type filters. The four name filters default on; "Things" (content)
+  /// is deliberately OFF by default — scanning every page's text on each query
+  /// is expensive, so the user opts in.
+  final Set<_ResultFilter> _filters = {..._nameFilters};
 
   @override
   void initState() {
@@ -149,23 +168,46 @@ class _SearchScreenState extends State<_SearchScreen> {
     }
   }
 
-  /// The [SearchKind] restriction from the current chip selection, or null when
-  /// everything is selected (no restriction — the cheap default).
-  Set<SearchKind>? _selectedKinds() {
-    if (_filters.length == _ResultFilter.values.length) return null;
-    return {for (final f in _filters) ..._kindsFor(f)};
+  /// The name-level [SearchKind] restriction from the current chip selection, or
+  /// null when all four name filters are on (no restriction — the cheap
+  /// default). "Things" is not a name kind and is handled separately.
+  Set<SearchKind>? _selectedNameKinds() {
+    final selected = [for (final f in _nameFilters) if (_filters.contains(f)) f];
+    if (selected.length == _nameFilters.length) return null; // all → no restrict
+    return {for (final f in selected) ..._kindsFor(f)};
   }
 
   void _applyFilter(String q) {
     if (!mounted) return;
     final query = q.trim();
+    final nameResults = query.isEmpty
+        ? const <SearchResult>[]
+        : _svc.filter(widget.index, query, kinds: _selectedNameKinds());
+    final wantContent =
+        _filters.contains(_ResultFilter.things) && query.length >= 2;
+    final contentResults = (wantContent && _contentIndex != null)
+        ? _svc.filterContent(_contentIndex!, query)
+        : const <SearchResult>[];
     setState(() {
-      _results = query.isEmpty
-          ? const []
-          : _svc.filter(widget.index, query, kinds: _selectedKinds());
+      _results = [...nameResults, ...contentResults];
       _highlighted = 0;
     });
     if (_scroll.hasClients) _scroll.jumpTo(0);
+    // Build the content index the first time it's actually needed, then re-run.
+    if (wantContent && _contentIndex == null && !_contentBuilding) {
+      _buildContentIndex();
+    }
+  }
+
+  Future<void> _buildContentIndex() async {
+    setState(() => _contentBuilding = true);
+    final content = await _svc.buildContentIndex();
+    if (!mounted) return;
+    setState(() {
+      _contentIndex = content;
+      _contentBuilding = false;
+    });
+    _applyFilter(_controller.text); // fold in content results now they exist
   }
 
   void _toggleFilter(_ResultFilter f) {
@@ -343,12 +385,26 @@ class _SearchScreenState extends State<_SearchScreen> {
           Expanded(
             child: _results.isEmpty
           ? Center(
-              child: Text(
-                _controller.text.trim().isEmpty
-                    ? 'Search your notes & bookmarks'
-                    : 'No matches for "${_controller.text}"',
-                style: TextStyle(color: palette.textDim),
-              ),
+              child: _contentBuilding
+                  ? Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(height: 12),
+                        Text('Indexing canvas contents…',
+                            style: TextStyle(color: palette.textDim)),
+                      ],
+                    )
+                  : Text(
+                      _controller.text.trim().isEmpty
+                          ? 'Search your notes & bookmarks'
+                          : 'No matches for "${_controller.text}"',
+                      style: TextStyle(color: palette.textDim),
+                    ),
             )
           : ListView.builder(
               controller: _scroll,
@@ -442,6 +498,7 @@ class _SearchScreenState extends State<_SearchScreen> {
         SearchKind.superSection => Icons.folder_outlined,
         SearchKind.canvas => Icons.article_outlined,
         SearchKind.bookmark => Icons.bookmark_outline,
+        SearchKind.thing => Icons.text_snippet_outlined,
       };
 
   String _kindLabel(SearchKind kind) => switch (kind) {
@@ -450,6 +507,7 @@ class _SearchScreenState extends State<_SearchScreen> {
         SearchKind.superSection => 'Super-section',
         SearchKind.canvas => 'Canvas',
         SearchKind.bookmark => 'Bookmark',
+        SearchKind.thing => 'In canvas',
       };
 }
 

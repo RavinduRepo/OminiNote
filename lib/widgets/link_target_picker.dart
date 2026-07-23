@@ -122,6 +122,7 @@ class _TargetPickerState extends State<_TargetPicker> {
         SearchKind.section => Icons.topic_outlined,
         SearchKind.canvas => Icons.description_outlined,
         SearchKind.bookmark => Icons.bookmark_outline,
+        SearchKind.thing => Icons.text_snippet_outlined,
       };
 
   @override
