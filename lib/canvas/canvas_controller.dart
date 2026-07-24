@@ -3216,7 +3216,7 @@ class CanvasController extends ChangeNotifier {
   /// so the link is *seen* next to the ink it belongs to (and, being an
   /// ordinary text element, can be moved out of the way).
   TextElement? insertLinkItem(String pageId, String uri, String title,
-      {Rect? nearBounds}) {
+      {Rect? nearBounds, List<Rect>? pdfLinkRects}) {
     final page = pages[pageId];
     if (page == null) return null;
     TextRun run(String text, {String? link}) => TextRun(
@@ -3233,6 +3233,7 @@ class CanvasController extends ChangeNotifier {
       deviceId: SettingsService().deviceId,
       rect: const Rect.fromLTWH(0, 0, 10, 10),
       runs: [run(title, link: uri), run(' ')],
+      pdfLinkRects: pdfLinkRects,
       fontFamily: textFontFamily,
       fontSize: textFontSize,
       color: textColor,

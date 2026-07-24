@@ -472,6 +472,19 @@ class CanvasPainter extends CustomPainter {
   }
 
   void _paintText(Canvas canvas, TextElement el) {
+    // Linked-PDF-text highlight: a distinct-colour box over the exact words this
+    // marker links (the words' absolute page-local rects, not the marker chip's
+    // rect). Recorded into the page picture, so it costs nothing per frame.
+    final linkRects = el.pdfLinkRects;
+    if (linkRects != null) {
+      final hl = Paint()..color = kLinkColor.withValues(alpha: 0.22);
+      for (final r in linkRects) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(r, const Radius.circular(2)),
+          hl,
+        );
+      }
+    }
     final painter = TextPainter(
       text: textSpanForElement(el),
       textDirection: TextDirection.ltr,

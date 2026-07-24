@@ -150,6 +150,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   int _pdfSelAnchor = 0; // word index where the long-press began
   int _pdfSelFocus = 0; // word index under the finger now
   String _pdfSelText = ''; // selected text (empty = no selection)
+  List<Rect> _pdfSelRects = const []; // selected words' page-local rects
 
   // In-canvas find (typed text + this canvas's PDF text).
   bool _findOpen = false;
@@ -2605,6 +2606,7 @@ class _CanvasScreenState extends State<CanvasScreen>
   void _onSelectStart(Offset screenPos) {
     final hit = _wordAt(screenPos);
     if (hit == null) return;
+    if (_findOpen) _closeFind(); // find + select are different intents
     _pdfSelPage = hit.pageId;
     _pdfSelAnchor = hit.index;
     _pdfSelFocus = hit.index;
@@ -2635,14 +2637,55 @@ class _CanvasScreenState extends State<CanvasScreen>
       buf.write(words[i].text.trim());
     }
     c.pdfSelectionNotifier.value = (pageId: page, rects: rects);
+    _pdfSelRects = rects;
     setState(() => _pdfSelText = buf.toString());
   }
 
   void _clearPdfSelection() {
     if (_pdfSelPage == null && _pdfSelText.isEmpty) return;
     _pdfSelPage = null;
+    _pdfSelRects = const [];
     _controller?.pdfSelectionNotifier.value = null;
     setState(() => _pdfSelText = '');
+  }
+
+  /// Links the selected PDF text: pick a target, drop a link marker at the
+  /// words (carrying the highlight rects), and register the connection — reusing
+  /// the same machinery lasso/text links use, so the marker is editable (✎) and
+  /// shows in both Connections lists.
+  Future<void> _linkPdfSelection() async {
+    final c = _controller;
+    final pageId = _pdfSelPage;
+    final rects = List<Rect>.from(_pdfSelRects);
+    if (c == null || pageId == null || rects.isEmpty) return;
+    _clearPdfSelection();
+    final pick = await showLinkTargetPicker(context);
+    if (pick == null || !mounted) return;
+    var union = rects.first;
+    for (final r in rects.skip(1)) {
+      union = union.expandToInclude(r);
+    }
+    final marker = c.insertLinkItem(
+      pageId,
+      pick.target.toUri(),
+      pick.title,
+      nearBounds: union,
+      pdfLinkRects: rects,
+    );
+    if (marker == null) return;
+    await LinkService().addLinkWithReciprocalMarker(
+      from: LinkEndpoint(
+        notebookId: widget.canvas.notebookId,
+        sectionId: widget.canvas.sectionId,
+        canvasId: widget.canvas.id,
+        pageId: pageId,
+        elementIds: [marker.id],
+      ),
+      to: pick.target,
+      fromName: 'PDF text link in ${widget.canvas.name}',
+      toName: pick.title,
+    );
+    if (mounted) _toast('Linked "${pick.title}"');
   }
 
   // ── In-canvas find (typed + PDF text) ──────────────────────────────────
@@ -4456,6 +4499,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                             );
                             _clearPdfSelection();
                           },
+                          onLink: _linkPdfSelection,
                           onClose: _clearPdfSelection,
                         ),
                       ),
@@ -6191,8 +6235,9 @@ class _FindBarState extends State<_FindBar> {
           children: [
             Icon(Icons.search, size: 18, color: palette.textDim),
             const SizedBox(width: 6),
-            SizedBox(
-              width: 180,
+            // Flexible (not a fixed width) so the whole bar fits its 380 cap /
+            // the screen without a pixel overflow.
+            Flexible(
               child: TextField(
                 controller: widget.controller,
                 focusNode: _focus,
@@ -6206,6 +6251,7 @@ class _FindBarState extends State<_FindBar> {
                 ),
               ),
             ),
+            const SizedBox(width: 4),
             Text(count,
                 style: TextStyle(fontSize: 12, color: palette.textDim)),
             IconButton(
@@ -6239,10 +6285,12 @@ class _FindBarState extends State<_FindBar> {
 class _PdfSelectionActionBar extends StatelessWidget {
   final VoidCallback onCopy;
   final VoidCallback onSearch;
+  final VoidCallback onLink;
   final VoidCallback onClose;
   const _PdfSelectionActionBar({
     required this.onCopy,
     required this.onSearch,
+    required this.onLink,
     required this.onClose,
   });
 
@@ -6273,6 +6321,11 @@ class _PdfSelectionActionBar extends StatelessWidget {
               onPressed: onSearch,
               icon: const Icon(Icons.search, size: 16),
               label: const Text('Search'),
+            ),
+            TextButton.icon(
+              onPressed: onLink,
+              icon: const Icon(Icons.link, size: 16),
+              label: const Text('Link'),
             ),
             IconButton(
               icon: const Icon(Icons.close, size: 18),

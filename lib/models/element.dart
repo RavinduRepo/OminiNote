@@ -352,6 +352,13 @@ class TextElement extends CanvasElement {
   /// follows the content. Resizing never changes the font size.
   double? manualWidth;
 
+  /// When this is a link marker anchored to imported-PDF text, the page-local
+  /// rects of the linked words (so the painter can highlight exactly which text
+  /// is linked, in a distinct colour). Absolute page coords — NOT tied to the
+  /// marker's own rect, so moving the marker chip doesn't move the highlight.
+  /// Null for ordinary text boxes.
+  List<Rect>? pdfLinkRects;
+
   // Default/baseline style — used for a new empty box, as the toolbar's
   // starting style, and as a fallback when [runs] is empty.
   String fontFamily;
@@ -372,6 +379,7 @@ class TextElement extends CanvasElement {
     String text = '',
     List<TextRun>? runs,
     this.linkId,
+    this.pdfLinkRects,
     this.fontFamily = 'sans',
     this.fontSize = 16,
     required this.color,
@@ -418,6 +426,7 @@ class TextElement extends CanvasElement {
     rotation: rotation,
     runs: [for (final r in runs) r.clone()],
     linkId: linkId,
+    pdfLinkRects: pdfLinkRects == null ? null : List<Rect>.from(pdfLinkRects!),
     fontFamily: fontFamily,
     fontSize: fontSize,
     color: color,
@@ -484,6 +493,10 @@ class TextElement extends CanvasElement {
     'rotation': rotation,
     'runs': [for (final r in runs) r.toJson()],
     if (linkId != null) 'gid': linkId,
+    if (pdfLinkRects != null)
+      'plr': [
+        for (final r in pdfLinkRects!) [r.left, r.top, r.right, r.bottom],
+      ],
     // Baseline style, kept for the toolbar/new text and as a fallback.
     'fontFamily': fontFamily,
     'fontSize': fontSize,
@@ -524,6 +537,17 @@ class TextElement extends CanvasElement {
           : null,
       text: runsJson == null ? (json['text'] ?? '') : '',
       linkId: json['gid'] as String?,
+      pdfLinkRects: (json['plr'] as List?)
+          ?.map((e) {
+            final l = e as List;
+            return Rect.fromLTRB(
+              (l[0] as num).toDouble(),
+              (l[1] as num).toDouble(),
+              (l[2] as num).toDouble(),
+              (l[3] as num).toDouble(),
+            );
+          })
+          .toList(),
       fontFamily: json['fontFamily'] ?? 'sans',
       fontSize: (json['fontSize'] as num?)?.toDouble() ?? 16,
       color: Color(json['color'] ?? 0xFF000000),
