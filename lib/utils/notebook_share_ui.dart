@@ -92,12 +92,12 @@ Future<void> shareNotebookLink(BuildContext context, Notebook notebook) async {
 
   _showProgress(context, 'Creating link…');
   try {
-    // Streamed to a temp file; read it back only for the upload, then clean up.
+    // Streamed to a temp file and streamed up from it, then cleaned up —
+    // never held whole in memory (a big notebook's ZIP can be huge).
     final zipPath = await _bundle.exportBundle(notebook.id);
     final zipFile = File(zipPath);
-    final bytes = await zipFile.readAsBytes();
     final fileId = await DriveManager.forAccount(accountId)
-        .uploadSharedBundle(_bundleFileName(notebook.name), bytes);
+        .uploadSharedBundle(_bundleFileName(notebook.name), zipFile);
     if (await zipFile.exists()) {
       try {
         await zipFile.delete();

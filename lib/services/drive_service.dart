@@ -204,12 +204,61 @@ class DriveService {
   Future<String?> uploadJsonBytes(String drivePath, List<int> bytes) =>
       _upload(drivePath, bytes, 'application/json');
 
-  /// Uploads a binary asset. Content-addressed: if a file already exists at the
-  /// path we treat it as identical (assets never change) and skip.
-  Future<String?> uploadBinary(String drivePath, List<int> bytes) async {
+  /// Uploads a binary asset by **streaming it from disk** (Drive's resumable
+  /// protocol, 1MB chunks) — never the multipart path, whose body is built
+  /// in memory **base64-encoded**, so a large PDF/video held file + ~1.33×
+  /// base64 + copies in the Dart heap at once: the "Sync push error: Out of
+  /// Memory" + main-isolate freezes on 100MB+ assets. Streaming keeps peak
+  /// memory at ~one chunk regardless of file size, and a retry re-opens the
+  /// file rather than re-reading it whole.
+  ///
+  /// Content-addressed: if a file already exists at the path we treat it as
+  /// identical (assets never change) and skip — checked BEFORE any bytes are
+  /// read, so an already-uploaded asset costs no I/O beyond the lookup.
+  Future<String?> uploadBinaryFile(String drivePath, File file) async {
     final existing = await _findFileId(drivePath);
     if (existing != null) return _index[drivePath]?.head;
-    return _upload(drivePath, bytes, 'application/octet-stream');
+    final fileName = drivePath.replaceAll('\\', '/').split('/').last;
+    final parentId = await _ensureParentFolder(drivePath);
+    final media = gd.Media(file.openRead(), await file.length(),
+        contentType: 'application/octet-stream');
+    final created = await _drive.files.create(
+      gd.File()
+        ..name = fileName
+        ..parents = [parentId],
+      uploadMedia: media,
+      uploadOptions: gd.ResumableUploadOptions(),
+      $fields: 'id,headRevisionId',
+    );
+    _record(drivePath, created.id!, created.headRevisionId);
+    return created.headRevisionId;
+  }
+
+  /// Downloads [fileId] straight into [dest] (streamed, tmp + rename like
+  /// `_writeAtomic`) — [downloadById] collects the whole body into one heap
+  /// buffer, fine for JSON but not for 100MB+ assets.
+  Future<void> downloadToFile(String fileId, File dest) async {
+    final media = await _drive.files.get(
+      fileId,
+      downloadOptions: gd.DownloadOptions.fullMedia,
+    ) as gd.Media;
+    await dest.parent.create(recursive: true);
+    final tmp = File('${dest.path}.tmp');
+    try {
+      final sink = tmp.openWrite();
+      try {
+        await sink.addStream(media.stream);
+      } finally {
+        await sink.close();
+      }
+      if (await dest.exists()) await dest.delete();
+      await tmp.rename(dest.path);
+    } catch (_) {
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   Future<String?> _upload(
@@ -260,16 +309,19 @@ class DriveService {
   /// isn't index-tracked), so the sync loop ignores it. The recipient downloads
   /// it over plain HTTPS: a `drive.file`-scoped app can't see another user's
   /// shared file through the API, but a public link needs no auth.
-  Future<String?> uploadSharedBundle(String name, List<int> bytes) async {
+  /// Streamed like [uploadBinaryFile] — a whole-notebook ZIP can be huge, and
+  /// the multipart path would buffer it base64-encoded in the Dart heap.
+  Future<String?> uploadSharedBundle(String name, File file) async {
     final root = await rootFolderId;
     final folder = await _findOrCreateFolder('shared', root);
-    final media = gd.Media(Stream.value(bytes), bytes.length,
+    final media = gd.Media(file.openRead(), await file.length(),
         contentType: 'application/octet-stream');
     final created = await _drive.files.create(
       gd.File()
         ..name = name
         ..parents = [folder],
       uploadMedia: media,
+      uploadOptions: gd.ResumableUploadOptions(),
       $fields: 'id',
     );
     final id = created.id;

@@ -201,11 +201,24 @@ class MergeEngine {
   /// The plain union merge would flag every foreign notebook as "local has
   /// something remote lacks" on every pull → a perpetual re-push loop; scoping
   /// the comparison to the account's own notebooks stops that.
+  ///
+  /// [stampSyncTarget] (the merging account's id): any reconciled entry whose
+  /// `syncTarget` is null gets it set to this account, WITHOUT a rev bump. A
+  /// null target means "whichever account is this device's default" — which
+  /// silently REBINDS the notebook when a reinstalled device adds accounts in
+  /// a different order (the misbound notebooks then vanish from their real
+  /// account's uploaded index — a real data-visibility incident). A notebook
+  /// id only ever lives on one account's Drive, so every device stamps the
+  /// same value → byte-identical output, converges without a rev bump (same
+  /// trick as the structural merge's derived row ids). Entries with an
+  /// explicit target are never restamped; foreign/excluded entries are never
+  /// touched.
   static MergeResult mergeNotebooksIndexScoped(
     String? local,
     String remote, {
     required Set<String> ownedIds,
     Set<String> excludeIds = const {},
+    String? stampSyncTarget,
   }) {
     final Map<String, dynamic> localMap = _decodeMap(local);
     final Map<String, dynamic> remoteMap = _decodeMap(remote);
@@ -214,6 +227,13 @@ class MergeEngine {
     var localContributed = false;
     var changedLocal = false;
 
+    // Stamps a null syncTarget (copy-on-write; flags the local file rewrite).
+    Map<String, dynamic> stamped(Map<String, dynamic> entry) {
+      if (stampSyncTarget == null || entry['syncTarget'] != null) return entry;
+      changedLocal = true;
+      return Map<String, dynamic>.from(entry)..['syncTarget'] = stampSyncTarget;
+    }
+
     final ids = <String>{...ownedIds, ...remoteMap.keys}
       ..removeAll(excludeIds);
     for (final id in ids) {
@@ -221,16 +241,16 @@ class MergeEngine {
       final r = remoteMap[id] as Map<String, dynamic>?;
       if (l == null && r == null) continue;
       if (l == null) {
-        merged[id] = r;
+        merged[id] = stamped(r!);
         changedLocal = true; // account's Drive has a notebook we lack
       } else if (r == null) {
-        merged[id] = l;
+        merged[id] = stamped(l);
         localContributed = true; // ours, the account's Drive lacks it → push
       } else {
         final localWins = _envelopeWins(l, r);
         final winner = localWins ? l : r;
         final purged = _withPurgeOverride(winner, l, r);
-        merged[id] = purged ?? winner;
+        merged[id] = stamped(purged ?? winner);
         if (purged != null) {
           localContributed = true;
           changedLocal = true;
