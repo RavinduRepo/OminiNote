@@ -297,6 +297,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         if (!mounted) return;
         if (focus != null) {
           _controller?.focusElements(focus.pageId, focus.elementIds);
+          _onArrivedAtElement(focus.pageId, focus.elementIds);
         } else if (target != null) {
           _controller?.jumpToPage(target);
         }
@@ -674,6 +675,20 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   Timer? _graphLocDebounce;
 
+  /// The element we just landed on via a link / Connections-list navigation
+  /// (focusElements only scrolls + glows — it sets NO selection), so the graph
+  /// panel can point at that ITEM instead of falling back to the canvas node.
+  /// Held until the user makes a real selection or opens a text box.
+  ({String pageId, List<String> ids})? _arrivedElementFocus;
+
+  /// Records a link arrival and points the floating graph panel at that item
+  /// (see [_arrivedElementFocus]). No-op when the panel is closed / no ids.
+  void _onArrivedAtElement(String pageId, List<String> ids) {
+    if (ids.isEmpty) return;
+    _arrivedElementFocus = (pageId: pageId, ids: ids);
+    _publishGraphLocation();
+  }
+
   /// Publishes the current selection (element) — or this canvas when nothing is
   /// selected — as the floating graph panel's current location, so recenter and
   /// live-follow track exactly where you are. No-op while the panel is closed
@@ -690,9 +705,32 @@ class _CanvasScreenState extends State<CanvasScreen>
       // edited, else the canvas itself.
       var pageId = c.selectionPageId;
       var ids = [for (final e in c.selection) e.id];
+      // A real selection / open text box of a DIFFERENT element supersedes a
+      // link (or menu) arrival. It must NOT clear on the SAME element: opening
+      // the Connections menu for a text box can leave that box transiently
+      // selected/edited, and clearing here would let a later idle publish fall
+      // through to the canvas node (the "waited a second and it jumped to the
+      // canvas" bug). An overlapping active element keeps the arrival alive.
+      final arrived = _arrivedElementFocus;
+      if (arrived != null) {
+        final af = arrived.ids.toSet();
+        final activeIds = <String>{
+          ...ids,
+          if (_textEdit != null) _textEdit!.element.id,
+        };
+        if (activeIds.isNotEmpty && !activeIds.any(af.contains)) {
+          _arrivedElementFocus = null;
+        }
+      }
       if (ids.isEmpty && _textEdit != null) {
         pageId = _textEdit!.pageId;
         ids = [_textEdit!.element.id];
+      }
+      // Else fall back to the item we just navigated to via a link, so the
+      // graph highlights that item's node rather than the whole canvas.
+      if (ids.isEmpty && _arrivedElementFocus != null) {
+        pageId = _arrivedElementFocus!.pageId;
+        ids = _arrivedElementFocus!.ids;
       }
       if (ids.isNotEmpty && pageId != null) {
         // If these elements are already part of a link, publish THAT endpoint so
@@ -913,6 +951,13 @@ class _CanvasScreenState extends State<CanvasScreen>
           _editLinkAt(pencil);
           return;
         }
+        // A tap on a highlighted PDF-text link navigates it (the words are the
+        // link) — checked before the generic run-based _urlAt.
+        final pdfLink = _pdfLinkAt(e.localPosition);
+        if (pdfLink != null) {
+          _openUrl(pdfLink);
+          return;
+        }
         final url = _urlAt(e.localPosition);
         if (url != null) {
           _openUrl(url);
@@ -944,6 +989,14 @@ class _CanvasScreenState extends State<CanvasScreen>
       if (pencil != null) {
         if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
         _editLinkAt(pencil);
+        return;
+      }
+      // A tap on a highlighted PDF-text link navigates it (the words are the
+      // link), regardless of tool — before the generic run-based _urlAt.
+      final pdfLink = _pdfLinkAt(e.localPosition);
+      if (pdfLink != null) {
+        if (c.tool == CanvasTool.text && _textEdit != null) _commitTextEdit();
+        _openUrl(pdfLink);
         return;
       }
       // A tap directly on a link opens it, regardless of tool (the blue
@@ -1083,27 +1136,80 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
-  /// The text toolbar's "add link" button. Opens the same picker as the `[[`
-  /// trigger, keyed off the current selection: a collapsed caret inserts the
-  /// target's name as a link (like `[[`); a range hyperlinks the SELECTED text
-  /// (it stays as the clickable display). Works while editing on both layouts.
+  /// The text toolbar's "add link" button. Opens the standard **Connections**
+  /// menu for the selected text — so you can Copy link (to this text box),
+  /// Paste a copied link, or Choose a target by search — instead of the
+  /// search-only picker. Whichever way a target is added, the SELECTED text
+  /// becomes the live clickable hyperlink (a collapsed caret inserts the
+  /// target's name as a link, like `[[`), exactly as the old flow did.
+  ///
+  /// The selection range is snapshotted BEFORE opening (the sheet commits the
+  /// edit session), and the link is applied to the committed element by id.
+  /// Note: the endpoint is the whole text element, so Copy link references the
+  /// box (not the sub-range) — the sub-range is only the visual link run.
   void _startTextLink() {
     final session = _textEdit;
     if (session == null) return;
     final sel = session.controller.selection;
     if (!sel.isValid) return;
-    if (sel.isCollapsed) {
-      _openLinkPicker(
-          pageId: session.pageId,
-          elementId: session.element.id,
-          caret: sel.baseOffset);
-    } else {
-      _openLinkPicker(
-          pageId: session.pageId,
-          elementId: session.element.id,
-          selStart: sel.start,
-          selEnd: sel.end);
-    }
+    final pageId = session.pageId;
+    final elementId = session.element.id;
+    final int? selStart = sel.isCollapsed ? null : sel.start;
+    final int? selEnd = sel.isCollapsed ? null : sel.end;
+    final int? caret = sel.isCollapsed ? sel.baseOffset : null;
+    if (_linkPickerBusy) return;
+    _linkPickerBusy = true;
+    // Post-frame commit for the same re-entrancy reason as _openLinkPicker
+    // (tearing the session down inside a change notification is unsafe).
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      _linkPickerBusy = false;
+      if (!mounted) return;
+      if (_textEdit?.element.id == elementId) _commitTextEdit();
+      final c = _controller;
+      if (c == null) return;
+      // Pin an already-open (live) graph panel to THIS text box: committing the
+      // edit publishes no selection, which would otherwise slide the panel onto
+      // the canvas — flipping it off the opened item and dropping the
+      // onAddTarget wiring (so + · Paste/Choose stopped linking; it only worked
+      // when the panel was closed). Held until a real selection/edit occurs.
+      _onArrivedAtElement(pageId, [elementId]);
+      // Open on the element's canonical endpoint when it's already linked, so
+      // the opened endpoint matches what the panel publishes (stays "at opened",
+      // keeping onAddTarget live).
+      final canon = await LinkService().canonicalElementEndpoint([elementId]);
+      if (!mounted) return;
+      final ep = canon ??
+          LinkEndpoint(
+            notebookId: widget.canvas.notebookId,
+            sectionId: widget.canvas.sectionId,
+            canvasId: widget.canvas.id,
+            pageId: pageId,
+            elementIds: [elementId],
+          );
+      showConnectionsSheet(
+        context,
+        title: 'Text selection',
+        endpoint: ep,
+        endpointName: 'Text in ${widget.canvas.name}',
+        insideCanvasId: widget.canvas.id,
+        onJumpInSameCanvas: _jumpInThisCanvas,
+        onAddTarget: (target, resolved) async {
+          final uri = target.toUri();
+          // Make the selected text (or caret insertion) the live hyperlink.
+          if (selStart != null && selEnd != null) {
+            c.applyLinkToRange(pageId, elementId, selStart, selEnd, uri);
+          } else if (caret != null) {
+            c.insertLinkAtCaret(pageId, elementId, caret, resolved.title, uri);
+          }
+          await LinkService().addLinkWithReciprocalMarker(
+            from: ep,
+            to: target,
+            fromName: 'Text in ${widget.canvas.name}',
+            toName: resolved.title,
+          );
+        },
+      );
+    });
   }
 
   /// Shared link-insert flow for the `[[` trigger and the toolbar button. The
@@ -1175,6 +1281,9 @@ class _CanvasScreenState extends State<CanvasScreen>
     final local = canvasPos - pageLayout.rect.topLeft;
     for (final el in page.objects.reversed) {
       if (el is! TextElement) continue;
+      // PDF-text anchors have no visible ✎ (they render as a highlight only);
+      // editing them goes through the Connections sheet, not a canvas pencil.
+      if (el.pdfLinkRects != null) continue;
       if (!el.rect.inflate(24).contains(local)) continue;
       if (el.runs.every((r) => r.link == null)) continue;
       for (final spot in linkPencilSpots(el)) {
@@ -1249,11 +1358,26 @@ class _CanvasScreenState extends State<CanvasScreen>
     final page = c.pages[pageLayout.pageId]!;
     final local = canvasPos - pageLayout.rect.topLeft;
     for (final el in [...page.strokes, ...page.objects].reversed) {
-      if (el is TextElement && el.rect.inflate(4).contains(local)) {
+      // PDF-text anchors are navigated via _pdfLinkAt (precise highlight rects),
+      // not their element rect — skip them here.
+      if (el is TextElement &&
+          el.pdfLinkRects == null &&
+          el.rect.inflate(4).contains(local)) {
         return urlAtOffset(el, local - el.rect.topLeft);
       }
     }
     return null;
+  }
+
+  /// The link URI of a PDF-text anchor whose highlighted words are under a
+  /// screen position (the words themselves are the link), else null.
+  String? _pdfLinkAt(Offset screenPos) {
+    final c = _controller!;
+    final canvasPos = c.screenToCanvas(screenPos);
+    final pageLayout = c.layout.pageAt(canvasPos);
+    if (pageLayout == null) return null;
+    final local = canvasPos - pageLayout.rect.topLeft;
+    return c.pdfAnchorLinkAt(pageLayout.pageId, local);
   }
 
   /// Opens [url]: internal `omninote://link/` URIs navigate in-app, anything
@@ -1280,6 +1404,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (e.canvasId == widget.canvas.id) {
       if (e.elementIds.isNotEmpty && e.pageId != null) {
         c?.focusElements(e.pageId!, e.elementIds);
+        _onArrivedAtElement(e.pageId!, e.elementIds);
       } else if (e.bookmarkId != null) {
         for (final b in widget.canvas.bookmarks) {
           if (b.id == e.bookmarkId) {
@@ -2649,43 +2774,53 @@ class _CanvasScreenState extends State<CanvasScreen>
     setState(() => _pdfSelText = '');
   }
 
-  /// Links the selected PDF text: pick a target, drop a link marker at the
-  /// words (carrying the highlight rects), and register the connection — reusing
-  /// the same machinery lasso/text links use, so the marker is editable (✎) and
-  /// shows in both Connections lists.
+  /// Opens the standard **Connections** menu for the selected PDF text so it can
+  /// be linked to anything (Copy link · Paste · Choose target · local graph),
+  /// not just a searched section/canvas.
+  ///
+  /// The selected words become their own linkable item: a **highlight-only
+  /// anchor** is materialized over them now (per the chosen design — opening the
+  /// menu drops the highlight), and its endpoint drives the menu. Adding a
+  /// target makes the highlighted words the tappable link (no chip box beneath);
+  /// removing the connection deletes the anchor (it's a standalone marker once
+  /// linked). If you open the menu but link nothing, the highlight stays until
+  /// you undo (one op) or delete it.
   Future<void> _linkPdfSelection() async {
     final c = _controller;
     final pageId = _pdfSelPage;
     final rects = List<Rect>.from(_pdfSelRects);
     if (c == null || pageId == null || rects.isEmpty) return;
     _clearPdfSelection();
-    final pick = await showLinkTargetPicker(context);
-    if (pick == null || !mounted) return;
-    var union = rects.first;
-    for (final r in rects.skip(1)) {
-      union = union.expandToInclude(r);
-    }
-    final marker = c.insertLinkItem(
-      pageId,
-      pick.target.toUri(),
-      pick.title,
-      nearBounds: union,
-      pdfLinkRects: rects,
+    final anchor = c.insertPdfLinkAnchor(pageId, rects);
+    if (anchor == null || !mounted) return;
+    final ep = LinkEndpoint(
+      notebookId: widget.canvas.notebookId,
+      sectionId: widget.canvas.sectionId,
+      canvasId: widget.canvas.id,
+      pageId: pageId,
+      elementIds: [anchor.id],
     );
-    if (marker == null) return;
-    await LinkService().addLinkWithReciprocalMarker(
-      from: LinkEndpoint(
-        notebookId: widget.canvas.notebookId,
-        sectionId: widget.canvas.sectionId,
-        canvasId: widget.canvas.id,
-        pageId: pageId,
-        elementIds: [marker.id],
-      ),
-      to: pick.target,
-      fromName: 'PDF text link in ${widget.canvas.name}',
-      toName: pick.title,
+    // Point an already-open live graph panel at this PDF-text item (issue 3),
+    // and keep it there while the menu is up.
+    _onArrivedAtElement(pageId, [anchor.id]);
+    showConnectionsSheet(
+      context,
+      title: 'PDF text',
+      endpoint: ep,
+      endpointName: 'PDF text in ${widget.canvas.name}',
+      insideCanvasId: widget.canvas.id,
+      onJumpInSameCanvas: _jumpInThisCanvas,
+      onAddTarget: (target, resolved) async {
+        // The highlighted words themselves become the tappable link.
+        c.setPdfAnchorLink(pageId, anchor.id, target.toUri(), resolved.title);
+        await LinkService().addLinkWithReciprocalMarker(
+          from: ep,
+          to: target,
+          fromName: 'PDF text in ${widget.canvas.name}',
+          toName: resolved.title,
+        );
+      },
     );
-    if (mounted) _toast('Linked "${pick.title}"');
   }
 
   // ── In-canvas find (typed + PDF text) ──────────────────────────────────
@@ -3155,6 +3290,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     final focus = LinkNavigator().takeFocusFor(widget.canvas.id);
     if (focus != null) {
       _controller?.focusElements(focus.pageId, focus.elementIds);
+      _onArrivedAtElement(focus.pageId, focus.elementIds);
     } else if (pageId != null) {
       _controller?.jumpToPage(pageId);
     }

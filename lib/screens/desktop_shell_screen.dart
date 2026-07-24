@@ -134,7 +134,14 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
     if (!mounted) return;
     setState(() {
       _mainMode = _MainMode.canvas;
-      if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
+      // Only expand a deliberately-collapsed sidebar for a CONTAINER target
+      // (notebook / section / folder — no canvas): those are visible only in
+      // the side lists. A canvas / in-canvas item opens in the main pane and is
+      // visible without the lists, so tapping its graph node must not force the
+      // lists back open (it still glows in whatever lists are already shown).
+      if (r.canvas == null && SettingsService().autoExpandOnReveal) {
+        _sidebarCollapsed = false;
+      }
     });
     await _revealSearchResult(r);
   }
@@ -154,7 +161,11 @@ class _DesktopShellScreenState extends State<DesktopShellScreen> {
   void _revealFromLink(SearchResult r) {
     setState(() {
       _mainMode = _MainMode.canvas;
-      if (SettingsService().autoExpandOnReveal) _sidebarCollapsed = false;
+      // Same rule as _openCanvasFromResult: only a container target (no canvas)
+      // reopens a collapsed sidebar; a canvas/item is seen in the main pane.
+      if (r.canvas == null && SettingsService().autoExpandOnReveal) {
+        _sidebarCollapsed = false;
+      }
     });
     _revealSearchResult(r);
   }

@@ -1879,9 +1879,13 @@ class _GraphPainter extends CustomPainter {
 class _GraphFilterPanel extends StatefulWidget {
   final GraphController controller;
 
-  /// Rebuilds the graph after a link is created here (LinkService persists but
-  /// doesn't bump dataVersion).
-  final VoidCallback? onReload;
+  /// Refreshes graph data after a mutation here (links/projects persist but
+  /// don't bump dataVersion). Awaited before the panel closes its editor, so
+  /// the just-created project is in `controller.projects` when the list rebuilds
+  /// — the global graph re-queries via `_load`, the local panel via
+  /// `_loadFilters` (previously it only rebuilt nodes, so new projects never
+  /// appeared in its settings — the bug this fixes).
+  final Future<void> Function()? onReload;
   const _GraphFilterPanel({required this.controller, this.onReload});
 
   @override
@@ -2268,7 +2272,8 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     if (ok != true) return;
     if (c.activeProjectId == p.id) c.setActiveProject(null, {}, {});
     await ProjectService().deleteProject(p.id);
-    widget.onReload?.call();
+    await widget.onReload?.call();
+    if (mounted) setState(() {});
   }
 
   Future<void> _saveProject() async {
@@ -2293,8 +2298,10 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
     await ProjectService()
         .setMembers(pid, includes: includes, excludes: excludes);
     if (!mounted) return;
-    setState(() => _editingProject = false);
-    widget.onReload?.call();
+    // Refresh the project list (await) BEFORE closing the editor, so the new
+    // project is present when the list rebuilds — on both graphs.
+    await widget.onReload?.call();
+    if (mounted) setState(() => _editingProject = false);
   }
 
   Widget _buildProjectEditor(AppPalette palette) {
@@ -2593,9 +2600,10 @@ class _GraphFilterPanelState extends State<_GraphFilterPanel> {
         fromName: from.name,
         toName: g.name);
     if (!mounted) return;
+    await widget.onReload?.call();
+    if (!mounted) return;
     setState(() => _linkFrom = null);
     showAppToast(context, 'Linked “${from.name}” ↔ “${g.name}”');
-    widget.onReload?.call();
   }
 
   /// Whether [g] (or any descendant) is a member of the active project — used
@@ -3203,16 +3211,12 @@ class LocalGraphController extends ChangeNotifier {
       _followDebounce = Timer(const Duration(milliseconds: 350), () {
         final l = currentLocation;
         if (l == null || !open || _suppressEcho) return;
-        // Don't auto-follow to pure CONTAINER levels (notebook / section /
-        // folder) — you pass through them on the way to a canvas/item, and
-        // stopping the graph on an empty section is the "stuck on the section"
-        // bug. Recenter (manual) still honors them.
-        final k = l.ep.kind;
-        if (k == LinkTargetKind.notebook ||
-            k == LinkTargetKind.section ||
-            k == LinkTargetKind.folder) {
-          return;
-        }
+        // Follow whatever the user has RESTED on — container levels included.
+        // The 350ms debounce already coalesces a drill-through
+        // (notebook→section→canvas), so we only land on the final resting
+        // location; skipping containers outright meant selecting a notebook /
+        // section never moved the graph off the previous node until you toggled
+        // live off/on (canvases were never skipped, so they always followed).
         _push(l.ep, l.name);
       });
     }
@@ -3572,8 +3576,25 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
         : null;
     final cur = _lgc.currentLocation;
     final openedEp = _lgc.connEndpoint ?? _lgc.connSelfEndpoint;
-    final atOpened =
-        cur == null || (openedEp != null && cur.ep.sameAs(openedEp));
+    bool isBareCanvas(LinkEndpoint ep) =>
+        ep.externalUrl == null &&
+        ep.canvasId != null &&
+        ep.pageId == null &&
+        ep.elementIds.isEmpty &&
+        ep.bookmarkId == null &&
+        ep.folderId == null;
+    // When the panel was opened for a concrete ELEMENT menu (a lasso / text /
+    // PDF selection, which carries an onAddTarget), a drift to the bare canvas
+    // (you deselected, or the canvas screen re-published itself a beat later)
+    // must NOT abandon that menu — otherwise + · Paste/Choose would fall through
+    // to the default link-item box instead of the selection's own onAddTarget
+    // (the "only works if the graph wasn't already open" bug). Only a different
+    // CONCRETE item (element/page/…) flips the panel into follow mode.
+    final openedIsElement =
+        openedEp != null && openedEp.elementIds.isNotEmpty;
+    final atOpened = cur == null ||
+        (openedEp != null && cur.ep.sameAs(openedEp)) ||
+        (openedIsElement && isBareCanvas(cur.ep));
     if (atOpened) {
       return ConnectionsListView(
         key: ValueKey('opened:${_lgc.connEndpoint?.toUri() ?? _lgc.connAggregateCanvasId ?? _lgc.connTitle}'),
@@ -3597,12 +3618,7 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
     // the element, not the canvas — so this is what makes B's list show A after
     // you linked A to an item inside B). An element/page shows its own links.
     final ep = cur.ep;
-    final canvasOnly = ep.externalUrl == null &&
-        ep.canvasId != null &&
-        ep.pageId == null &&
-        ep.elementIds.isEmpty &&
-        ep.bookmarkId == null &&
-        ep.folderId == null;
+    final canvasOnly = isBareCanvas(ep);
     return ConnectionsListView(
       key: ValueKey('cur:${ep.toUri()}'),
       embedded: true,
@@ -3807,7 +3823,14 @@ class _LocalGraphPanelState extends State<LocalGraphPanel>
           // created here re-fetches the local graph via onReload.
           child: _GraphFilterPanel(
             controller: _g,
-            onReload: () {
+            onReload: () async {
+              // A project/link created here persists but doesn't bump
+              // dataVersion, and the local panel only re-queried on such a bump
+              // — so re-run _loadFilters to refresh the project list (+ tags /
+              // structure) into `_g`, mirroring the global graph's _load. Then
+              // rebuild the graph nodes.
+              await _loadFilters();
+              if (!mounted) return;
               _builtRev = -1;
               _maybeRebuild();
             },

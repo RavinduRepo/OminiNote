@@ -72,6 +72,12 @@ class ProjectService {
         id: NotebookService().newId(), deviceId: _dev, name: name.trim());
     _defs[def.id] = def;
     await _persist();
+    // A project write doesn't come through the sync-pull path, so bump the
+    // shared data signal here — both graph views (global + the local panel)
+    // listen to it and re-query their project list, so a project created in
+    // either place shows up in the other. (See also each panel's immediate
+    // onReload for in-view instant feedback.)
+    SyncService().notifyDataChanged();
     return def;
   }
 
@@ -82,6 +88,7 @@ class ProjectService {
     d.name = name.trim();
     d.bumpRev(_dev);
     await _persist();
+    SyncService().notifyDataChanged();
   }
 
   /// Feature F: saves [projectId]'s arranged node [layout] (canonical node key →
@@ -130,6 +137,7 @@ class ProjectService {
       }
     }
     await _persist();
+    SyncService().notifyDataChanged();
   }
 
   /// Replaces [projectId]'s membership with the given [includes] + [excludes]
@@ -181,5 +189,6 @@ class ProjectService {
       _items[item.id] = item;
     }
     await _persist();
+    SyncService().notifyDataChanged();
   }
 }

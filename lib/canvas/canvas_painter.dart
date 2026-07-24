@@ -472,9 +472,11 @@ class CanvasPainter extends CustomPainter {
   }
 
   void _paintText(Canvas canvas, TextElement el) {
-    // Linked-PDF-text highlight: a distinct-colour box over the exact words this
-    // marker links (the words' absolute page-local rects, not the marker chip's
-    // rect). Recorded into the page picture, so it costs nothing per frame.
+    // A PDF-text link ANCHOR: the selected PDF words themselves ARE the link,
+    // so draw only their highlight (the tappable hit region) — no chip text, no
+    // ✎ glyph. The rects are the words' absolute page-local rects (not the
+    // element's own rect), so they stay put regardless of the element's rect.
+    // Recorded into the page picture, so it costs nothing per frame.
     final linkRects = el.pdfLinkRects;
     if (linkRects != null) {
       final hl = Paint()..color = kLinkColor.withValues(alpha: 0.22);
@@ -484,6 +486,7 @@ class CanvasPainter extends CustomPainter {
           hl,
         );
       }
+      return; // highlight only — the words are the link; no box beneath
     }
     final painter = TextPainter(
       text: textSpanForElement(el),

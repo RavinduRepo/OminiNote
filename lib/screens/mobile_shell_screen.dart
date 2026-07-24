@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import '../services/link_navigator.dart';
 import '../services/search_service.dart';
@@ -38,12 +36,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   // A PageView so tabs slide horizontally — tapping a tab animates in that
   // tab's direction, and (at a tab root) a horizontal swipe moves between tabs.
   final PageController _pageController = PageController();
-
-  // A reveal pins the PageView to the Notebooks tab for a short window so a
-  // stray settle (the off-stage-jump / post-pop layout churn) can't land on an
-  // adjacent tab. See _jumpToNotebooksTab + onPageChanged.
-  bool _revealing = false;
-  Timer? _revealTimer;
 
   // Bumped when the Search tab is opened, so its field focuses ONLY then — the
   // field never autofocuses on build, which used to pop the keyboard when you
@@ -85,27 +77,23 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
     });
   }
 
-  /// Switches the PageView to the Notebooks tab safely.
+  /// Switches the PageView to the Notebooks tab.
   ///
   /// A reveal is often triggered from *inside* a full-bleed canvas that covers
-  /// this shell on the root navigator. On the frame the canvas is popped, the
-  /// shell's `PageView` is off-stage with no viewport metrics, and the pushes
-  /// that follow (for a section/canvas target) churn its layout — so the
-  /// controller can spuriously settle onto the adjacent page (Bin): the "reveal
-  /// also swipes me into the Bin" bug. Jump-timing tricks weren't reliable, so
-  /// we *pin* the tab for a short window instead: while `_revealing`, any
-  /// `onPageChanged` that reports a non-Notebooks page is snapped straight back.
+  /// this shell on the root navigator, so on the frame the canvas is popped the
+  /// PageView can be off-stage with no viewport metrics. Retry the jump
+  /// post-frame until the controller has clients + content dimensions, so we
+  /// reliably land on Notebooks.
+  ///
+  /// No physics pin / snap-back is needed here: the old "reveal also swipes me
+  /// onto the adjacent tab" drift came from `ScrollIntoViewOnce` scrolling *this*
+  /// horizontal PageView while bringing the glowing row into view — that is now
+  /// scoped to vertical scrollables only (see `scroll_into_view.dart`), so
+  /// nothing commands this PageView to move except the deliberate jump below.
   void _jumpToNotebooksTab() {
-    _revealing = true;
-    _revealTimer?.cancel();
-    _revealTimer = Timer(const Duration(milliseconds: 550), () {
-      if (!mounted) return;
-      _revealing = false;
-      _scheduleSwipeRecheck();
-    });
     setState(() => _index = _kNotebooks);
     void tryJump() {
-      if (!mounted || !_revealing) return;
+      if (!mounted) return;
       if (_pageController.hasClients &&
           _pageController.position.hasContentDimensions) {
         _pageController.jumpToPage(_kNotebooks);
@@ -179,7 +167,6 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
   void dispose() {
     LinkNavigator().unregister(_revealFromLink);
     LinkNavigator().unregisterOpenCanvas(_revealSearchResult);
-    _revealTimer?.cancel();
     _pageController.dispose();
     _searchFocus.dispose();
     super.dispose();
@@ -292,24 +279,10 @@ class _MobileShellScreenState extends State<MobileShellScreen> {
           itemCount: 4,
           // Swipe between tabs only at a tab's root; once drilled in, lock it
           // so horizontal drags belong to the content, not tab-switching.
-          // Also lock it *hard* during a reveal: revealing a link/search target
-          // pops the full-bleed canvas and pushes into the Notebooks tab, which
-          // churns the PageView layout — without this the controller could
-          // spuriously settle onto the adjacent (Graph) tab, and the Graph tab's
-          // heavy first build would outrun the snap-back window. NeverScrollable
-          // prevents any drift while jumpToPage still positions us correctly.
-          physics: (_swipeEnabled && !_revealing)
+          physics: _swipeEnabled
               ? const ClampingScrollPhysics()
               : const NeverScrollableScrollPhysics(),
           onPageChanged: (i) {
-            // While revealing, the PageView may spuriously settle onto an
-            // adjacent tab — snap it back to Notebooks and ignore the report.
-            if (_revealing && i != _kNotebooks) {
-              if (_pageController.hasClients) {
-                _pageController.jumpToPage(_kNotebooks);
-              }
-              return;
-            }
             setState(() => _index = i);
             _scheduleSwipeRecheck(); // the new tab may be drilled in
             _onEnterTab(i); // reload bin / focus search on entry
