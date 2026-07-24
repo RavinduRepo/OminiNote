@@ -143,6 +143,10 @@ class _CanvasScreenState extends State<CanvasScreen>
   String? _videoAssetId;
   String? _videoName;
 
+  // PDF text-selection mode: a gated overlay captures drags to select text on
+  // PDF-backed pages (Copy / Search online). Off = the canvas is unchanged.
+  bool _pdfSelectMode = false;
+
   // Tap tracking for the text tool (placement happens on tap-up).
   Offset? _downPosition;
   bool _toolGestureActive = false;
@@ -1962,6 +1966,12 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Contents (PDF)',
                 onTap: _showPdfOutline,
               ),
+            if (shown('pdf_select'))
+              ActionSheetItem(
+                icon: Icons.text_fields,
+                label: 'Select PDF text',
+                onTap: _togglePdfSelect,
+              ),
             if (shown('attachments'))
               ActionSheetItem(
                 icon: Icons.attach_file,
@@ -2040,6 +2050,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showBookmarks();
           case 'contents':
             _showPdfOutline();
+          case 'pdf_select':
+            _togglePdfSelect();
           case 'attachments':
             _showAttachments();
           case 'page_settings':
@@ -2084,6 +2096,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
         if (shown('contents'))
           iconMenuItem('contents', Icons.toc, 'Contents (PDF)'),
+        if (shown('pdf_select'))
+          iconMenuItem('pdf_select', Icons.text_fields, 'Select PDF text'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         if (shown('page_settings'))
@@ -2520,6 +2534,22 @@ class _CanvasScreenState extends State<CanvasScreen>
         _videoName = null;
       });
     }
+  }
+
+  /// Toggles PDF text-selection mode. Refuses (with a hint) when the canvas has
+  /// no PDF-backed pages, since there'd be nothing to select.
+  void _togglePdfSelect() {
+    final c = _controller;
+    if (c == null) return;
+    if (!_pdfSelectMode) {
+      final hasPdf =
+          c.layout.pages.any((pl) => c.pages[pl.pageId]?.source != null);
+      if (!hasPdf) {
+        _toast('No PDF pages on this canvas');
+        return;
+      }
+    }
+    setState(() => _pdfSelectMode = !_pdfSelectMode);
   }
 
   /// Captures a photo with the device camera and drops it on the page.
@@ -3668,6 +3698,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         return tbBtn(Icons.bookmark_border, 'Bookmarks', _showBookmarks);
       case 'contents':
         return tbBtn(Icons.toc, 'Contents (PDF)', _showPdfOutline);
+      case 'pdf_select':
+        return tbBtn(Icons.text_fields, 'Select PDF text', _togglePdfSelect);
       case 'attachments':
         return tbBtn(Icons.attach_file, 'Attachments', _showAttachments);
       case 'page_settings':
@@ -4209,6 +4241,23 @@ class _CanvasScreenState extends State<CanvasScreen>
                         )
                       : const SizedBox.shrink(),
                 ),
+                // PDF text-selection overlay (gated; captures drags to select
+                // text on PDF pages). Above the canvas input layer, so drawing
+                // is unaffected when the mode is off.
+                if (_pdfSelectMode)
+                  Positioned.fill(
+                    child: _PdfTextSelectionOverlay(
+                      controller: c,
+                      onCopy: (text) {
+                        Clipboard.setData(ClipboardData(text: text));
+                        _toast('Copied');
+                      },
+                      onSearch: (text) => _openUrl(
+                        'https://www.google.com/search?q=${Uri.encodeComponent(text)}',
+                      ),
+                      onDone: () => setState(() => _pdfSelectMode = false),
+                    ),
+                  ),
               ],
             ),
           );
@@ -5851,6 +5900,228 @@ class _AudioPlayerBar extends StatelessWidget {
     final str = s.toStringAsFixed(2);
     return str.replaceAll(RegExp(r'\.?0+$'), '');
   }
+}
+
+/// Gated overlay for selecting text on PDF-backed pages. It sits above the
+/// canvas input layer (opaque, so drawing is untouched when the mode is off),
+/// captures a drag, selects the PDF lines the drag spans on one page, and
+/// offers Copy / Search online. Whole-line selection, one page at a time — a v1
+/// built on the same per-line PDF geometry read-aloud uses ([pdfLinesFor]).
+class _PdfTextSelectionOverlay extends StatefulWidget {
+  final CanvasController controller;
+  final void Function(String text) onCopy;
+  final void Function(String text) onSearch;
+  final VoidCallback onDone;
+  const _PdfTextSelectionOverlay({
+    required this.controller,
+    required this.onCopy,
+    required this.onSearch,
+    required this.onDone,
+  });
+
+  @override
+  State<_PdfTextSelectionOverlay> createState() =>
+      _PdfTextSelectionOverlayState();
+}
+
+class _PdfTextSelectionOverlayState extends State<_PdfTextSelectionOverlay> {
+  final Map<String, List<({String text, Rect rect})>> _lines = {};
+  bool _loading = true;
+  String? _selPageId;
+  Offset _selPageTopLeft = Offset.zero; // canvas-space
+  Offset? _startLocal; // page-local drag start
+  List<Rect> _selRects = const []; // page-local
+  String _selText = '';
+
+  CanvasController get c => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    for (final pl in c.layout.pages) {
+      if (c.pages[pl.pageId]?.source == null) continue;
+      _lines[pl.pageId] = await c.pdfLinesFor(pl.pageId);
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Offset _toCanvas(Offset s) => (s - c.pan) / c.zoom;
+
+  void _onDown(PointerDownEvent e) {
+    final pt = _toCanvas(e.localPosition);
+    for (final pl in c.layout.pages) {
+      if (_lines.containsKey(pl.pageId) && pl.rect.contains(pt)) {
+        _selPageId = pl.pageId;
+        _selPageTopLeft = pl.rect.topLeft;
+        _startLocal = pt - pl.rect.topLeft;
+        setState(() {
+          _selRects = const [];
+          _selText = '';
+        });
+        return;
+      }
+    }
+    _selPageId = null;
+    _startLocal = null;
+    setState(() {
+      _selRects = const [];
+      _selText = '';
+    });
+  }
+
+  void _onMove(PointerMoveEvent e) {
+    final start = _startLocal;
+    final pageId = _selPageId;
+    if (start == null || pageId == null) return;
+    final endLocal = _toCanvas(e.localPosition) - _selPageTopLeft;
+    final y0 = math.min(start.dy, endLocal.dy);
+    final y1 = math.max(start.dy, endLocal.dy);
+    final rects = <Rect>[];
+    final buf = StringBuffer();
+    for (final l in _lines[pageId] ?? const []) {
+      if (l.rect.bottom >= y0 && l.rect.top <= y1) {
+        rects.add(l.rect);
+        if (buf.isNotEmpty) buf.write('\n');
+        buf.write(l.text.trim());
+      }
+    }
+    setState(() {
+      _selRects = rects;
+      _selText = buf.toString();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final hasSel = _selText.isNotEmpty;
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: _onDown,
+            onPointerMove: _onMove,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.text,
+              child: CustomPaint(
+                painter: _PdfSelectionPainter(
+                  zoom: c.zoom,
+                  pan: c.pan,
+                  pageTopLeft: _selPageTopLeft,
+                  rects: _selRects,
+                  color: palette.accent,
+                ),
+                child: const SizedBox.expand(),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          top: 8,
+          left: 0,
+          right: 0,
+          child: Align(
+            alignment: Alignment.topCenter,
+            // Absorb taps on the bar so they don't reach the selection layer.
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: palette.surface2,
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: palette.border),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Text(
+                          _loading
+                              ? 'Loading text…'
+                              : (hasSel ? 'Selected' : 'Drag over PDF text'),
+                          style:
+                              TextStyle(fontSize: 12, color: palette.textDim),
+                        ),
+                      ),
+                      if (hasSel) ...[
+                        TextButton.icon(
+                          onPressed: () => widget.onCopy(_selText),
+                          icon: const Icon(Icons.copy, size: 16),
+                          label: const Text('Copy'),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => widget.onSearch(_selText),
+                          icon: const Icon(Icons.search, size: 16),
+                          label: const Text('Search'),
+                        ),
+                      ],
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        tooltip: 'Exit selection',
+                        visualDensity: VisualDensity.compact,
+                        onPressed: widget.onDone,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PdfSelectionPainter extends CustomPainter {
+  final double zoom;
+  final Offset pan;
+  final Offset pageTopLeft;
+  final List<Rect> rects;
+  final Color color;
+  _PdfSelectionPainter({
+    required this.zoom,
+    required this.pan,
+    required this.pageTopLeft,
+    required this.rects,
+    required this.color,
+  });
+
+  @override
+  void paint(ui.Canvas canvas, Size size) {
+    if (rects.isEmpty) return;
+    final paint = Paint()..color = color.withValues(alpha: 0.28);
+    for (final r in rects) {
+      final cr = r.shift(pageTopLeft);
+      final screen = Rect.fromLTWH(
+        pan.dx + zoom * cr.left,
+        pan.dy + zoom * cr.top,
+        zoom * cr.width,
+        zoom * cr.height,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(screen, const Radius.circular(2)),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PdfSelectionPainter old) =>
+      old.rects != rects ||
+      old.zoom != zoom ||
+      old.pan != pan ||
+      old.pageTopLeft != pageTopLeft;
 }
 
 class _SheetLabel extends StatelessWidget {

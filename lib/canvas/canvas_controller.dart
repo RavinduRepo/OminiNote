@@ -4778,6 +4778,28 @@ class CanvasController extends ChangeNotifier {
   List<PageTextSource> get _textSources =>
       [const TypedTextSource(), PdfPageTextSource(_pdfText)];
 
+  /// Per-line PDF text of a PDF-backed page, each with its page-local rect
+  /// (scaled from the original PDF page to the normalized canvas page). Empty
+  /// for non-PDF pages and PDFs with no text layer (scanned). Used by the PDF
+  /// text-selection overlay.
+  Future<List<({String text, Rect rect})>> pdfLinesFor(String pageId) async {
+    final page = pages[pageId];
+    final src = page?.source;
+    if (page == null || src == null) return const [];
+    final pt = await _pdfText.page(src.assetId, src.pageIndex);
+    if (pt == null || pt.lines.isEmpty) return const [];
+    final scale = pt.width > 0 ? page.width / pt.width : 1.0;
+    return [
+      for (final l in pt.lines)
+        if (l.text.trim().isNotEmpty)
+          (
+            text: l.text,
+            rect: Rect.fromLTRB(l.left * scale, l.top * scale, l.right * scale,
+                l.bottom * scale),
+          ),
+    ];
+  }
+
   /// Builds the flat, in-order list of sentences to read for the given scope.
   Future<List<ReadingUnit>> buildReadingUnits(
       {required bool mainColumnOnly}) async {
