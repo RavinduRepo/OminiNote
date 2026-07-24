@@ -4800,6 +4800,42 @@ class CanvasController extends ChangeNotifier {
     ];
   }
 
+  /// Per-word PDF text of a PDF-backed page (reading order) with page-local
+  /// rects, for word-level text selection. Empty for non-PDF / scanned pages.
+  Future<List<({String text, Rect rect})>> pdfWordsFor(String pageId) async {
+    final page = pages[pageId];
+    final src = page?.source;
+    if (page == null || src == null) return const [];
+    final pt = await _pdfText.page(src.assetId, src.pageIndex);
+    if (pt == null || pt.words.isEmpty) return const [];
+    final scale = pt.width > 0 ? page.width / pt.width : 1.0;
+    return [
+      for (final w in pt.words)
+        (
+          text: w.text,
+          rect: Rect.fromLTRB(w.left * scale, w.top * scale, w.right * scale,
+              w.bottom * scale),
+        ),
+    ];
+  }
+
+  /// Warms the PDF text cache for every PDF-backed page in the background, so
+  /// the first text selection / find doesn't pay the extraction cost inline.
+  /// Cheap no-op once each asset is cached.
+  void warmPdfText() {
+    final seen = <String>{};
+    for (final pl in layout.pages) {
+      final src = pages[pl.pageId]?.source;
+      if (src == null || !seen.add(src.assetId)) continue;
+      unawaited(_pdfText.page(src.assetId, src.pageIndex));
+    }
+  }
+
+  /// Current PDF text-selection / find highlight (page-local rects on a page).
+  /// The painter merges this into its repaint listenable; null when idle.
+  final ValueNotifier<({String pageId, List<Rect> rects})?>
+      pdfSelectionNotifier = ValueNotifier(null);
+
   /// Builds the flat, in-order list of sentences to read for the given scope.
   Future<List<ReadingUnit>> buildReadingUnits(
       {required bool mainColumnOnly}) async {
@@ -5395,6 +5431,7 @@ class CanvasController extends ChangeNotifier {
     audioPlayheadNotifier.dispose();
     actionRecordingNotifier.dispose();
     actionGlowNotifier.dispose();
+    pdfSelectionNotifier.dispose();
     _linkFlashTimer?.cancel();
     linkFlashNotifier.dispose();
     readAloudActive.dispose();

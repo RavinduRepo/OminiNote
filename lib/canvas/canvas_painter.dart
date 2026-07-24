@@ -40,6 +40,7 @@ class CanvasPainter extends CustomPainter {
             controller.audioPlayheadNotifier,
             controller.actionGlowNotifier,
             controller.readAloudHighlightNotifier,
+            controller.pdfSelectionNotifier,
             controller.linkFlashNotifier,
           ]),
         );
@@ -198,6 +199,18 @@ class CanvasPainter extends CustomPainter {
       for (final s in page.strokes) {
         if (s.id == skipped) continue;
         if (actionGlow.contains(s.id)) _paintAudioGlow(canvas, s);
+      }
+    }
+
+    // PDF text selection / find highlight: page-local rects behind the text.
+    final pdfSel = controller.pdfSelectionNotifier.value;
+    if (pdfSel != null && pdfSel.pageId == page.id) {
+      final hl = Paint()..color = accentColor.withValues(alpha: 0.30);
+      for (final r in pdfSel.rects) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(r, const Radius.circular(2)),
+          hl,
+        );
       }
     }
 

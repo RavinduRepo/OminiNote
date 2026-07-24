@@ -15,13 +15,22 @@ class PdfLineText {
   const PdfLineText(this.text, this.left, this.top, this.right, this.bottom);
 }
 
-/// A PDF page's extracted lines plus its original size (points), so the caller
-/// can scale line bounds to the canvas page (imported pages are normalized to
-/// the canvas default width).
+/// One extracted PDF word: its text and bounds in original PDF points.
+class PdfWordText {
+  final String text;
+  final double left, top, right, bottom;
+  const PdfWordText(this.text, this.left, this.top, this.right, this.bottom);
+}
+
+/// A PDF page's extracted lines + words plus its original size (points), so the
+/// caller can scale bounds to the canvas page (imported pages are normalized to
+/// the canvas default width). [words] are in reading order (for word-level
+/// selection); [lines] drive read-aloud.
 class PdfPageText {
   final double width, height;
   final List<PdfLineText> lines;
-  const PdfPageText(this.width, this.height, this.lines);
+  final List<PdfWordText> words;
+  const PdfPageText(this.width, this.height, this.lines, this.words);
 }
 
 /// Extracts and caches the *positioned* text of imported PDF assets for
@@ -82,17 +91,30 @@ List<PdfPageText> _extractAllPages(List<int> bytes) {
         startPageIndex: i,
         endPageIndex: i,
       );
-      out.add(PdfPageText(size.width, size.height, [
-        for (final l in lines)
-          if (l.text.trim().isNotEmpty)
-            PdfLineText(
-              l.text,
-              l.bounds.left,
-              l.bounds.top,
-              l.bounds.right,
-              l.bounds.bottom,
-            ),
-      ]));
+      final lineOut = <PdfLineText>[];
+      final wordOut = <PdfWordText>[];
+      for (final l in lines) {
+        if (l.text.trim().isNotEmpty) {
+          lineOut.add(PdfLineText(
+            l.text,
+            l.bounds.left,
+            l.bounds.top,
+            l.bounds.right,
+            l.bounds.bottom,
+          ));
+        }
+        for (final w in l.wordCollection) {
+          if (w.text.trim().isEmpty) continue;
+          wordOut.add(PdfWordText(
+            w.text,
+            w.bounds.left,
+            w.bounds.top,
+            w.bounds.right,
+            w.bounds.bottom,
+          ));
+        }
+      }
+      out.add(PdfPageText(size.width, size.height, lineOut, wordOut));
     }
     return out;
   } catch (_) {

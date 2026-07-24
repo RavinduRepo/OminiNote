@@ -143,9 +143,19 @@ class _CanvasScreenState extends State<CanvasScreen>
   String? _videoAssetId;
   String? _videoName;
 
-  // PDF text-selection mode: a gated overlay captures drags to select text on
-  // PDF-backed pages (Copy / Search online). Off = the canvas is unchanged.
-  bool _pdfSelectMode = false;
+  // PDF text selection (finger long-press in the text tool). Words per PDF page
+  // are warmed in the background so a long-press hit-tests synchronously.
+  final Map<String, List<({String text, Rect rect})>> _pdfWords = {};
+  String? _pdfSelPage; // page the current selection is on
+  int _pdfSelAnchor = 0; // word index where the long-press began
+  int _pdfSelFocus = 0; // word index under the finger now
+  String _pdfSelText = ''; // selected text (empty = no selection)
+
+  // In-canvas find (typed text + this canvas's PDF text).
+  bool _findOpen = false;
+  final TextEditingController _findController = TextEditingController();
+  List<({String pageId, Rect rect})> _findMatches = const [];
+  int _findIndex = 0;
 
   // Tap tracking for the text tool (placement happens on tap-up).
   Offset? _downPosition;
@@ -267,6 +277,9 @@ class _CanvasScreenState extends State<CanvasScreen>
     // so recenter / live-follow tracks the ELEMENT you have selected, else this
     // canvas. Only runs while the panel is open (desktop); debounced.
     _controller!.addListener(_publishGraphLocation);
+    // Warm PDF text (words) in the background so text selection + find are
+    // instant — no upfront extraction wait.
+    unawaited(_loadPdfWords());
     // Also publish once on open — the listener only fires on later controller
     // changes, so switching canvases (which builds a fresh screen) wouldn't
     // otherwise refresh the panel until you drew/panned. Fixes "navigating
@@ -651,6 +664,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     _graphLocDebounce?.cancel();
     _canvasFocus.dispose();
+    _findController.dispose();
     _controller?.dispose(); // flushes pending saves
     _titleFocusNode?.dispose();
     _titleController?.dispose();
@@ -721,6 +735,10 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   void _onPointerDown(PointerDownEvent e) {
     final c = _controller!;
+    // A fresh gesture dismisses any lingering PDF text selection (a long-press
+    // then re-selects on its own). The action bar absorbs its own taps, so
+    // pressing Copy/Search doesn't reach here.
+    _clearPdfSelection();
     // Clicking the canvas claims keyboard focus for the shortcut handler
     // (unless a text edit is active — the TextField keeps it then).
     if (_textEdit == null && !_canvasFocus.hasFocus) {
@@ -1966,11 +1984,11 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Contents (PDF)',
                 onTap: _showPdfOutline,
               ),
-            if (shown('pdf_select'))
+            if (shown('find'))
               ActionSheetItem(
-                icon: Icons.text_fields,
-                label: 'Select PDF text',
-                onTap: _togglePdfSelect,
+                icon: Icons.search,
+                label: 'Find in canvas',
+                onTap: _openFind,
               ),
             if (shown('attachments'))
               ActionSheetItem(
@@ -2050,8 +2068,8 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showBookmarks();
           case 'contents':
             _showPdfOutline();
-          case 'pdf_select':
-            _togglePdfSelect();
+          case 'find':
+            _openFind();
           case 'attachments':
             _showAttachments();
           case 'page_settings':
@@ -2096,8 +2114,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
         if (shown('contents'))
           iconMenuItem('contents', Icons.toc, 'Contents (PDF)'),
-        if (shown('pdf_select'))
-          iconMenuItem('pdf_select', Icons.text_fields, 'Select PDF text'),
+        if (shown('find'))
+          iconMenuItem('find', Icons.search, 'Find in canvas'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         if (shown('page_settings'))
@@ -2536,20 +2554,174 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
   }
 
-  /// Toggles PDF text-selection mode. Refuses (with a hint) when the canvas has
-  /// no PDF-backed pages, since there'd be nothing to select.
-  void _togglePdfSelect() {
+  /// Loads per-word PDF text for every PDF-backed page in the background, so a
+  /// long-press can hit-test synchronously with no wait. Also warms the shared
+  /// PDF text cache (reused by read-aloud + find).
+  Future<void> _loadPdfWords() async {
     final c = _controller;
     if (c == null) return;
-    if (!_pdfSelectMode) {
-      final hasPdf =
-          c.layout.pages.any((pl) => c.pages[pl.pageId]?.source != null);
-      if (!hasPdf) {
-        _toast('No PDF pages on this canvas');
-        return;
+    c.warmPdfText();
+    for (final pl in c.layout.pages) {
+      if (c.pages[pl.pageId]?.source == null) continue;
+      if (_pdfWords.containsKey(pl.pageId)) continue;
+      final words = await c.pdfWordsFor(pl.pageId);
+      if (!mounted) return;
+      if (words.isNotEmpty) _pdfWords[pl.pageId] = words;
+    }
+  }
+
+  /// The (pageId, wordIndex) of the PDF word under a screen point, or null.
+  ({String pageId, int index})? _wordAt(Offset screenPos) {
+    final c = _controller;
+    if (c == null) return null;
+    final canvasPt = (screenPos - c.pan) / c.zoom;
+    for (final pl in c.layout.pages) {
+      final words = _pdfWords[pl.pageId];
+      if (words == null || !pl.rect.contains(canvasPt)) continue;
+      final local = canvasPt - pl.rect.topLeft;
+      for (var i = 0; i < words.length; i++) {
+        if (words[i].rect.inflate(2).contains(local)) {
+          return (pageId: pl.pageId, index: i);
+        }
+      }
+      // Inside a PDF page but not on a word — nearest word on the tapped line.
+      var best = -1;
+      var bestDy = double.infinity;
+      for (var i = 0; i < words.length; i++) {
+        final r = words[i].rect;
+        if (local.dx < r.left - 40 || local.dx > r.right + 40) continue;
+        final dy = (r.center.dy - local.dy).abs();
+        if (dy < bestDy) {
+          bestDy = dy;
+          best = i;
+        }
+      }
+      if (best >= 0) return (pageId: pl.pageId, index: best);
+      return null;
+    }
+    return null;
+  }
+
+  void _onSelectStart(Offset screenPos) {
+    final hit = _wordAt(screenPos);
+    if (hit == null) return;
+    _pdfSelPage = hit.pageId;
+    _pdfSelAnchor = hit.index;
+    _pdfSelFocus = hit.index;
+    _updatePdfSelection();
+  }
+
+  void _onSelectUpdate(Offset screenPos) {
+    if (_pdfSelPage == null) return;
+    final hit = _wordAt(screenPos);
+    if (hit == null || hit.pageId != _pdfSelPage) return;
+    _pdfSelFocus = hit.index;
+    _updatePdfSelection();
+  }
+
+  /// Recomputes the selected word range → highlight rects + text.
+  void _updatePdfSelection() {
+    final c = _controller;
+    final page = _pdfSelPage;
+    if (c == null || page == null) return;
+    final words = _pdfWords[page] ?? const [];
+    final lo = math.min(_pdfSelAnchor, _pdfSelFocus);
+    final hi = math.max(_pdfSelAnchor, _pdfSelFocus);
+    final rects = <Rect>[];
+    final buf = StringBuffer();
+    for (var i = lo; i <= hi && i < words.length; i++) {
+      rects.add(words[i].rect);
+      if (buf.isNotEmpty) buf.write(' ');
+      buf.write(words[i].text.trim());
+    }
+    c.pdfSelectionNotifier.value = (pageId: page, rects: rects);
+    setState(() => _pdfSelText = buf.toString());
+  }
+
+  void _clearPdfSelection() {
+    if (_pdfSelPage == null && _pdfSelText.isEmpty) return;
+    _pdfSelPage = null;
+    _controller?.pdfSelectionNotifier.value = null;
+    setState(() => _pdfSelText = '');
+  }
+
+  // ── In-canvas find (typed + PDF text) ──────────────────────────────────
+
+  void _openFind() {
+    _clearPdfSelection();
+    setState(() => _findOpen = true);
+  }
+
+  void _closeFind() {
+    _controller?.pdfSelectionNotifier.value = null;
+    setState(() {
+      _findOpen = false;
+      _findMatches = const [];
+      _findIndex = 0;
+    });
+  }
+
+  /// Searches this canvas's typed text and PDF text for [query], collecting a
+  /// page + rect per match, then jumps to the first. PDF text uses the (warm)
+  /// per-line cache; typed text highlights the matching box.
+  Future<void> _runFind(String query) async {
+    final c = _controller;
+    final q = query.trim().toLowerCase();
+    if (c == null || q.isEmpty) {
+      c?.pdfSelectionNotifier.value = null;
+      setState(() {
+        _findMatches = const [];
+        _findIndex = 0;
+      });
+      return;
+    }
+    final matches = <({String pageId, Rect rect})>[];
+    for (final pl in c.layout.pages) {
+      final page = c.pages[pl.pageId];
+      if (page == null) continue;
+      // Typed text boxes.
+      for (final el in page.objects) {
+        if (el is TextElement && el.text.toLowerCase().contains(q)) {
+          matches.add((pageId: pl.pageId, rect: el.rect));
+        }
+      }
+      // PDF lines on this page.
+      if (page.source != null) {
+        final lines = await c.pdfLinesFor(pl.pageId);
+        if (!mounted) return;
+        for (final l in lines) {
+          if (l.text.toLowerCase().contains(q)) {
+            matches.add((pageId: pl.pageId, rect: l.rect));
+          }
+        }
       }
     }
-    setState(() => _pdfSelectMode = !_pdfSelectMode);
+    if (!mounted) return;
+    setState(() {
+      _findMatches = matches;
+      _findIndex = 0;
+    });
+    if (matches.isNotEmpty) _goToMatch(0);
+  }
+
+  void _findJump(int delta) {
+    if (_findMatches.isEmpty) return;
+    final n = _findMatches.length;
+    _goToMatch((_findIndex + delta) % n < 0
+        ? (_findIndex + delta) % n + n
+        : (_findIndex + delta) % n);
+  }
+
+  void _goToMatch(int index) {
+    final c = _controller;
+    if (c == null || index < 0 || index >= _findMatches.length) return;
+    final m = _findMatches[index];
+    final l = c.layout.layoutOf(m.pageId);
+    setState(() => _findIndex = index);
+    c.pdfSelectionNotifier.value = (pageId: m.pageId, rects: [m.rect]);
+    if (l != null) {
+      c.ensureCanvasRectVisible(m.rect.shift(l.rect.topLeft), margin: 80);
+    }
   }
 
   /// Captures a photo with the device camera and drops it on the page.
@@ -3698,8 +3870,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         return tbBtn(Icons.bookmark_border, 'Bookmarks', _showBookmarks);
       case 'contents':
         return tbBtn(Icons.toc, 'Contents (PDF)', _showPdfOutline);
-      case 'pdf_select':
-        return tbBtn(Icons.text_fields, 'Select PDF text', _togglePdfSelect);
+      case 'find':
+        return tbBtn(Icons.search, 'Find in canvas', _openFind);
       case 'attachments':
         return tbBtn(Icons.attach_file, 'Attachments', _showAttachments);
       case 'page_settings':
@@ -4150,6 +4322,26 @@ class _CanvasScreenState extends State<CanvasScreen>
                                 ),
                                 (r) => r..onDoubleTapDown = _onDoubleTapDown,
                               ),
+                        // Text tool: a finger long-press over PDF text selects a
+                        // word; dragging extends it. Present only in the text
+                        // tool + touch, so it never competes with drawing (pen)
+                        // or a quick finger drag (which still pans/scrolls).
+                        if (c.tool == CanvasTool.text)
+                          LongPressGestureRecognizer:
+                              GestureRecognizerFactoryWithHandlers<
+                                LongPressGestureRecognizer
+                              >(
+                                () => LongPressGestureRecognizer(
+                                  supportedDevices: {PointerDeviceKind.touch},
+                                ),
+                                (r) => r
+                                  ..onLongPressStart = (d) {
+                                    _onSelectStart(d.localPosition);
+                                  }
+                                  ..onLongPressMoveUpdate = (d) {
+                                    _onSelectUpdate(d.localPosition);
+                                  },
+                              ),
                       },
                       child: Stack(
                         children: [
@@ -4241,21 +4433,53 @@ class _CanvasScreenState extends State<CanvasScreen>
                         )
                       : const SizedBox.shrink(),
                 ),
-                // PDF text-selection overlay (gated; captures drags to select
-                // text on PDF pages). Above the canvas input layer, so drawing
-                // is unaffected when the mode is off.
-                if (_pdfSelectMode)
-                  Positioned.fill(
-                    child: _PdfTextSelectionOverlay(
-                      controller: c,
-                      onCopy: (text) {
-                        Clipboard.setData(ClipboardData(text: text));
-                        _toast('Copied');
-                      },
-                      onSearch: (text) => _openUrl(
-                        'https://www.google.com/search?q=${Uri.encodeComponent(text)}',
+                // PDF text-selection action bar — shown while a selection
+                // exists (finger long-press in the text tool). Copy / Search /
+                // dismiss. Above the canvas input layer + absorbs its own taps.
+                if (_pdfSelText.isNotEmpty)
+                  Positioned(
+                    top: 8,
+                    left: 0,
+                    right: 0,
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: _absorbTaps(
+                        _PdfSelectionActionBar(
+                          onCopy: () {
+                            Clipboard.setData(ClipboardData(text: _pdfSelText));
+                            _toast('Copied');
+                            _clearPdfSelection();
+                          },
+                          onSearch: () {
+                            _openUrl(
+                              'https://www.google.com/search?q=${Uri.encodeComponent(_pdfSelText)}',
+                            );
+                            _clearPdfSelection();
+                          },
+                          onClose: _clearPdfSelection,
+                        ),
                       ),
-                      onDone: () => setState(() => _pdfSelectMode = false),
+                    ),
+                  ),
+                // In-canvas find bar (typed + PDF text).
+                if (_findOpen)
+                  Positioned(
+                    top: 8,
+                    left: 0,
+                    right: 0,
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: _absorbTaps(
+                        _FindBar(
+                          controller: _findController,
+                          matchCount: _findMatches.length,
+                          currentIndex: _findIndex,
+                          onChanged: _runFind,
+                          onNext: () => _findJump(1),
+                          onPrev: () => _findJump(-1),
+                          onClose: _closeFind,
+                        ),
+                      ),
                     ),
                   ),
               ],
@@ -5902,226 +6126,165 @@ class _AudioPlayerBar extends StatelessWidget {
   }
 }
 
-/// Gated overlay for selecting text on PDF-backed pages. It sits above the
-/// canvas input layer (opaque, so drawing is untouched when the mode is off),
-/// captures a drag, selects the PDF lines the drag spans on one page, and
-/// offers Copy / Search online. Whole-line selection, one page at a time — a v1
-/// built on the same per-line PDF geometry read-aloud uses ([pdfLinesFor]).
-class _PdfTextSelectionOverlay extends StatefulWidget {
-  final CanvasController controller;
-  final void Function(String text) onCopy;
-  final void Function(String text) onSearch;
-  final VoidCallback onDone;
-  const _PdfTextSelectionOverlay({
+/// Ctrl+F-style find bar scoped to the current canvas (typed + PDF text): a
+/// query field, match counter, prev/next, and close. Matches are computed by
+/// the screen and highlighted via `pdfSelectionNotifier`.
+class _FindBar extends StatefulWidget {
+  final TextEditingController controller;
+  final int matchCount;
+  final int currentIndex;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onNext;
+  final VoidCallback onPrev;
+  final VoidCallback onClose;
+  const _FindBar({
     required this.controller,
-    required this.onCopy,
-    required this.onSearch,
-    required this.onDone,
+    required this.matchCount,
+    required this.currentIndex,
+    required this.onChanged,
+    required this.onNext,
+    required this.onPrev,
+    required this.onClose,
   });
 
   @override
-  State<_PdfTextSelectionOverlay> createState() =>
-      _PdfTextSelectionOverlayState();
+  State<_FindBar> createState() => _FindBarState();
 }
 
-class _PdfTextSelectionOverlayState extends State<_PdfTextSelectionOverlay> {
-  final Map<String, List<({String text, Rect rect})>> _lines = {};
-  bool _loading = true;
-  String? _selPageId;
-  Offset _selPageTopLeft = Offset.zero; // canvas-space
-  Offset? _startLocal; // page-local drag start
-  List<Rect> _selRects = const []; // page-local
-  String _selText = '';
-
-  CanvasController get c => widget.controller;
+class _FindBarState extends State<_FindBar> {
+  final _focus = FocusNode();
 
   @override
   void initState() {
     super.initState();
-    _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focus.requestFocus());
   }
 
-  Future<void> _load() async {
-    for (final pl in c.layout.pages) {
-      if (c.pages[pl.pageId]?.source == null) continue;
-      _lines[pl.pageId] = await c.pdfLinesFor(pl.pageId);
-    }
-    if (mounted) setState(() => _loading = false);
-  }
-
-  Offset _toCanvas(Offset s) => (s - c.pan) / c.zoom;
-
-  void _onDown(PointerDownEvent e) {
-    final pt = _toCanvas(e.localPosition);
-    for (final pl in c.layout.pages) {
-      if (_lines.containsKey(pl.pageId) && pl.rect.contains(pt)) {
-        _selPageId = pl.pageId;
-        _selPageTopLeft = pl.rect.topLeft;
-        _startLocal = pt - pl.rect.topLeft;
-        setState(() {
-          _selRects = const [];
-          _selText = '';
-        });
-        return;
-      }
-    }
-    _selPageId = null;
-    _startLocal = null;
-    setState(() {
-      _selRects = const [];
-      _selText = '';
-    });
-  }
-
-  void _onMove(PointerMoveEvent e) {
-    final start = _startLocal;
-    final pageId = _selPageId;
-    if (start == null || pageId == null) return;
-    final endLocal = _toCanvas(e.localPosition) - _selPageTopLeft;
-    final y0 = math.min(start.dy, endLocal.dy);
-    final y1 = math.max(start.dy, endLocal.dy);
-    final rects = <Rect>[];
-    final buf = StringBuffer();
-    for (final l in _lines[pageId] ?? const []) {
-      if (l.rect.bottom >= y0 && l.rect.top <= y1) {
-        rects.add(l.rect);
-        if (buf.isNotEmpty) buf.write('\n');
-        buf.write(l.text.trim());
-      }
-    }
-    setState(() {
-      _selRects = rects;
-      _selText = buf.toString();
-    });
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
-    final hasSel = _selText.isNotEmpty;
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: _onDown,
-            onPointerMove: _onMove,
-            child: MouseRegion(
-              cursor: SystemMouseCursors.text,
-              child: CustomPaint(
-                painter: _PdfSelectionPainter(
-                  zoom: c.zoom,
-                  pan: c.pan,
-                  pageTopLeft: _selPageTopLeft,
-                  rects: _selRects,
-                  color: palette.accent,
-                ),
-                child: const SizedBox.expand(),
-              ),
-            ),
-          ),
+    final hasQuery = widget.controller.text.trim().isNotEmpty;
+    final count = widget.matchCount == 0
+        ? (hasQuery ? 'No results' : '')
+        : '${widget.currentIndex + 1}/${widget.matchCount}';
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 380),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: palette.surface2,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: palette.border),
+          boxShadow: const [
+            BoxShadow(color: Color(0x22000000), blurRadius: 8, offset: Offset(0, 2)),
+          ],
         ),
-        Positioned(
-          top: 8,
-          left: 0,
-          right: 0,
-          child: Align(
-            alignment: Alignment.topCenter,
-            // Absorb taps on the bar so they don't reach the selection layer.
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              child: Material(
-                color: Colors.transparent,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: palette.surface2,
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: palette.border),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        child: Text(
-                          _loading
-                              ? 'Loading text…'
-                              : (hasSel ? 'Selected' : 'Drag over PDF text'),
-                          style:
-                              TextStyle(fontSize: 12, color: palette.textDim),
-                        ),
-                      ),
-                      if (hasSel) ...[
-                        TextButton.icon(
-                          onPressed: () => widget.onCopy(_selText),
-                          icon: const Icon(Icons.copy, size: 16),
-                          label: const Text('Copy'),
-                        ),
-                        TextButton.icon(
-                          onPressed: () => widget.onSearch(_selText),
-                          icon: const Icon(Icons.search, size: 16),
-                          label: const Text('Search'),
-                        ),
-                      ],
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        tooltip: 'Exit selection',
-                        visualDensity: VisualDensity.compact,
-                        onPressed: widget.onDone,
-                      ),
-                    ],
-                  ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search, size: 18, color: palette.textDim),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 180,
+              child: TextField(
+                controller: widget.controller,
+                focusNode: _focus,
+                onChanged: widget.onChanged,
+                textInputAction: TextInputAction.search,
+                onSubmitted: (_) => widget.onNext(),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  hintText: 'Find in canvas',
                 ),
               ),
             ),
-          ),
+            Text(count,
+                style: TextStyle(fontSize: 12, color: palette.textDim)),
+            IconButton(
+              icon: const Icon(Icons.keyboard_arrow_up, size: 20),
+              tooltip: 'Previous',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.matchCount == 0 ? null : widget.onPrev,
+            ),
+            IconButton(
+              icon: const Icon(Icons.keyboard_arrow_down, size: 20),
+              tooltip: 'Next',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.matchCount == 0 ? null : widget.onNext,
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              tooltip: 'Close',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.onClose,
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }
 
-class _PdfSelectionPainter extends CustomPainter {
-  final double zoom;
-  final Offset pan;
-  final Offset pageTopLeft;
-  final List<Rect> rects;
-  final Color color;
-  _PdfSelectionPainter({
-    required this.zoom,
-    required this.pan,
-    required this.pageTopLeft,
-    required this.rects,
-    required this.color,
+/// The small action bar shown while PDF text is selected (finger long-press in
+/// the text tool): Copy / Search / dismiss. The selection itself lives on the
+/// screen and is highlighted by the main painter via `pdfSelectionNotifier`.
+class _PdfSelectionActionBar extends StatelessWidget {
+  final VoidCallback onCopy;
+  final VoidCallback onSearch;
+  final VoidCallback onClose;
+  const _PdfSelectionActionBar({
+    required this.onCopy,
+    required this.onSearch,
+    required this.onClose,
   });
 
   @override
-  void paint(ui.Canvas canvas, Size size) {
-    if (rects.isEmpty) return;
-    final paint = Paint()..color = color.withValues(alpha: 0.28);
-    for (final r in rects) {
-      final cr = r.shift(pageTopLeft);
-      final screen = Rect.fromLTWH(
-        pan.dx + zoom * cr.left,
-        pan.dy + zoom * cr.top,
-        zoom * cr.width,
-        zoom * cr.height,
-      );
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(screen, const Radius.circular(2)),
-        paint,
-      );
-    }
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(
+          color: palette.surface2,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: palette.border),
+          boxShadow: const [
+            BoxShadow(color: Color(0x22000000), blurRadius: 8, offset: Offset(0, 2)),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton.icon(
+              onPressed: onCopy,
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text('Copy'),
+            ),
+            TextButton.icon(
+              onPressed: onSearch,
+              icon: const Icon(Icons.search, size: 16),
+              label: const Text('Search'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              tooltip: 'Clear selection',
+              visualDensity: VisualDensity.compact,
+              onPressed: onClose,
+            ),
+          ],
+        ),
+      ),
+    );
   }
-
-  @override
-  bool shouldRepaint(_PdfSelectionPainter old) =>
-      old.rects != rects ||
-      old.zoom != zoom ||
-      old.pan != pan ||
-      old.pageTopLeft != pageTopLeft;
 }
 
 class _SheetLabel extends StatelessWidget {
