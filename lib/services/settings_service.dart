@@ -431,32 +431,56 @@ class SettingsService {
   Map<String, dynamic> _canvasViewports = {};
   static const int _kMaxViewports = 300;
 
-  /// Action-recording anchors: for a media (a recording id, or `video:<assetId>`)
-  /// on a canvas, the wall-clock ms that maps to media position 0. Replay glows
-  /// the ink drawn during the recording pass (its `createdAt` maps back through
-  /// this anchor to a media position). Device-local like the viewport — an
-  /// action pass is re-recordable per device — so it never syncs. Capped.
-  Map<String, dynamic> _actionAnchors = {};
-  static const int _kMaxActionAnchors = 500;
+  /// Action-recording tracks: for a media (a recording id, or `video:<assetId>`)
+  /// on a canvas, a list of *segments*. Each segment `{ws, we, ms}` is one
+  /// record pass — the wall-clock span [ws, we] you were drawing over, mapped to
+  /// the media time `ms` at which that pass started (1× during recording, so the
+  /// mapping is linear). Multiple segments accumulate, so you can pause, seek,
+  /// and add more writing at other spots. Replay maps each stroke's `createdAt`
+  /// back through whichever segment covers it. Device-local (re-recordable per
+  /// device) like the viewport — never syncs. Capped.
+  Map<String, dynamic> _actionTracks = {};
+  static const int _kMaxActionTracks = 500;
 
-  int? actionAnchorFor(String canvasId, String mediaId) {
-    final v = _actionAnchors['$canvasId:$mediaId'];
-    return (v as num?)?.toInt();
+  List<({int ws, int we, int ms})> actionSegmentsFor(
+      String canvasId, String mediaId) {
+    final v = _actionTracks['$canvasId:$mediaId'];
+    if (v is! List) return const [];
+    final out = <({int ws, int we, int ms})>[];
+    for (final e in v) {
+      if (e is Map) {
+        final ws = (e['ws'] as num?)?.toInt();
+        final we = (e['we'] as num?)?.toInt();
+        final ms = (e['ms'] as num?)?.toInt();
+        if (ws != null && we != null && ms != null) {
+          out.add((ws: ws, we: we, ms: ms));
+        }
+      }
+    }
+    return out;
   }
 
-  Future<void> setActionAnchor(
-      String canvasId, String mediaId, int wallclockMs) async {
+  bool hasActionSegments(String canvasId, String mediaId) =>
+      actionSegmentsFor(canvasId, mediaId).isNotEmpty;
+
+  /// Appends one recorded pass; existing passes are kept (additive).
+  Future<void> addActionSegment(
+      String canvasId, String mediaId, int ws, int we, int ms) async {
     final key = '$canvasId:$mediaId';
-    _actionAnchors.remove(key);
-    _actionAnchors[key] = wallclockMs;
-    while (_actionAnchors.length > _kMaxActionAnchors) {
-      _actionAnchors.remove(_actionAnchors.keys.first);
+    final list = _actionTracks[key] is List
+        ? List<dynamic>.from(_actionTracks[key] as List)
+        : <dynamic>[];
+    list.add({'ws': ws, 'we': we, 'ms': ms});
+    _actionTracks.remove(key);
+    _actionTracks[key] = list;
+    while (_actionTracks.length > _kMaxActionTracks) {
+      _actionTracks.remove(_actionTracks.keys.first);
     }
     await _persist();
   }
 
-  Future<void> clearActionAnchor(String canvasId, String mediaId) async {
-    if (_actionAnchors.remove('$canvasId:$mediaId') != null) await _persist();
+  Future<void> clearActionSegments(String canvasId, String mediaId) async {
+    if (_actionTracks.remove('$canvasId:$mediaId') != null) await _persist();
   }
 
   ({double zoom, double panX, double panY})? viewportFor(String canvasId) {
@@ -573,8 +597,8 @@ class SettingsService {
         data['canvasViewports'] as Map,
       );
     }
-    if (data['actionAnchors'] is Map<String, dynamic>) {
-      _actionAnchors = Map<String, dynamic>.from(data['actionAnchors'] as Map);
+    if (data['actionTracks'] is Map<String, dynamic>) {
+      _actionTracks = Map<String, dynamic>.from(data['actionTracks'] as Map);
     }
     if (data['readingPositions'] is Map<String, dynamic>) {
       _readingPositions = Map<String, dynamic>.from(
@@ -759,7 +783,7 @@ class SettingsService {
         'localOnlyNotebooks': localOnlyNotebooks.toList(),
         'defaultNotebookId': defaultNotebookId,
         'canvasViewports': _canvasViewports,
-        'actionAnchors': _actionAnchors,
+        'actionTracks': _actionTracks,
         'readingPositions': _readingPositions,
         'ttsVoiceName': ttsVoiceName,
         'ttsVoiceLocale': ttsVoiceLocale,

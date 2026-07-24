@@ -4673,70 +4673,80 @@ class _DraggableFloatingBar extends StatefulWidget {
 
 class _DraggableFloatingBarState extends State<_DraggableFloatingBar> {
   Offset _offset = Offset.zero;
+  Size _lastSize = Size.zero;
+
+  void _onDrag(PointerMoveEvent e) {
+    // Accumulate the raw per-event delta (summing every move, so nothing is
+    // dropped when several fire in one frame) and clamp so the bar can't be
+    // dragged fully off-screen.
+    final maxDx = (_lastSize.width / 2 - 24).clamp(0.0, double.infinity);
+    final maxDy = (_lastSize.height / 2 - 24).clamp(0.0, double.infinity);
+    setState(() {
+      _offset = Offset(
+        (_offset.dx + e.delta.dx).clamp(-maxDx, maxDx),
+        (_offset.dy + e.delta.dy).clamp(-maxDy, maxDy),
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Soft clamp: keep the bar's grab point roughly within the canvas area
-        // without needing to measure the bar's exact size.
-        final maxDx =
-            (constraints.maxWidth / 2 - 24).clamp(0.0, double.infinity);
-        final maxDy =
-            (constraints.maxHeight / 2 - 24).clamp(0.0, double.infinity);
-        final clamped = Offset(
-          _offset.dx.clamp(-maxDx, maxDx),
-          _offset.dy.clamp(-maxDy, maxDy),
-        );
+        _lastSize = constraints.biggest;
+        final w = constraints.maxWidth;
+        final h = constraints.maxHeight;
+        // Move the bar by shifting the Align's alignment — which moves the
+        // child's REAL layout box, so its hit region tracks the visuals. (The
+        // old Transform.translate moved only the painting, stranding the buttons
+        // + the opaque blocker at the original spot: after one drag the bar went
+        // dead and pen taps fell through to the canvas.)
+        final base = widget.initialAlignment;
+        final ax = w > 0 ? (base.x + 2 * _offset.dx / w).clamp(-1.0, 1.0) : base.x;
+        final ay = h > 0 ? (base.y + 2 * _offset.dy / h).clamp(-1.0, 1.0) : base.y;
         return Align(
-          alignment: widget.initialAlignment,
+          alignment: Alignment(ax.toDouble(), ay.toDouble()),
           child: Padding(
             padding: widget.margin,
-            child: Transform.translate(
-              offset: clamped,
-              // One opaque Listener around the WHOLE bar (handle + card, no
-              // seams) so NO pointer over the bar's bounds — pen included — can
-              // fall through to the canvas behind it. This is what stops the
-              // stray-ink leak; the child's own buttons still get their taps
-              // (they're hit first as descendants).
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Drag handle. Uses raw pointer events (a Listener, not a
-                    // GestureDetector) so the move can never be lost to the
-                    // canvas's gesture arena — the drag was "immovable
-                    // sometimes" when the pan recognizer competed for the pen.
-                    Listener(
-                      behavior: HitTestBehavior.opaque,
-                      onPointerMove: (e) =>
-                          setState(() => _offset = clamped + e.delta),
-                      child: MouseRegion(
-                        cursor: SystemMouseCursors.move,
-                        child: Container(
-                          margin: const EdgeInsets.only(right: 4),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 10,
-                          ),
-                          decoration: BoxDecoration(
-                            color: palette.surface2,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: palette.border),
-                          ),
-                          child: Icon(
-                            Icons.drag_indicator,
-                            size: 18,
-                            color: palette.textDim,
-                          ),
+            // One opaque Listener around the WHOLE bar (handle + card, no seams)
+            // so NO pointer over the bar's bounds — pen included — falls through
+            // to the canvas behind it; the child's own buttons still get their
+            // taps (they're hit first as descendants).
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Drag handle. Raw pointer events (a Listener, not a pan
+                  // GestureDetector) so the move can't be lost to the canvas's
+                  // gesture arena.
+                  Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerMove: _onDrag,
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.move,
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: palette.surface2,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: palette.border),
+                        ),
+                        child: Icon(
+                          Icons.drag_indicator,
+                          size: 18,
+                          color: palette.textDim,
                         ),
                       ),
                     ),
-                    Flexible(child: widget.child),
-                  ],
-                ),
+                  ),
+                  Flexible(child: widget.child),
+                ],
               ),
             ),
           ),
@@ -4889,32 +4899,41 @@ Widget _actionRecordButton(
     builder: (context, _) {
       final recording = controller.actionRecordingNotifier.value == mediaId;
       final hasTrack = controller.hasActionTrack(mediaId);
-      final color = recording
-          ? Colors.red
-          : (hasTrack ? palette.accent : palette.textDim);
-      return GestureDetector(
-        onLongPress: () => controller.clearActionTrack(mediaId),
-        child: IconButton(
-          icon: Icon(
-            recording ? Icons.fiber_manual_record : Icons.gesture,
-            size: 20,
-            color: color,
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Record: tap to record a pass; each pass ADDS to the track, so you
+          // can pause, seek, and layer in more writing at other spots.
+          IconButton(
+            icon: Icon(
+              recording ? Icons.stop_circle : Icons.gesture,
+              size: 20,
+              color: recording
+                  ? Colors.red
+                  : (hasTrack ? palette.accent : palette.textDim),
+            ),
+            visualDensity: VisualDensity.compact,
+            tooltip: recording
+                ? 'Stop recording actions'
+                : 'Record actions — draw while it plays (adds to what you have)',
+            onPressed: () {
+              if (recording) {
+                controller.stopActionRecording();
+              } else {
+                controller.startActionRecording(mediaId, positionMs());
+                ensurePlaying();
+              }
+            },
           ),
-          visualDensity: VisualDensity.compact,
-          tooltip: recording
-              ? 'Stop recording actions'
-              : (hasTrack
-                  ? 'Re-record actions (long-press to clear)'
-                  : 'Record actions — draw while it plays'),
-          onPressed: () {
-            if (recording) {
-              controller.stopActionRecording();
-            } else {
-              controller.startActionRecording(mediaId, positionMs());
-              ensurePlaying();
-            }
-          },
-        ),
+          // Clear: delete every recorded pass for this media.
+          if (hasTrack && !recording)
+            IconButton(
+              icon: Icon(Icons.delete_outline, size: 19, color: palette.textDim),
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Clear recorded actions',
+              onPressed: () => controller.clearActionTrack(mediaId),
+            ),
+        ],
       );
     },
   );

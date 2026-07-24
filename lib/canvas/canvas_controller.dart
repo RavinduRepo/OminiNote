@@ -4492,6 +4492,13 @@ class CanvasController extends ChangeNotifier {
     final p = _playback;
     if (p == null || !p.playing.value) {
       audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
+      return;
+    }
+    // No glow while a pass is being recorded — the glow is for replay.
+    if (actionRecordingNotifier.value != null) {
+      audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
       return;
     }
     final id = p.currentId.value;
@@ -4504,46 +4511,54 @@ class CanvasController extends ChangeNotifier {
     }
     if (rec == null) {
       audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
       return;
     }
-    // Prefer a device-local action-recording anchor (set by a "record actions"
-    // pass — works for imported audio too); fall back to the take's own
-    // wall-clock start (a voice recording drawn over while recording).
-    final anchorMs = SettingsService().actionAnchorFor(canvas.id, rec.id);
-    final startedAt = anchorMs != null
-        ? DateTime.fromMillisecondsSinceEpoch(anchorMs)
-        : rec.startedAt;
-    final playhead = startedAt.add(p.position.value);
-    audioPlayheadNotifier.value = playhead;
-    _followAudioGlow(playhead);
+    final segments = SettingsService().actionSegmentsFor(canvas.id, rec.id);
+    if (segments.isNotEmpty) {
+      // Explicit action passes recorded over this take (possibly imported):
+      // glow by segment mapping, including the take's own implicit span so the
+      // "drew while recording" glow is preserved alongside the added passes.
+      final all = [_implicitSegmentFor(rec), ...segments];
+      _applyActionGlow(all, p.position.value.inMilliseconds);
+    } else {
+      // Voice take with no added passes: the original wall-clock glow.
+      final playhead = rec.startedAt.add(p.position.value);
+      audioPlayheadNotifier.value = playhead;
+      actionGlowNotifier.value = null;
+      _followAudioGlow(playhead);
+    }
   }
 
-  /// Media id used for a video's action-recording anchor.
+  /// Media id used for a video's action-recording track.
   static String videoActionMediaId(String assetId) => 'video:$assetId';
 
   void _updateVideoPlayhead() {
     final v = _videoPlayback;
     if (v == null || !v.playing.value) {
-      // Only clear if a video is the current media (don't stomp audio's state).
       if (v != null && v.currentId.value != null) {
         audioPlayheadNotifier.value = null;
+        actionGlowNotifier.value = null;
       }
+      return;
+    }
+    if (actionRecordingNotifier.value != null) {
+      audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
       return;
     }
     final assetId = v.currentId.value;
     if (assetId == null) return;
-    // Video has no wall-clock ink correlation, so it glows only after a
-    // "record actions" pass gives it an anchor.
-    final anchorMs =
-        SettingsService().actionAnchorFor(canvas.id, videoActionMediaId(assetId));
-    if (anchorMs == null) {
+    // Video has no wall-clock ink correlation, so it only glows after a
+    // "record actions" pass gives it segments.
+    final segments =
+        SettingsService().actionSegmentsFor(canvas.id, videoActionMediaId(assetId));
+    if (segments.isEmpty) {
       audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
       return;
     }
-    final playhead = DateTime.fromMillisecondsSinceEpoch(
-        anchorMs + v.position.value.inMilliseconds);
-    audioPlayheadNotifier.value = playhead;
-    _followAudioGlow(playhead);
+    _applyActionGlow(segments, v.position.value.inMilliseconds);
   }
 
   // ── Action recording (glow ink drawn while a media plays) ──────────────
@@ -4552,38 +4567,101 @@ class CanvasController extends ChangeNotifier {
   /// null. Drives the "record actions" button state on the players.
   final ValueNotifier<String?> actionRecordingNotifier = ValueNotifier(null);
 
-  /// Whether [mediaId] has a saved action track (an anchor) on this device.
-  bool hasActionTrack(String mediaId) =>
-      SettingsService().actionAnchorFor(canvas.id, mediaId) != null;
+  /// Stroke ids to glow at the current media position (from action segments).
+  /// The painter merges this into its repaint listenable; null when idle.
+  final ValueNotifier<Set<String>?> actionGlowNotifier = ValueNotifier(null);
 
-  /// Arms an action-recording pass for [mediaId]: pins the anchor so the media
-  /// position [positionMs] maps to *now*, so ink drawn from here on (at 1×)
-  /// glows at the matching position on replay. Forces 1× while recording so the
-  /// wall-clock ↔ position mapping stays linear.
+  /// The in-progress pass's wall-clock + media start, while recording.
+  ({int ws, int ms})? _recSegment;
+
+  /// A voice take's implicit segment: its wall-clock span maps to media [0..dur].
+  ({int ws, int we, int ms}) _implicitSegmentFor(AudioRecording rec) {
+    final ws = rec.startedAt.millisecondsSinceEpoch;
+    return (ws: ws, we: ws + rec.durationMs, ms: 0);
+  }
+
+  /// Computes the glowing stroke ids for [positionMs] across [segments] and
+  /// pushes them to [actionGlowNotifier]; also gently follows them into view.
+  void _applyActionGlow(
+      List<({int ws, int we, int ms})> segments, int positionMs) {
+    final ids = <String>{};
+    StrokeElement? latest;
+    CanvasPage? latestPage;
+    for (final page in pages.values) {
+      for (final s in page.strokes) {
+        for (final seg in segments) {
+          final span = seg.we - seg.ws;
+          if (positionMs < seg.ms || positionMs > seg.ms + span) continue;
+          final wall = seg.ws + (positionMs - seg.ms);
+          if (strokeActiveAt(
+              s.createdAt, DateTime.fromMillisecondsSinceEpoch(wall))) {
+            ids.add(s.id);
+            if (latest == null || s.createdAt.isAfter(latest.createdAt)) {
+              latest = s;
+              latestPage = page;
+            }
+            break;
+          }
+        }
+      }
+    }
+    audioPlayheadNotifier.value = null;
+    actionGlowNotifier.value = ids.isEmpty ? null : ids;
+    if (latest != null && latestPage != null) {
+      final l = layout.layoutOf(latestPage.id);
+      if (l != null) {
+        ensureCanvasRectVisible(latest.bounds.shift(l.rect.topLeft), margin: 48);
+      }
+    }
+  }
+
+  /// True if [mediaId] has any recorded action segments on this device.
+  bool hasActionTrack(String mediaId) =>
+      SettingsService().hasActionSegments(canvas.id, mediaId);
+
+  /// Begins an action-recording pass for [mediaId] at media position
+  /// [positionMs] (kept — additive with any earlier passes). Forces 1× so the
+  /// wall-clock ↔ position mapping stays linear; glow is suppressed while
+  /// recording.
   Future<void> startActionRecording(String mediaId, int positionMs) async {
-    final anchor = DateTime.now().millisecondsSinceEpoch - positionMs;
-    await SettingsService().setActionAnchor(canvas.id, mediaId, anchor);
+    _recSegment = (ws: DateTime.now().millisecondsSinceEpoch, ms: positionMs);
     if (mediaId.startsWith('video:')) {
       await _videoPlayback?.setSpeed(1.0);
     } else {
       await _playback?.setSpeed(1.0);
     }
     actionRecordingNotifier.value = mediaId;
+    audioPlayheadNotifier.value = null;
+    actionGlowNotifier.value = null;
     notifyListeners();
   }
 
-  /// Ends the action-recording pass (the anchor persists as the track).
-  void stopActionRecording() {
+  /// Ends the pass, appending it to [mediaId]'s track (additive).
+  Future<void> stopActionRecording() async {
+    final mediaId = actionRecordingNotifier.value;
+    final seg = _recSegment;
     actionRecordingNotifier.value = null;
+    _recSegment = null;
+    if (mediaId != null && seg != null) {
+      await SettingsService().addActionSegment(
+        canvas.id,
+        mediaId,
+        seg.ws,
+        DateTime.now().millisecondsSinceEpoch,
+        seg.ms,
+      );
+    }
     notifyListeners();
   }
 
-  /// Deletes [mediaId]'s action track (no more glow); stops recording it.
+  /// Deletes ALL recorded action passes for [mediaId] (no more glow).
   Future<void> clearActionTrack(String mediaId) async {
-    await SettingsService().clearActionAnchor(canvas.id, mediaId);
+    await SettingsService().clearActionSegments(canvas.id, mediaId);
     if (actionRecordingNotifier.value == mediaId) {
       actionRecordingNotifier.value = null;
+      _recSegment = null;
     }
+    actionGlowNotifier.value = null;
     notifyListeners();
   }
 
@@ -5294,6 +5372,7 @@ class CanvasController extends ChangeNotifier {
     isRecordingAudioNotifier.dispose();
     audioPlayheadNotifier.dispose();
     actionRecordingNotifier.dispose();
+    actionGlowNotifier.dispose();
     _linkFlashTimer?.cancel();
     linkFlashNotifier.dispose();
     readAloudActive.dispose();

@@ -38,6 +38,7 @@ class CanvasPainter extends CustomPainter {
           repaint: Listenable.merge([
             controller,
             controller.audioPlayheadNotifier,
+            controller.actionGlowNotifier,
             controller.readAloudHighlightNotifier,
             controller.linkFlashNotifier,
           ]),
@@ -187,6 +188,16 @@ class CanvasPainter extends CustomPainter {
         if (strokeActiveAt(s.createdAt, playhead)) {
           _paintAudioGlow(canvas, s);
         }
+      }
+    }
+
+    // Action-recording replay: glow the strokes recorded at the current media
+    // position (id set computed by the controller from action segments).
+    final actionGlow = controller.actionGlowNotifier.value;
+    if (actionGlow != null) {
+      for (final s in page.strokes) {
+        if (s.id == skipped) continue;
+        if (actionGlow.contains(s.id)) _paintAudioGlow(canvas, s);
       }
     }
 
