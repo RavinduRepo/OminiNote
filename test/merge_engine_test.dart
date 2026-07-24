@@ -297,6 +297,78 @@ void main() {
       expect(r.changedLocal, isFalse);
       expect(r.localContributed, isFalse);
     });
+
+    group('stampSyncTarget — pin null-target notebooks to their account', () {
+      test('an adopted remote notebook with null target is stamped', () {
+        // The rebinding incident: a pre-multi-account notebook stored with
+        // syncTarget null would bind to whatever account this device added
+        // FIRST. Stamping at adoption pins it to the Drive it came from.
+        final remoteA = jsonEncode({'n1': nb('n1')}); // null syncTarget
+        final r = MergeEngine.mergeNotebooksIndexScoped(null, remoteA,
+            ownedIds: <String>{}, stampSyncTarget: 'A');
+        final merged = jsonDecode(r.content) as Map<String, dynamic>;
+        expect((merged['n1'] as Map)['syncTarget'], 'A');
+        expect(r.changedLocal, isTrue);
+      });
+
+      test('an explicit target is never restamped', () {
+        final local = jsonEncode({'n1': nb('n1', rev: 5, syncTarget: 'B')});
+        final remoteA = jsonEncode({'n1': nb('n1', rev: 5, syncTarget: 'B')});
+        final r = MergeEngine.mergeNotebooksIndexScoped(local, remoteA,
+            ownedIds: {'n1'}, stampSyncTarget: 'A');
+        final merged = jsonDecode(r.content) as Map<String, dynamic>;
+        expect((merged['n1'] as Map)['syncTarget'], 'B');
+        expect(r.changedLocal, isFalse);
+      });
+
+      test('a local-wins entry with null target is stamped in place', () {
+        final local = jsonEncode({'n1': nb('n1', rev: 9, name: 'mine')});
+        final remoteA = jsonEncode({'n1': nb('n1', rev: 4, name: 'theirs')});
+        final r = MergeEngine.mergeNotebooksIndexScoped(local, remoteA,
+            ownedIds: {'n1'}, stampSyncTarget: 'A');
+        final merged = jsonDecode(r.content) as Map<String, dynamic>;
+        expect((merged['n1'] as Map)['name'], 'mine');
+        expect((merged['n1'] as Map)['syncTarget'], 'A');
+        expect((merged['n1'] as Map)['rev'], 9, reason: 'no rev bump');
+        expect(r.changedLocal, isTrue, reason: 'stamp rewrites the local file');
+      });
+
+      test('an owned entry missing remotely is stamped before its push', () {
+        final local = jsonEncode({'n1': nb('n1')});
+        final r = MergeEngine.mergeNotebooksIndexScoped(
+            local, jsonEncode(<String, dynamic>{}),
+            ownedIds: {'n1'}, stampSyncTarget: 'A');
+        final merged = jsonDecode(r.content) as Map<String, dynamic>;
+        expect((merged['n1'] as Map)['syncTarget'], 'A');
+        expect(r.localContributed, isTrue);
+      });
+
+      test('foreign entries outside the scope are never stamped', () {
+        // n2 belongs to another account (explicit B) and n3 is untargeted but
+        // not owned by A nor on A's remote — both must pass through untouched.
+        final local = jsonEncode({
+          'n1': nb('n1', syncTarget: 'A'),
+          'n2': nb('n2', syncTarget: 'B'),
+          'n3': nb('n3'),
+        });
+        final remoteA = jsonEncode({'n1': nb('n1', syncTarget: 'A')});
+        final r = MergeEngine.mergeNotebooksIndexScoped(local, remoteA,
+            ownedIds: {'n1'}, stampSyncTarget: 'A');
+        final merged = jsonDecode(r.content) as Map<String, dynamic>;
+        expect((merged['n2'] as Map)['syncTarget'], 'B');
+        expect((merged['n3'] as Map)['syncTarget'], isNull);
+        expect(r.changedLocal, isFalse);
+        expect(r.localContributed, isFalse);
+      });
+
+      test('without stampSyncTarget nothing is stamped (back-compat)', () {
+        final remoteA = jsonEncode({'n1': nb('n1')});
+        final r = MergeEngine.mergeNotebooksIndexScoped(null, remoteA,
+            ownedIds: <String>{});
+        final merged = jsonDecode(r.content) as Map<String, dynamic>;
+        expect((merged['n1'] as Map)['syncTarget'], isNull);
+      });
+    });
   });
 
   group('reconcile — section/canvas single-doc LWW', () {

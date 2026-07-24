@@ -1,11 +1,15 @@
 import '../models/notebook.dart';
 import '../models/section.dart';
 import '../models/canvas.dart';
+import '../models/canvas_page.dart';
+import '../models/element.dart';
 import '../models/tree.dart';
 import 'notebook_service.dart';
+import 'render_cache.dart';
 
-/// What a [SearchResult] points at.
-enum SearchKind { notebook, section, superSection, canvas, bookmark }
+/// What a [SearchResult] points at. [thing] = content *inside* a canvas (typed
+/// text or extracted PDF text) — the opt-in "Things" search.
+enum SearchKind { notebook, section, superSection, canvas, bookmark, thing }
 
 /// One entry in the search index: a named thing (notebook / section /
 /// super-section / canvas / bookmark) plus enough context to open it.
@@ -48,6 +52,30 @@ class SearchResult {
   })  : titleLower = title.toLowerCase(),
         pathKeyLower =
             (path.isEmpty ? title : '$path $title').toLowerCase();
+}
+
+/// One page's searchable text (typed text + extracted PDF text), plus the
+/// context needed to open it. Built by [SearchService.buildContentIndex] only
+/// when the user opts into "Things" search — reading page files + extracting
+/// PDF text is far heavier than the name index, so it's never on the hot path.
+class ContentEntry {
+  final Notebook notebook;
+  final Section section;
+  final Canvas canvas;
+  final String pageId;
+
+  /// The page's text (kept for snippet display) and a lowercased copy for
+  /// substring matching.
+  final String text;
+  final String textLower;
+
+  ContentEntry({
+    required this.notebook,
+    required this.section,
+    required this.canvas,
+    required this.pageId,
+    required this.text,
+  }) : textLower = text.toLowerCase();
 }
 
 /// Builds a flat, in-memory index of every notebook/section/canvas name plus
@@ -147,6 +175,113 @@ class SearchService {
       }
     }
     return out;
+  }
+
+  /// Builds the **content** index: one [ContentEntry] per page that has any
+  /// typed text or extracted PDF text. This is O(all pages) file reads plus PDF
+  /// text extraction, so it's built lazily — only when the user turns on the
+  /// "Things" filter — and cached by the caller. Sections/canvases read
+  /// bounded-concurrently; per-canvas PDF text is cached then dropped so peak
+  /// memory doesn't hold every PDF at once.
+  Future<List<ContentEntry>> buildContentIndex() async {
+    final out = <ContentEntry>[];
+    final notebooks = await _service.getNotebooks();
+    for (final nb in notebooks) {
+      final sectionIds = nb.allSectionIds.toList();
+      final sections = await _mapBounded(
+          sectionIds, (id) => _service.getSection(nb.id, id));
+      for (final section in sections) {
+        if (section == null) continue;
+        final canvasIds = section.allCanvasIds.toList();
+        final canvases = await _mapBounded(
+            canvasIds, (id) => _service.getCanvas(nb.id, section.id, id));
+        for (final canvas in canvases) {
+          if (canvas == null) continue;
+          final pages = await _service.loadPages(canvas);
+          // Extract PDF text via pdfium (a throwaway RenderCache per canvas so
+          // the open documents are disposed and memory stays bounded).
+          final rc = RenderCache(onUpdated: () {});
+          for (final page in pages.values) {
+            final text = await _pageText(page, rc, canvas);
+            if (text.trim().isEmpty) continue;
+            out.add(ContentEntry(
+              notebook: nb,
+              section: section,
+              canvas: canvas,
+              pageId: page.id,
+              text: text,
+            ));
+          }
+          rc.dispose();
+        }
+      }
+    }
+    return out;
+  }
+
+  /// A page's combined searchable text: every typed [TextElement] plus the
+  /// extracted text of an imported-PDF background, if any.
+  Future<String> _pageText(CanvasPage page, RenderCache rc, Canvas canvas) async {
+    final buf = StringBuffer();
+    for (final el in page.objects) {
+      if (el is TextElement) {
+        final t = el.text.trim();
+        if (t.isNotEmpty) buf.writeln(t);
+      }
+    }
+    final src = page.source;
+    if (src != null) {
+      final pt = await rc.pdfPageText(
+          _service.assetFile(canvas, src.assetId).path, src.pageIndex);
+      if (pt != null) {
+        for (final line in pt.lines) {
+          final t = line.text.trim();
+          if (t.isNotEmpty) buf.writeln(t);
+        }
+      }
+    }
+    return buf.toString();
+  }
+
+  /// Substring-matches [content] against [query], returning up to [limit]
+  /// [SearchResult]s of kind [SearchKind.thing] with a snippet around each hit.
+  /// Requires 2+ chars (a 1-char content match would hit almost everything).
+  List<SearchResult> filterContent(
+    List<ContentEntry> content,
+    String query, {
+    int limit = 80,
+  }) {
+    final q = query.trim().toLowerCase();
+    if (q.length < 2) return const [];
+    final out = <SearchResult>[];
+    for (final e in content) {
+      final idx = e.textLower.indexOf(q);
+      if (idx < 0) continue;
+      out.add(SearchResult(
+        kind: SearchKind.thing,
+        title: _contentSnippet(e.text, idx, q.length),
+        path: '${e.notebook.name} › ${e.section.name} › ${e.canvas.name}',
+        notebook: e.notebook,
+        section: e.section,
+        canvas: e.canvas,
+        pageId: e.pageId,
+      ));
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /// A one-line preview of [text] around a match, with ellipses where trimmed.
+  String _contentSnippet(String text, int matchIndex, int matchLen) {
+    const pad = 32;
+    var start = matchIndex - pad;
+    var end = matchIndex + matchLen + pad;
+    if (start < 0) start = 0;
+    if (end > text.length) end = text.length;
+    var s = text.substring(start, end).replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (start > 0) s = '…$s';
+    if (end < text.length) s = '$s…';
+    return s;
   }
 
   /// Max concurrent section/canvas file reads while building the index.

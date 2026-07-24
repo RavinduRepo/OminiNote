@@ -35,10 +35,12 @@ const List<ToolbarActionSpec> kAddActionSpecs = [
   ToolbarActionSpec('horizontal', Icons.swap_horiz, 'Horizontal page'),
   ToolbarActionSpec('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
   ToolbarActionSpec('image', Icons.image_outlined, 'Insert image'),
+  ToolbarActionSpec('video', Icons.movie_outlined, 'Import video'),
   ToolbarActionSpec('paste', Icons.content_paste, 'Paste'),
   // Audio capture/playback are content additions, so they live in the "+"
   // menu alongside the other insert actions.
   ToolbarActionSpec('record_audio', Icons.mic_none, 'Record audio'),
+  ToolbarActionSpec('import_audio', Icons.audio_file_outlined, 'Import audio'),
   ToolbarActionSpec('recordings', Icons.graphic_eq, 'Recordings'),
 ];
 
@@ -49,6 +51,8 @@ const List<ToolbarActionSpec> kOverflowActionSpecs = [
   ToolbarActionSpec('export', Icons.picture_as_pdf_outlined, 'Export PDF'),
   ToolbarActionSpec('navigator', Icons.grid_view_outlined, 'Pages'),
   ToolbarActionSpec('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+  ToolbarActionSpec('contents', Icons.toc, 'Contents (PDF)'),
+  ToolbarActionSpec('find', Icons.search, 'Find in canvas'),
   ToolbarActionSpec('attachments', Icons.attach_file, 'Attachments'),
   ToolbarActionSpec(
       'page_settings', Icons.description_outlined, 'Page settings'),

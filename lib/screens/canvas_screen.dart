@@ -8,6 +8,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../utils/app_toast.dart';
@@ -33,6 +34,7 @@ import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
 import '../services/pdf_export_isolate.dart';
 import '../services/pdf_exporter.dart';
+import '../services/render_cache.dart';
 import '../services/settings_service.dart';
 import '../services/sync_service.dart';
 import '../theme/app_theme.dart';
@@ -136,6 +138,25 @@ class _CanvasScreenState extends State<CanvasScreen>
   // "Recordings" action, or kept up while a take plays). Replaces the old
   // Recordings bottom sheet.
   bool _audioPlayerOpen = false;
+
+  // The video whose floating player is open (asset id + display name), or null.
+  String? _videoAssetId;
+  String? _videoName;
+
+  // PDF text selection (finger long-press in the text tool). Words per PDF page
+  // are warmed in the background so a long-press hit-tests synchronously.
+  final Map<String, List<({String text, Rect rect})>> _pdfWords = {};
+  String? _pdfSelPage; // page the current selection is on
+  int _pdfSelAnchor = 0; // word index where the long-press began
+  int _pdfSelFocus = 0; // word index under the finger now
+  String _pdfSelText = ''; // selected text (empty = no selection)
+  List<Rect> _pdfSelRects = const []; // selected words' page-local rects
+
+  // In-canvas find (typed text + this canvas's PDF text).
+  bool _findOpen = false;
+  final TextEditingController _findController = TextEditingController();
+  List<({String pageId, Rect rect})> _findMatches = const [];
+  int _findIndex = 0;
 
   // Tap tracking for the text tool (placement happens on tap-up).
   Offset? _downPosition;
@@ -249,6 +270,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         ..systemCopyHook = _copySelectionToSystemClipboard
         ..systemPasteFallback = _pasteFromSystemClipboard
         ..addTextLinkHook = _startTextLink
+        ..onDeleteMediaChips = _confirmDeleteMediaChips
         ..eraserPartial = SettingsService().eraserPartial
         ..eraserSize = SettingsService().eraserSize;
     });
@@ -256,6 +278,9 @@ class _CanvasScreenState extends State<CanvasScreen>
     // so recenter / live-follow tracks the ELEMENT you have selected, else this
     // canvas. Only runs while the panel is open (desktop); debounced.
     _controller!.addListener(_publishGraphLocation);
+    // Warm PDF text (words) in the background so text selection + find are
+    // instant — no upfront extraction wait.
+    unawaited(_loadPdfWords());
     // Also publish once on open — the listener only fires on later controller
     // changes, so switching canvases (which builds a fresh screen) wouldn't
     // otherwise refresh the panel until you drew/panned. Fixes "navigating
@@ -640,6 +665,7 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
     _graphLocDebounce?.cancel();
     _canvasFocus.dispose();
+    _findController.dispose();
     _controller?.dispose(); // flushes pending saves
     _titleFocusNode?.dispose();
     _titleController?.dispose();
@@ -710,6 +736,10 @@ class _CanvasScreenState extends State<CanvasScreen>
 
   void _onPointerDown(PointerDownEvent e) {
     final c = _controller!;
+    // A fresh gesture dismisses any lingering PDF text selection (a long-press
+    // then re-selects on its own). The action bar absorbs its own taps, so
+    // pressing Copy/Search doesn't reach here.
+    _clearPdfSelection();
     // Clicking the canvas claims keyboard focus for the shortcut handler
     // (unless a text edit is active — the TextField keeps it then).
     if (_textEdit == null && !_canvasFocus.hasFocus) {
@@ -1293,8 +1323,89 @@ class _CanvasScreenState extends State<CanvasScreen>
     return null;
   }
 
-  /// Opens an attachment chip's file with the platform's default handler.
+  /// Confirms whether deleting media chip(s) should also remove the underlying
+  /// recording/attachment, or just the on-canvas icon. Wired as the controller's
+  /// `onDeleteMediaChips` hook (fires from any delete path). The hook owns the
+  /// actual delete, so a "Cancel" leaves everything intact.
+  Future<void> _confirmDeleteMediaChips(List<AttachmentElement> chips) async {
+    final c = _controller;
+    if (c == null) return;
+    // Only chips whose asset is actually backed by a recording/attachment give
+    // the "remove everywhere" choice; a bare chip just deletes the icon.
+    final backed = chips
+        .where((ch) =>
+            c.canvas.recordings.any((r) => r.assetId == ch.assetId) ||
+            c.canvas.attachments.any((a) => a.assetId == ch.assetId))
+        .toList();
+    if (backed.isEmpty) {
+      c.deleteSelection(force: true);
+      return;
+    }
+    final n = chips.length;
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(n == 1 ? 'Remove this media?' : 'Remove these media?'),
+        content: Text(
+          'Delete just the on-canvas icon, or also remove the '
+          '${n == 1 ? 'file' : 'files'} from this canvas’s Attachments?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'icon'),
+            child: const Text('Just the icon'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'all'),
+            child: const Text('Remove everywhere'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || choice == null || choice == 'cancel') return;
+    c.deleteSelection(force: true); // removes the chip(s) + any co-selected
+    if (choice == 'all') {
+      for (final ch in backed) {
+        // Stop playback if a take being removed is the one playing.
+        for (final r in c.canvas.recordings) {
+          if (r.assetId == ch.assetId && c.audioPlayback.isCurrent(r.id)) {
+            c.audioPlayback.stop();
+          }
+        }
+        c.deleteMediaCompletely(ch.assetId);
+      }
+    }
+  }
+
+  /// The audio recording backed by [assetId], if any (chips resolve their take
+  /// by asset id so no back-reference field is needed on the element).
+  AudioRecording? _recordingForAsset(CanvasController c, String assetId) {
+    for (final r in c.canvas.recordings) {
+      if (r.assetId == assetId) return r;
+    }
+    return null;
+  }
+
+  /// Handles a tap on an attachment chip. Audio chips play in the floating
+  /// player; everything else opens with the platform's default handler.
   Future<void> _openAttachment(AttachmentElement el) async {
+    final c = _controller;
+    if (c != null && el.mime.startsWith('audio/')) {
+      final rec = _recordingForAsset(c, el.assetId);
+      if (rec != null) {
+        setState(() => _audioPlayerOpen = true);
+        await _playRecording(c, rec);
+        return;
+      }
+    }
+    if (el.mime.startsWith('video/')) {
+      await _openVideoPlayer(el.assetId, el.name);
+      return;
+    }
     final file = _service.assetFile(widget.canvas, el.assetId);
     if (!await file.exists()) {
       _toast(
@@ -1868,6 +1979,18 @@ class _CanvasScreenState extends State<CanvasScreen>
                 label: 'Bookmarks',
                 onTap: _showBookmarks,
               ),
+            if (shown('contents'))
+              ActionSheetItem(
+                icon: Icons.toc,
+                label: 'Contents (PDF)',
+                onTap: _showPdfOutline,
+              ),
+            if (shown('find'))
+              ActionSheetItem(
+                icon: Icons.search,
+                label: 'Find in canvas',
+                onTap: _openFind,
+              ),
             if (shown('attachments'))
               ActionSheetItem(
                 icon: Icons.attach_file,
@@ -1944,6 +2067,10 @@ class _CanvasScreenState extends State<CanvasScreen>
             _showNavigator();
           case 'bookmarks':
             _showBookmarks();
+          case 'contents':
+            _showPdfOutline();
+          case 'find':
+            _openFind();
           case 'attachments':
             _showAttachments();
           case 'page_settings':
@@ -1986,6 +2113,10 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('navigator', Icons.grid_view_outlined, 'Pages'),
         if (shown('bookmarks'))
           iconMenuItem('bookmarks', Icons.bookmark_border, 'Bookmarks'),
+        if (shown('contents'))
+          iconMenuItem('contents', Icons.toc, 'Contents (PDF)'),
+        if (shown('find'))
+          iconMenuItem('find', Icons.search, 'Find in canvas'),
         if (shown('attachments'))
           iconMenuItem('attachments', Icons.attach_file, 'Attachments'),
         if (shown('page_settings'))
@@ -2080,6 +2211,13 @@ class _CanvasScreenState extends State<CanvasScreen>
                 subtitle: const Text('From files'),
                 onTap: () => Navigator.pop(context, 'image'),
               ),
+            if (shown('video'))
+              ListTile(
+                leading: const Icon(Icons.movie_outlined),
+                title: const Text('Video'),
+                subtitle: const Text('Play a video file over the canvas'),
+                onTap: () => Navigator.pop(context, 'video'),
+              ),
             if (Platform.isAndroid || Platform.isIOS)
               ListTile(
                 leading: const Icon(Icons.photo_camera_outlined),
@@ -2102,6 +2240,13 @@ class _CanvasScreenState extends State<CanvasScreen>
                 title: const Text('Record audio'),
                 subtitle: const Text('Capture voice over this canvas'),
                 onTap: () => Navigator.pop(context, 'record_audio'),
+              ),
+            if (shown('import_audio'))
+              ListTile(
+                leading: const Icon(Icons.audio_file_outlined),
+                title: const Text('Import audio'),
+                subtitle: const Text('Add an audio file to play back'),
+                onTap: () => Navigator.pop(context, 'import_audio'),
               ),
             if (shown('recordings'))
               ListTile(
@@ -2135,6 +2280,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         await _insertPdfFlow();
       case 'image':
         await _insertImageFlow();
+      case 'video':
+        await _importVideoFlow();
       case 'camera':
         await _capturePhotoFlow();
       case 'paste':
@@ -2144,6 +2291,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         _toast('Page pasted at the end');
       case 'record_audio':
         await _startAudioRecording();
+      case 'import_audio':
+        await _importAudioFlow();
       case 'recordings':
         _openAudioPlayer();
     }
@@ -2176,6 +2325,8 @@ class _CanvasScreenState extends State<CanvasScreen>
           iconMenuItem('pdf', Icons.picture_as_pdf_outlined, 'Insert PDF'),
         if (shown('image'))
           iconMenuItem('image', Icons.image_outlined, 'Insert image'),
+        if (shown('video'))
+          iconMenuItem('video', Icons.movie_outlined, 'Import video'),
         // Same gate as the mobile Add sheet — an Android/iOS device in the
         // desktop *layout* has a camera; true desktop OSes (no image_picker
         // camera support) don't show it.
@@ -2191,6 +2342,8 @@ class _CanvasScreenState extends State<CanvasScreen>
         if (shown('record_audio') &&
             !(_controller?.isRecordingAudio ?? false))
           iconMenuItem('record_audio', Icons.mic_none, 'Record audio'),
+        if (shown('import_audio'))
+          iconMenuItem('import_audio', Icons.audio_file_outlined, 'Import audio'),
         if (shown('recordings'))
           iconMenuItem('recordings', Icons.graphic_eq, 'Recordings'),
       ],
@@ -2315,6 +2468,303 @@ class _CanvasScreenState extends State<CanvasScreen>
     if (path == null || !mounted) return;
     final bytes = await File(path).readAsBytes();
     await _placeImageFromFileBytes(bytes, path.split('.').last.toLowerCase());
+  }
+
+  /// Imports an audio file so it plays back like an in-app recording (shown in
+  /// the Recordings player). The file's length is probed, so show a brief
+  /// progress ring in case that takes a moment.
+  Future<void> _importAudioFlow() async {
+    final c = _controller;
+    if (c == null) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['m4a', 'mp3', 'wav', 'aac', 'ogg', 'flac', 'opus'],
+    );
+    final picked = result?.files.single;
+    final path = picked?.path;
+    if (path == null || !mounted) return;
+    final name = _stripExtension(picked!.name);
+    final progress = ProgressOverlay.show(context, 'Importing audio…');
+    AudioRecording? rec;
+    try {
+      rec = await c.importAudio(path, name);
+    } finally {
+      progress.close();
+    }
+    if (!mounted) return;
+    if (rec == null) {
+      _toast('Couldn’t read that audio file');
+      return;
+    }
+    _toast('Imported "${rec.name}"');
+    _openAudioPlayer();
+  }
+
+  /// Drops the trailing extension from a filename for a cleaner display label.
+  String _stripExtension(String fileName) {
+    final dot = fileName.lastIndexOf('.');
+    return dot > 0 ? fileName.substring(0, dot) : fileName;
+  }
+
+  /// Imports a video file: stored as an attachment + a tappable chip, then the
+  /// floating video player opens on it.
+  Future<void> _importVideoFlow() async {
+    final c = _controller;
+    if (c == null) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'],
+    );
+    final picked = result?.files.single;
+    final path = picked?.path;
+    if (path == null || !mounted) return;
+    final name = _stripExtension(picked!.name);
+    final att = await c.importVideo(path, name);
+    if (!mounted) return;
+    if (att == null) {
+      _toast('Couldn’t read that video file');
+      return;
+    }
+    _openVideoPlayer(att.assetId, att.name);
+  }
+
+  /// Opens the floating video player on [assetId], guarding a not-yet-synced
+  /// asset.
+  Future<void> _openVideoPlayer(String assetId, String name) async {
+    final c = _controller;
+    if (c == null) return;
+    final file = c.assetFileOf(assetId);
+    if (!await file.exists()) {
+      _toast('Video not available yet (still syncing?)');
+      return;
+    }
+    setState(() {
+      _videoAssetId = assetId;
+      _videoName = name;
+    });
+    await c.videoPlayback.play(assetId, file.path);
+  }
+
+  void _closeVideoPlayer() {
+    _controller?.videoPlayback.stop();
+    if (mounted) {
+      setState(() {
+        _videoAssetId = null;
+        _videoName = null;
+      });
+    }
+  }
+
+  /// Loads per-word PDF text for every PDF-backed page in the background, so a
+  /// long-press can hit-test synchronously with no wait. Also warms the shared
+  /// PDF text cache (reused by read-aloud + find).
+  Future<void> _loadPdfWords() async {
+    final c = _controller;
+    if (c == null) return;
+    c.warmPdfText();
+    for (final pl in c.layout.pages) {
+      if (c.pages[pl.pageId]?.source == null) continue;
+      if (_pdfWords.containsKey(pl.pageId)) continue;
+      final words = await c.pdfWordsFor(pl.pageId);
+      if (!mounted) return;
+      if (words.isNotEmpty) _pdfWords[pl.pageId] = words;
+    }
+  }
+
+  /// The (pageId, wordIndex) of the PDF word under a screen point, or null.
+  ({String pageId, int index})? _wordAt(Offset screenPos) {
+    final c = _controller;
+    if (c == null) return null;
+    final canvasPt = (screenPos - c.pan) / c.zoom;
+    for (final pl in c.layout.pages) {
+      final words = _pdfWords[pl.pageId];
+      if (words == null || !pl.rect.contains(canvasPt)) continue;
+      final local = canvasPt - pl.rect.topLeft;
+      for (var i = 0; i < words.length; i++) {
+        if (words[i].rect.inflate(2).contains(local)) {
+          return (pageId: pl.pageId, index: i);
+        }
+      }
+      // Inside a PDF page but not on a word — nearest word on the tapped line.
+      var best = -1;
+      var bestDy = double.infinity;
+      for (var i = 0; i < words.length; i++) {
+        final r = words[i].rect;
+        if (local.dx < r.left - 40 || local.dx > r.right + 40) continue;
+        final dy = (r.center.dy - local.dy).abs();
+        if (dy < bestDy) {
+          bestDy = dy;
+          best = i;
+        }
+      }
+      if (best >= 0) return (pageId: pl.pageId, index: best);
+      return null;
+    }
+    return null;
+  }
+
+  void _onSelectStart(Offset screenPos) {
+    final hit = _wordAt(screenPos);
+    if (hit == null) return;
+    if (_findOpen) _closeFind(); // find + select are different intents
+    _pdfSelPage = hit.pageId;
+    _pdfSelAnchor = hit.index;
+    _pdfSelFocus = hit.index;
+    _updatePdfSelection();
+  }
+
+  void _onSelectUpdate(Offset screenPos) {
+    if (_pdfSelPage == null) return;
+    final hit = _wordAt(screenPos);
+    if (hit == null || hit.pageId != _pdfSelPage) return;
+    _pdfSelFocus = hit.index;
+    _updatePdfSelection();
+  }
+
+  /// Recomputes the selected word range → highlight rects + text.
+  void _updatePdfSelection() {
+    final c = _controller;
+    final page = _pdfSelPage;
+    if (c == null || page == null) return;
+    final words = _pdfWords[page] ?? const [];
+    final lo = math.min(_pdfSelAnchor, _pdfSelFocus);
+    final hi = math.max(_pdfSelAnchor, _pdfSelFocus);
+    final rects = <Rect>[];
+    final buf = StringBuffer();
+    for (var i = lo; i <= hi && i < words.length; i++) {
+      rects.add(words[i].rect);
+      if (buf.isNotEmpty) buf.write(' ');
+      buf.write(words[i].text.trim());
+    }
+    c.pdfSelectionNotifier.value = (pageId: page, rects: rects);
+    _pdfSelRects = rects;
+    setState(() => _pdfSelText = buf.toString());
+  }
+
+  void _clearPdfSelection() {
+    if (_pdfSelPage == null && _pdfSelText.isEmpty) return;
+    _pdfSelPage = null;
+    _pdfSelRects = const [];
+    _controller?.pdfSelectionNotifier.value = null;
+    setState(() => _pdfSelText = '');
+  }
+
+  /// Links the selected PDF text: pick a target, drop a link marker at the
+  /// words (carrying the highlight rects), and register the connection — reusing
+  /// the same machinery lasso/text links use, so the marker is editable (✎) and
+  /// shows in both Connections lists.
+  Future<void> _linkPdfSelection() async {
+    final c = _controller;
+    final pageId = _pdfSelPage;
+    final rects = List<Rect>.from(_pdfSelRects);
+    if (c == null || pageId == null || rects.isEmpty) return;
+    _clearPdfSelection();
+    final pick = await showLinkTargetPicker(context);
+    if (pick == null || !mounted) return;
+    var union = rects.first;
+    for (final r in rects.skip(1)) {
+      union = union.expandToInclude(r);
+    }
+    final marker = c.insertLinkItem(
+      pageId,
+      pick.target.toUri(),
+      pick.title,
+      nearBounds: union,
+      pdfLinkRects: rects,
+    );
+    if (marker == null) return;
+    await LinkService().addLinkWithReciprocalMarker(
+      from: LinkEndpoint(
+        notebookId: widget.canvas.notebookId,
+        sectionId: widget.canvas.sectionId,
+        canvasId: widget.canvas.id,
+        pageId: pageId,
+        elementIds: [marker.id],
+      ),
+      to: pick.target,
+      fromName: 'PDF text link in ${widget.canvas.name}',
+      toName: pick.title,
+    );
+    if (mounted) _toast('Linked "${pick.title}"');
+  }
+
+  // ── In-canvas find (typed + PDF text) ──────────────────────────────────
+
+  void _openFind() {
+    _clearPdfSelection();
+    setState(() => _findOpen = true);
+  }
+
+  void _closeFind() {
+    _controller?.pdfSelectionNotifier.value = null;
+    setState(() {
+      _findOpen = false;
+      _findMatches = const [];
+      _findIndex = 0;
+    });
+  }
+
+  /// Searches this canvas's typed text and PDF text for [query], collecting a
+  /// page + rect per match, then jumps to the first. PDF text uses the (warm)
+  /// per-line cache; typed text highlights the matching box.
+  Future<void> _runFind(String query) async {
+    final c = _controller;
+    final q = query.trim().toLowerCase();
+    if (c == null || q.isEmpty) {
+      c?.pdfSelectionNotifier.value = null;
+      setState(() {
+        _findMatches = const [];
+        _findIndex = 0;
+      });
+      return;
+    }
+    final matches = <({String pageId, Rect rect})>[];
+    for (final pl in c.layout.pages) {
+      final page = c.pages[pl.pageId];
+      if (page == null) continue;
+      // Typed text boxes.
+      for (final el in page.objects) {
+        if (el is TextElement && el.text.toLowerCase().contains(q)) {
+          matches.add((pageId: pl.pageId, rect: el.rect));
+        }
+      }
+      // PDF lines on this page.
+      if (page.source != null) {
+        final lines = await c.pdfLinesFor(pl.pageId);
+        if (!mounted) return;
+        for (final l in lines) {
+          if (l.text.toLowerCase().contains(q)) {
+            matches.add((pageId: pl.pageId, rect: l.rect));
+          }
+        }
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _findMatches = matches;
+      _findIndex = 0;
+    });
+    if (matches.isNotEmpty) _goToMatch(0);
+  }
+
+  void _findJump(int delta) {
+    if (_findMatches.isEmpty) return;
+    final n = _findMatches.length;
+    _goToMatch((_findIndex + delta) % n < 0
+        ? (_findIndex + delta) % n + n
+        : (_findIndex + delta) % n);
+  }
+
+  void _goToMatch(int index) {
+    final c = _controller;
+    if (c == null || index < 0 || index >= _findMatches.length) return;
+    final m = _findMatches[index];
+    final l = c.layout.layoutOf(m.pageId);
+    setState(() => _findIndex = index);
+    c.pdfSelectionNotifier.value = (pageId: m.pageId, rects: [m.rect]);
+    if (l != null) {
+      c.ensureCanvasRectVisible(m.rect.shift(l.rect.topLeft), margin: 80);
+    }
   }
 
   /// Captures a photo with the device camera and drops it on the page.
@@ -2710,6 +3160,93 @@ class _CanvasScreenState extends State<CanvasScreen>
     }
   }
 
+  /// Shows the imported PDF's table of contents (its own outline/bookmarks) as
+  /// a jumpable tree. Targets the current page's PDF, else the first PDF in the
+  /// canvas. Hints when there's no PDF or the PDF carries no outline.
+  Future<void> _showPdfOutline() async {
+    final c = _controller;
+    if (c == null) return;
+    final assetId = c.outlinePdfAssetId;
+    if (assetId == null) {
+      _toast('No PDF on this canvas');
+      return;
+    }
+    final progress = ProgressOverlay.show(context, 'Reading contents…');
+    List<PdfOutlineEntry> outline;
+    try {
+      outline = await c.renderCache.pdfOutline(c.assetFileOf(assetId).path);
+    } finally {
+      progress.close();
+    }
+    if (!mounted) return;
+    if (outline.isEmpty) {
+      _toast('This PDF has no table of contents');
+      return;
+    }
+    // Flatten the tree to (entry, depth) rows for a simple indented list.
+    final flat = <({PdfOutlineEntry e, int depth})>[];
+    void walk(List<PdfOutlineEntry> nodes, int depth) {
+      for (final n in nodes) {
+        flat.add((e: n, depth: depth));
+        walk(n.children, depth + 1);
+      }
+    }
+
+    walk(outline, 0);
+
+    await showAdaptiveMenu<void>(
+      context,
+      desktop: widget.embedded,
+      builder: (context) => cappedSheetBody(
+        context,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            const _SheetLabel('Contents'),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: flat.length,
+                itemBuilder: (context, i) {
+                  final item = flat[i];
+                  final pageIndex = item.e.pageIndex;
+                  return ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.only(
+                      left: 16.0 + item.depth * 16.0,
+                      right: 16,
+                    ),
+                    leading: Icon(
+                      item.e.children.isEmpty
+                          ? Icons.article_outlined
+                          : Icons.folder_outlined,
+                      size: 18,
+                    ),
+                    title: Text(
+                      item.e.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: pageIndex == null
+                        ? null
+                        : () {
+                            Navigator.pop(context);
+                            if (!c.jumpToPdfPage(assetId, pageIndex)) {
+                              _toast('That page isn’t in this canvas');
+                            }
+                          },
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _showBookmarks() async {
     final c = _controller!;
     await showAdaptiveMenu<void>(
@@ -2834,6 +3371,125 @@ class _CanvasScreenState extends State<CanvasScreen>
     );
   }
 
+  /// Gathers every piece of media this canvas references, from any source
+  /// (recordings, attachment records, PDF-backed pages, on-page images/chips),
+  /// deduped by asset so a multi-page PDF or a twice-used asset lists once.
+  List<_MediaEntry> _collectMedia(CanvasController c) {
+    // Pre-scan pages so recordings/attachments know whether they already have
+    // an on-canvas icon (→ "Find on canvas" vs "Add to canvas").
+    final firstPageOf = <String, String>{};
+    for (final pl in c.layout.pages) {
+      final page = c.pages[pl.pageId];
+      if (page == null) continue;
+      final src = page.source;
+      if (src != null) firstPageOf.putIfAbsent(src.assetId, () => pl.pageId);
+      for (final el in page.objects) {
+        if (el is ImageElement) {
+          firstPageOf.putIfAbsent(el.assetId, () => pl.pageId);
+        } else if (el is AttachmentElement) {
+          firstPageOf.putIfAbsent(el.assetId, () => pl.pageId);
+        }
+      }
+    }
+
+    final entries = <_MediaEntry>[];
+    final seen = <String>{};
+    // Recordings (voice + imported audio) are the canonical audio items.
+    for (final rec in c.canvas.recordings) {
+      entries.add(_MediaEntry(
+        kind: _MediaKind.audio,
+        name: rec.name,
+        assetId: rec.assetId,
+        mime: 'audio/mp4',
+        recording: rec,
+        pageId: firstPageOf[rec.assetId],
+      ));
+      seen.add(rec.assetId);
+    }
+    // Explicit attachment records (PDFs added "as attachment", future files).
+    for (final att in c.canvas.attachments) {
+      if (!seen.add(att.assetId)) continue;
+      entries.add(_MediaEntry(
+        kind: _mediaKindFromMime(att.mime),
+        name: att.name,
+        assetId: att.assetId,
+        mime: att.mime,
+        attachment: att,
+        pageId: firstPageOf[att.assetId],
+      ));
+    }
+    // Media drawn on pages: PDF-backed pages, images, and attachment chips not
+    // already covered above.
+    for (final pl in c.layout.pages) {
+      final page = c.pages[pl.pageId];
+      if (page == null) continue;
+      final src = page.source;
+      if (src != null && seen.add(src.assetId)) {
+        entries.add(_MediaEntry(
+          kind: _MediaKind.pdf,
+          name: 'PDF (view)',
+          assetId: src.assetId,
+          mime: 'application/pdf',
+          pageId: pl.pageId,
+          pdfView: true,
+        ));
+      }
+      for (final el in page.objects) {
+        if (el is ImageElement && seen.add(el.assetId)) {
+          entries.add(_MediaEntry(
+            kind: _MediaKind.image,
+            name: 'Image',
+            assetId: el.assetId,
+            mime: 'image/*',
+            pageId: pl.pageId,
+          ));
+        } else if (el is AttachmentElement && seen.add(el.assetId)) {
+          entries.add(_MediaEntry(
+            kind: _mediaKindFromMime(el.mime),
+            name: el.name,
+            assetId: el.assetId,
+            mime: el.mime,
+            pageId: pl.pageId,
+          ));
+        }
+      }
+    }
+    return entries;
+  }
+
+  String _mediaSubtitle(_MediaEntry e) {
+    if (e.recording != null && e.recording!.durationMs > 0) {
+      return _fmtDuration(Duration(milliseconds: e.recording!.durationMs));
+    }
+    switch (e.kind) {
+      case _MediaKind.audio:
+        return 'Audio';
+      case _MediaKind.image:
+        return 'Image';
+      case _MediaKind.pdf:
+        return e.pdfView ? 'PDF · in pages' : 'PDF';
+      case _MediaKind.video:
+        return 'Video';
+      case _MediaKind.other:
+        return 'File';
+    }
+  }
+
+  /// Opens an asset externally (OpenFilex), inferring the type from the
+  /// extension when the mime is a wildcard placeholder.
+  Future<void> _openMediaExternally(_MediaEntry e) async {
+    final f = _service.assetFile(widget.canvas, e.assetId);
+    if (!await f.exists()) {
+      _toast('File not available yet (still syncing?)');
+      return;
+    }
+    final type = e.mime.contains('*') ? null : e.mime;
+    OpenFilex.open(f.path, type: type);
+  }
+
+  /// The Attachments sheet — now an aggregate of ALL media on the canvas
+  /// (recordings, imported audio, attachment files, PDFs, and on-page images),
+  /// each with a kind-appropriate primary tap and action menu.
   Future<void> _showAttachments() async {
     final c = _controller!;
     await showAdaptiveMenu<void>(
@@ -2844,7 +3500,7 @@ class _CanvasScreenState extends State<CanvasScreen>
         child: ListenableBuilder(
           listenable: c,
           builder: (context, _) {
-            final items = c.canvas.attachments;
+            final items = _collectMedia(c);
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -2853,7 +3509,7 @@ class _CanvasScreenState extends State<CanvasScreen>
                 if (items.isEmpty)
                   const Padding(
                     padding: EdgeInsets.all(24),
-                    child: Text('No attachments yet'),
+                    child: Text('No media on this canvas yet'),
                   )
                 else
                   Flexible(
@@ -2861,55 +3517,109 @@ class _CanvasScreenState extends State<CanvasScreen>
                       shrinkWrap: true,
                       itemCount: items.length,
                       itemBuilder: (context, i) {
-                        final att = items[i];
-                        final isPdf = att.mime == 'application/pdf';
+                        final e = items[i];
                         return ListTile(
-                          leading: Icon(
-                            isPdf
-                                ? Icons.picture_as_pdf_outlined
-                                : Icons.attach_file,
-                          ),
-                          title: Text(att.name),
+                          leading: Icon(_mediaKindIcon(e.kind)),
+                          title: Text(e.name),
+                          subtitle: Text(_mediaSubtitle(e)),
+                          onTap: () async {
+                            if (e.recording != null) {
+                              Navigator.pop(context);
+                              setState(() => _audioPlayerOpen = true);
+                              await _playRecording(c, e.recording!);
+                            } else if (e.kind == _MediaKind.video) {
+                              Navigator.pop(context);
+                              await _openVideoPlayer(e.assetId, e.name);
+                            } else if (e.pageId != null) {
+                              Navigator.pop(context);
+                              c.jumpToPage(e.pageId!);
+                            } else {
+                              await _openMediaExternally(e);
+                            }
+                          },
                           trailing: PopupMenuButton<String>(
                             onSelected: (action) async {
-                              if (action == 'open') {
-                                final f = _service.assetFile(
-                                  widget.canvas,
-                                  att.assetId,
-                                );
-                                if (await f.exists()) {
-                                  OpenFilex.open(f.path, type: att.mime);
-                                }
-                              } else if (action == 'insert' && isPdf) {
-                                Navigator.pop(context);
-                                final sizes = await c.renderCache.pdfPageSizes(
-                                  _service
-                                      .assetFile(widget.canvas, att.assetId)
-                                      .path,
-                                );
-                                c.insertPdfPages(
-                                  att.assetId,
-                                  sizes,
-                                  InsertPosition.end,
-                                );
-                              } else if (action == 'remove') {
-                                c.removeAttachment(att);
+                              switch (action) {
+                                case 'play':
+                                  Navigator.pop(context);
+                                  setState(() => _audioPlayerOpen = true);
+                                  await _playRecording(c, e.recording!);
+                                case 'play_video':
+                                  Navigator.pop(context);
+                                  await _openVideoPlayer(e.assetId, e.name);
+                                case 'jump':
+                                  Navigator.pop(context);
+                                  c.jumpToPage(e.pageId!);
+                                case 'add_to_canvas':
+                                  Navigator.pop(context);
+                                  c.addAttachmentChip(e.assetId, e.name, e.mime);
+                                  _toast('Added "${e.name}" to the canvas');
+                                case 'open':
+                                  await _openMediaExternally(e);
+                                case 'insert':
+                                  Navigator.pop(context);
+                                  final sizes =
+                                      await c.renderCache.pdfPageSizes(
+                                    _service
+                                        .assetFile(widget.canvas, e.assetId)
+                                        .path,
+                                  );
+                                  c.insertPdfPages(
+                                    e.assetId,
+                                    sizes,
+                                    InsertPosition.end,
+                                  );
+                                case 'rename':
+                                  Navigator.pop(context);
+                                  await _renameRecording(c, e.recording!);
+                                case 'remove':
+                                  if (e.recording != null) {
+                                    c.deleteRecording(e.recording!);
+                                  } else if (e.attachment != null) {
+                                    c.removeAttachment(e.attachment!);
+                                  }
                               }
                             },
                             itemBuilder: (context) => [
+                              if (e.recording != null)
+                                const PopupMenuItem(
+                                  value: 'play',
+                                  child: Text('Play'),
+                                ),
+                              if (e.kind == _MediaKind.video)
+                                const PopupMenuItem(
+                                  value: 'play_video',
+                                  child: Text('Play'),
+                                ),
+                              if (e.pageId != null)
+                                const PopupMenuItem(
+                                  value: 'jump',
+                                  child: Text('Find on canvas'),
+                                ),
+                              if (e.pageId == null)
+                                const PopupMenuItem(
+                                  value: 'add_to_canvas',
+                                  child: Text('Add to canvas'),
+                                ),
                               const PopupMenuItem(
                                 value: 'open',
                                 child: Text('Open'),
                               ),
-                              if (isPdf)
+                              if (e.kind == _MediaKind.pdf && !e.pdfView)
                                 const PopupMenuItem(
                                   value: 'insert',
                                   child: Text('Insert with view'),
                                 ),
-                              const PopupMenuItem(
-                                value: 'remove',
-                                child: Text('Remove'),
-                              ),
+                              if (e.recording != null)
+                                const PopupMenuItem(
+                                  value: 'rename',
+                                  child: Text('Rename'),
+                                ),
+                              if (e.recording != null || e.attachment != null)
+                                const PopupMenuItem(
+                                  value: 'remove',
+                                  child: Text('Remove'),
+                                ),
                             ],
                           ),
                         );
@@ -3201,6 +3911,10 @@ class _CanvasScreenState extends State<CanvasScreen>
         return tbBtn(Icons.grid_view_outlined, 'Pages', _showNavigator);
       case 'bookmarks':
         return tbBtn(Icons.bookmark_border, 'Bookmarks', _showBookmarks);
+      case 'contents':
+        return tbBtn(Icons.toc, 'Contents (PDF)', _showPdfOutline);
+      case 'find':
+        return tbBtn(Icons.search, 'Find in canvas', _openFind);
       case 'attachments':
         return tbBtn(Icons.attach_file, 'Attachments', _showAttachments);
       case 'page_settings':
@@ -3651,6 +4365,26 @@ class _CanvasScreenState extends State<CanvasScreen>
                                 ),
                                 (r) => r..onDoubleTapDown = _onDoubleTapDown,
                               ),
+                        // Text tool: a finger long-press over PDF text selects a
+                        // word; dragging extends it. Present only in the text
+                        // tool + touch, so it never competes with drawing (pen)
+                        // or a quick finger drag (which still pans/scrolls).
+                        if (c.tool == CanvasTool.text)
+                          LongPressGestureRecognizer:
+                              GestureRecognizerFactoryWithHandlers<
+                                LongPressGestureRecognizer
+                              >(
+                                () => LongPressGestureRecognizer(
+                                  supportedDevices: {PointerDeviceKind.touch},
+                                ),
+                                (r) => r
+                                  ..onLongPressStart = (d) {
+                                    _onSelectStart(d.localPosition);
+                                  }
+                                  ..onLongPressMoveUpdate = (d) {
+                                    _onSelectUpdate(d.localPosition);
+                                  },
+                              ),
                       },
                       child: Stack(
                         children: [
@@ -3679,15 +4413,13 @@ class _CanvasScreenState extends State<CanvasScreen>
                 // this area is shared). Wrapped in an opaque Listener so taps on
                 // the whole card — including gaps between its buttons — are
                 // absorbed and never reach the canvas below.
-                Positioned(
-                  top: 8,
-                  left: 0,
-                  right: 0,
+                Positioned.fill(
                   child: ValueListenableBuilder<bool>(
                     valueListenable: c.isRecordingAudioNotifier,
                     builder: (context, recording, _) => recording
-                        ? Align(
-                            alignment: Alignment.topCenter,
+                        ? _DraggableFloatingBar(
+                            initialAlignment: Alignment.topCenter,
+                            margin: const EdgeInsets.only(top: 8),
                             child: _absorbTaps(
                               _RecordingBar(
                                 startedAt: c.audioRecordingStartedAt,
@@ -3701,12 +4433,8 @@ class _CanvasScreenState extends State<CanvasScreen>
                 ),
                 // Floating audio player (replaces the Recordings sheet).
                 if (_audioPlayerOpen)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 12,
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
+                  Positioned.fill(
+                    child: _DraggableFloatingBar(
                       child: _absorbTaps(
                         _AudioPlayerBar(
                           controller: c,
@@ -3718,16 +4446,26 @@ class _CanvasScreenState extends State<CanvasScreen>
                       ),
                     ),
                   ),
+                // Floating video player.
+                if (_videoAssetId != null)
+                  Positioned.fill(
+                    child: _DraggableFloatingBar(
+                      initialAlignment: Alignment.center,
+                      child: _absorbTaps(
+                        _VideoPlayerBar(
+                          controller: c,
+                          name: _videoName ?? 'Video',
+                          onClose: _closeVideoPlayer,
+                        ),
+                      ),
+                    ),
+                  ),
                 // Floating read-aloud (TTS) bar.
                 ValueListenableBuilder<bool>(
                   valueListenable: c.readAloudActive,
                   builder: (context, active, _) => active
-                      ? Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 12,
-                          child: Align(
-                            alignment: Alignment.bottomCenter,
+                      ? Positioned.fill(
+                          child: _DraggableFloatingBar(
                             child: _absorbTaps(
                               _ReaderBar(
                                 controller: c,
@@ -3738,6 +4476,56 @@ class _CanvasScreenState extends State<CanvasScreen>
                         )
                       : const SizedBox.shrink(),
                 ),
+                // PDF text-selection action bar — shown while a selection
+                // exists (finger long-press in the text tool). Copy / Search /
+                // dismiss. Above the canvas input layer + absorbs its own taps.
+                if (_pdfSelText.isNotEmpty)
+                  Positioned(
+                    top: 8,
+                    left: 0,
+                    right: 0,
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: _absorbTaps(
+                        _PdfSelectionActionBar(
+                          onCopy: () {
+                            Clipboard.setData(ClipboardData(text: _pdfSelText));
+                            _toast('Copied');
+                            _clearPdfSelection();
+                          },
+                          onSearch: () {
+                            _openUrl(
+                              'https://www.google.com/search?q=${Uri.encodeComponent(_pdfSelText)}',
+                            );
+                            _clearPdfSelection();
+                          },
+                          onLink: _linkPdfSelection,
+                          onClose: _clearPdfSelection,
+                        ),
+                      ),
+                    ),
+                  ),
+                // In-canvas find bar (typed + PDF text).
+                if (_findOpen)
+                  Positioned(
+                    top: 8,
+                    left: 0,
+                    right: 0,
+                    child: Align(
+                      alignment: Alignment.topCenter,
+                      child: _absorbTaps(
+                        _FindBar(
+                          controller: _findController,
+                          matchCount: _findMatches.length,
+                          currentIndex: _findIndex,
+                          onChanged: _runFind,
+                          onNext: () => _findJump(1),
+                          onPrev: () => _findJump(-1),
+                          onClose: _closeFind,
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
           );
@@ -4178,6 +4966,120 @@ class _ToolOptionsPanel extends StatelessWidget {
 // _HintRow, _SelAction, _ToggleChip, _ColorDot, _WheelDot now live in
 // canvas_toolbar/tool_option_rows.dart (private to that file).
 
+/// Wraps a floating canvas bar (audio player, recorder, reader, video player)
+/// so the user can reposition it by dragging a small grip handle. Only the
+/// handle initiates the drag — never the bar body — so the bar's own controls
+/// (scrubber slider, buttons) keep working. It rests at [initialAlignment]
+/// within the canvas area and clamps so it can't be dragged fully off-screen.
+/// Placed as a `Positioned.fill` child of the canvas Stack; the empty space
+/// around the bar stays click-through because the Stack only hit-tests the bar
+/// and its handle.
+class _DraggableFloatingBar extends StatefulWidget {
+  final Widget child;
+  final Alignment initialAlignment;
+  final EdgeInsets margin;
+  const _DraggableFloatingBar({
+    required this.child,
+    this.initialAlignment = Alignment.bottomCenter,
+    this.margin = const EdgeInsets.all(12),
+  });
+
+  @override
+  State<_DraggableFloatingBar> createState() => _DraggableFloatingBarState();
+}
+
+class _DraggableFloatingBarState extends State<_DraggableFloatingBar> {
+  // Position as an Alignment (-1..1 per axis): the Align moves the bar's REAL
+  // layout box (so hit-testing tracks the visuals) and -1..1 spans the whole
+  // canvas, so the bar reaches every edge.
+  late Alignment _align = widget.initialAlignment;
+  Size _lastSize = Size.zero; // canvas area
+  Size _barSize = Size.zero; // measured bar (handle + card + margin)
+  final _barKey = GlobalKey();
+
+  void _measure() {
+    final s = _barKey.currentContext?.size;
+    if (s != null && s != _barSize && mounted) setState(() => _barSize = s);
+  }
+
+  void _onDrag(PointerMoveEvent e) {
+    // Convert the finger's pixel delta to an alignment delta using the bar's
+    // measured size: the free travel per axis is (canvas − bar), which the
+    // alignment range of 2 spans — so the bar moves exactly as far as the
+    // finger (1:1), and clamping alignment to ±1 keeps it fully on-screen.
+    final travelX = _lastSize.width - _barSize.width;
+    final travelY = _lastSize.height - _barSize.height;
+    setState(() {
+      _align = Alignment(
+        travelX > 0
+            ? (_align.x + 2 * e.delta.dx / travelX).clamp(-1.0, 1.0)
+            : _align.x,
+        travelY > 0
+            ? (_align.y + 2 * e.delta.dy / travelY).clamp(-1.0, 1.0)
+            : _align.y,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        _lastSize = constraints.biggest;
+        return Align(
+          alignment: _align,
+          child: Padding(
+            key: _barKey,
+            padding: widget.margin,
+            // One opaque Listener around the WHOLE bar (handle + card, no seams)
+            // so NO pointer over the bar's bounds — pen included — falls through
+            // to the canvas behind it; the child's own buttons still get their
+            // taps (they're hit first as descendants).
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Drag handle. Raw pointer events (a Listener, not a pan
+                  // GestureDetector) so the move can't be lost to the canvas's
+                  // gesture arena.
+                  Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerMove: _onDrag,
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.move,
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: palette.surface2,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: palette.border),
+                        ),
+                        child: Icon(
+                          Icons.drag_indicator,
+                          size: 18,
+                          color: palette.textDim,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Flexible(child: widget.child),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Floating pill shown while a voice recording runs: a pulsing red dot, a live
 /// elapsed timer, and Stop / discard controls. Overlaid on the canvas so the
 /// user keeps drawing (audio-sync uses each stroke's createdAt).
@@ -4298,6 +5200,130 @@ String _fmtDuration(Duration d) {
   final m = d.inMinutes;
   final s = d.inSeconds % 60;
   return '$m:${s.toString().padLeft(2, '0')}';
+}
+
+/// A small "record actions" toggle for the media players. While active, ink
+/// drawn as the media plays is anchored to playback time (via a device-local
+/// anchor) and glows back in sync on replay. Tap toggles recording; long-press
+/// clears the saved track. [positionMs] reads the media's current position;
+/// [ensurePlaying] resumes playback so ink correlates as it advances.
+Widget _actionRecordButton(
+  BuildContext context,
+  AppPalette palette,
+  CanvasController controller,
+  String mediaId,
+  int Function() positionMs,
+  VoidCallback ensurePlaying,
+) {
+  // Rebuild on controller changes too, so hasActionTrack refreshes when a track
+  // is created/cleared (the video bar isn't otherwise wrapped in the controller).
+  return ListenableBuilder(
+    listenable: Listenable.merge(
+        [controller, controller.actionRecordingNotifier]),
+    builder: (context, _) {
+      final recording = controller.actionRecordingNotifier.value == mediaId;
+      final hasTrack = controller.hasActionTrack(mediaId);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Record: tap to record a pass; each pass ADDS to the track, so you
+          // can pause, seek, and layer in more writing at other spots.
+          IconButton(
+            icon: Icon(
+              recording ? Icons.stop_circle : Icons.gesture,
+              size: 20,
+              color: recording
+                  ? Colors.red
+                  : (hasTrack ? palette.accent : palette.textDim),
+            ),
+            visualDensity: VisualDensity.compact,
+            tooltip: recording
+                ? 'Stop recording actions'
+                : 'Record actions — draw while it plays (adds to what you have)',
+            onPressed: () {
+              if (recording) {
+                controller.stopActionRecording();
+              } else {
+                controller.startActionRecording(mediaId, positionMs());
+                ensurePlaying();
+              }
+            },
+          ),
+          // Clear: delete every recorded pass for this media.
+          if (hasTrack && !recording)
+            IconButton(
+              icon: Icon(Icons.delete_outline, size: 19, color: palette.textDim),
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Clear recorded actions',
+              onPressed: () => controller.clearActionTrack(mediaId),
+            ),
+        ],
+      );
+    },
+  );
+}
+
+/// The media families the Attachments sheet groups everything into.
+enum _MediaKind { audio, image, pdf, video, other }
+
+/// One row in the aggregated Attachments sheet — a single piece of media this
+/// canvas references, from any source (a voice/imported recording, an explicit
+/// attachment record, a PDF inserted as annotatable pages, or an image/chip
+/// placed on a page). Deduped by [assetId] so a multi-page PDF or a
+/// twice-referenced asset shows once.
+class _MediaEntry {
+  final _MediaKind kind;
+  final String name;
+  final String assetId;
+  final String mime;
+
+  /// Set when this row is a playable audio recording (voice or imported).
+  final AudioRecording? recording;
+
+  /// Set when this row is backed by an explicit [Attachment] record.
+  final Attachment? attachment;
+
+  /// A page this media sits on, so the row can "jump to" it. Null for
+  /// recordings and attachment-only records that aren't drawn on a page.
+  final String? pageId;
+
+  /// True when this is a PDF inserted as annotatable pages (vs. a PDF kept only
+  /// as an attachment file).
+  final bool pdfView;
+
+  const _MediaEntry({
+    required this.kind,
+    required this.name,
+    required this.assetId,
+    required this.mime,
+    this.recording,
+    this.attachment,
+    this.pageId,
+    this.pdfView = false,
+  });
+}
+
+_MediaKind _mediaKindFromMime(String mime) {
+  if (mime == 'application/pdf') return _MediaKind.pdf;
+  if (mime.startsWith('audio/')) return _MediaKind.audio;
+  if (mime.startsWith('image/')) return _MediaKind.image;
+  if (mime.startsWith('video/')) return _MediaKind.video;
+  return _MediaKind.other;
+}
+
+IconData _mediaKindIcon(_MediaKind kind) {
+  switch (kind) {
+    case _MediaKind.audio:
+      return Icons.audiotrack;
+    case _MediaKind.image:
+      return Icons.image_outlined;
+    case _MediaKind.pdf:
+      return Icons.picture_as_pdf_outlined;
+    case _MediaKind.video:
+      return Icons.movie_outlined;
+    case _MediaKind.other:
+      return Icons.attach_file;
+  }
 }
 
 /// The small, non-distracting floating audio player (replaces the old
@@ -4628,6 +5654,226 @@ class _ReaderBar extends StatelessWidget {
   }
 }
 
+/// The floating video player — a small movable panel showing the media_kit
+/// video surface with a scrubber, ±10s skips, play/pause, a cycling speed chip,
+/// and a close button. Mirrors [_AudioPlayerBar]'s look.
+class _VideoPlayerBar extends StatefulWidget {
+  final CanvasController controller;
+  final String name;
+  final VoidCallback onClose;
+
+  const _VideoPlayerBar({
+    required this.controller,
+    required this.name,
+    required this.onClose,
+  });
+
+  @override
+  State<_VideoPlayerBar> createState() => _VideoPlayerBarState();
+}
+
+class _VideoPlayerBarState extends State<_VideoPlayerBar> {
+  static const List<double> _speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+  /// User-resizable panel width; the 16:9 video scales with it.
+  double _width = 320;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final playback = widget.controller.videoPlayback;
+    return Material(
+      color: Colors.transparent,
+      child: SizedBox(
+        width: _width,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 8),
+          decoration: BoxDecoration(
+            color: palette.surface2,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: palette.border),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      widget.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: palette.textDim,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Close',
+                    onPressed: widget.onClose,
+                  ),
+                ],
+              ),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Video(
+                    controller: playback.controller,
+                    controls: NoVideoControls,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              ValueListenableBuilder<Duration>(
+                valueListenable: playback.duration,
+                builder: (context, dur, _) {
+                  final maxMs =
+                      dur.inMilliseconds <= 0 ? 1 : dur.inMilliseconds;
+                  return ValueListenableBuilder<Duration>(
+                    valueListenable: playback.position,
+                    builder: (context, pos, _) => Row(
+                      children: [
+                        Text(
+                          _fmtDuration(pos),
+                          style: TextStyle(fontSize: 11, color: palette.textDim),
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: pos.inMilliseconds
+                                .clamp(0, maxMs)
+                                .toDouble(),
+                            max: maxMs.toDouble(),
+                            onChanged: (v) => playback.seek(
+                              Duration(milliseconds: v.round()),
+                            ),
+                          ),
+                        ),
+                        Text(
+                          _fmtDuration(dur),
+                          style: TextStyle(fontSize: 11, color: palette.textDim),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.replay_10, size: 22),
+                    tooltip: 'Back 10s',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () =>
+                        playback.skip(const Duration(seconds: -10)),
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: playback.playing,
+                    builder: (context, playing, _) => IconButton(
+                      icon: Icon(
+                        playing ? Icons.pause : Icons.play_arrow,
+                        size: 26,
+                      ),
+                      color: palette.accent,
+                      tooltip: playing ? 'Pause' : 'Play',
+                      onPressed: playback.togglePlay,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.forward_10, size: 22),
+                    tooltip: 'Forward 10s',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => playback.skip(const Duration(seconds: 10)),
+                  ),
+                  const Spacer(),
+                  ValueListenableBuilder<double>(
+                    valueListenable: playback.speed,
+                    builder: (context, sp, _) => InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        final i = _speeds.indexOf(sp);
+                        final next = _speeds[(i + 1) % _speeds.length];
+                        playback.setSpeed(next);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        child: Text(
+                          '$sp×',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: palette.textDim,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  ValueListenableBuilder<String?>(
+                    valueListenable: playback.currentId,
+                    builder: (context, assetId, _) => assetId == null
+                        ? const SizedBox.shrink()
+                        : _actionRecordButton(
+                            context,
+                            palette,
+                            widget.controller,
+                            CanvasController.videoActionMediaId(assetId),
+                            () => playback.position.value.inMilliseconds,
+                            () {
+                              if (!playback.playing.value) {
+                                playback.togglePlay();
+                              }
+                            },
+                          ),
+                  ),
+                ],
+              ),
+              // Resize grip: drag horizontally to scale the panel (the 16:9
+              // video follows). Raw pointer events so it doesn't fight the
+              // canvas gesture arena.
+              Align(
+                alignment: Alignment.centerRight,
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerMove: (e) => setState(() {
+                    _width = (_width + e.delta.dx).clamp(220.0, 640.0);
+                  }),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.resizeLeftRight,
+                    child: Tooltip(
+                      message: 'Drag to resize',
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 2, right: 2),
+                        child: Icon(Icons.open_in_full,
+                            size: 15, color: palette.textDim),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _AudioPlayerBar extends StatelessWidget {
   final CanvasController controller;
 
@@ -4898,6 +6144,17 @@ class _AudioPlayerBar extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (current != null)
+                    _actionRecordButton(
+                      context,
+                      palette,
+                      controller,
+                      current.id,
+                      () => playback.position.value.inMilliseconds,
+                      () {
+                        if (!playback.playing.value) onPlay(current);
+                      },
+                    ),
                 ],
               ),
             ],
@@ -4910,6 +6167,176 @@ class _AudioPlayerBar extends StatelessWidget {
   static String _trimSpeed(double s) {
     final str = s.toStringAsFixed(2);
     return str.replaceAll(RegExp(r'\.?0+$'), '');
+  }
+}
+
+/// Ctrl+F-style find bar scoped to the current canvas (typed + PDF text): a
+/// query field, match counter, prev/next, and close. Matches are computed by
+/// the screen and highlighted via `pdfSelectionNotifier`.
+class _FindBar extends StatefulWidget {
+  final TextEditingController controller;
+  final int matchCount;
+  final int currentIndex;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onNext;
+  final VoidCallback onPrev;
+  final VoidCallback onClose;
+  const _FindBar({
+    required this.controller,
+    required this.matchCount,
+    required this.currentIndex,
+    required this.onChanged,
+    required this.onNext,
+    required this.onPrev,
+    required this.onClose,
+  });
+
+  @override
+  State<_FindBar> createState() => _FindBarState();
+}
+
+class _FindBarState extends State<_FindBar> {
+  final _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focus.requestFocus());
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    final hasQuery = widget.controller.text.trim().isNotEmpty;
+    final count = widget.matchCount == 0
+        ? (hasQuery ? 'No results' : '')
+        : '${widget.currentIndex + 1}/${widget.matchCount}';
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 380),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: palette.surface2,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: palette.border),
+          boxShadow: const [
+            BoxShadow(color: Color(0x22000000), blurRadius: 8, offset: Offset(0, 2)),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.search, size: 18, color: palette.textDim),
+            const SizedBox(width: 6),
+            // Flexible (not a fixed width) so the whole bar fits its 380 cap /
+            // the screen without a pixel overflow.
+            Flexible(
+              child: TextField(
+                controller: widget.controller,
+                focusNode: _focus,
+                onChanged: widget.onChanged,
+                textInputAction: TextInputAction.search,
+                onSubmitted: (_) => widget.onNext(),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  hintText: 'Find in canvas',
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(count,
+                style: TextStyle(fontSize: 12, color: palette.textDim)),
+            IconButton(
+              icon: const Icon(Icons.keyboard_arrow_up, size: 20),
+              tooltip: 'Previous',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.matchCount == 0 ? null : widget.onPrev,
+            ),
+            IconButton(
+              icon: const Icon(Icons.keyboard_arrow_down, size: 20),
+              tooltip: 'Next',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.matchCount == 0 ? null : widget.onNext,
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              tooltip: 'Close',
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.onClose,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The small action bar shown while PDF text is selected (finger long-press in
+/// the text tool): Copy / Search / dismiss. The selection itself lives on the
+/// screen and is highlighted by the main painter via `pdfSelectionNotifier`.
+class _PdfSelectionActionBar extends StatelessWidget {
+  final VoidCallback onCopy;
+  final VoidCallback onSearch;
+  final VoidCallback onLink;
+  final VoidCallback onClose;
+  const _PdfSelectionActionBar({
+    required this.onCopy,
+    required this.onSearch,
+    required this.onLink,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<AppPalette>()!;
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(
+          color: palette.surface2,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: palette.border),
+          boxShadow: const [
+            BoxShadow(color: Color(0x22000000), blurRadius: 8, offset: Offset(0, 2)),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton.icon(
+              onPressed: onCopy,
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text('Copy'),
+            ),
+            TextButton.icon(
+              onPressed: onSearch,
+              icon: const Icon(Icons.search, size: 16),
+              label: const Text('Search'),
+            ),
+            TextButton.icon(
+              onPressed: onLink,
+              icon: const Icon(Icons.link, size: 16),
+              label: const Text('Link'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              tooltip: 'Clear selection',
+              visualDensity: VisualDensity.compact,
+              onPressed: onClose,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

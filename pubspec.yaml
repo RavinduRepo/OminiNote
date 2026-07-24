@@ -58,6 +58,9 @@ dependencies:
   # Text-to-speech (read-aloud). Covers Android/iOS/macOS/Windows; it has no
   # Linux backend, so TtsService shells out to espeak/spd-say there.
   flutter_tts: ^4.2.4
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.7
 
 dev_dependencies:
   flutter_test:

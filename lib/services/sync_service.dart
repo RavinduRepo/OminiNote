@@ -571,7 +571,9 @@ class SyncService {
     try {
       final drive = DriveManager.forAccount(accountId);
       if (_isAsset(rel)) {
-        await drive.uploadBinary(rel, await file.readAsBytes());
+        // Streamed from disk (resumable) — never buffer a whole asset in
+        // heap; large PDFs/videos OOM'd here and froze the UI isolate.
+        await drive.uploadBinaryFile(rel, file);
       } else {
         // Bytes straight through — readAsString + uploadJson's utf8.encode
         // was a decode+re-encode round-trip of the whole file on the main
@@ -760,9 +762,9 @@ class SyncService {
         drive.recordRemote(rel, rf.id, rf.headRevisionId);
         return false;
       }
-      final bytes = await drive.downloadById(rf.id);
-      if (bytes == null) return false;
-      await NotebookService().writeAtomicBytesPublic(file, bytes);
+      // Streamed to disk (tmp + rename) — assets can be 100MB+; collecting
+      // the body into one heap buffer risks the same OOM as the upload side.
+      await drive.downloadToFile(rf.id, file);
       drive.recordRemote(rel, rf.id, rf.headRevisionId);
       return true;
     }
@@ -862,6 +864,11 @@ class SyncService {
       remoteText,
       ownedIds: ownedIds,
       excludeIds: localOnly,
+      // Pin every reconciled notebook explicitly to this account: a null
+      // target ("the default account") rebinds to a DIFFERENT account when a
+      // reinstalled device adds accounts in another order — which once made
+      // the real account's uploaded index drop those notebooks entirely.
+      stampSyncTarget: accountId,
     );
   }
 

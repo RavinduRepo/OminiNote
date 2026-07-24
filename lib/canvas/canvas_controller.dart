@@ -11,6 +11,7 @@ import '../models/link.dart';
 import '../models/shape_template.dart';
 import '../services/audio_playback_service.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/video_playback_service.dart';
 import '../services/link_service.dart';
 import '../services/notebook_service.dart';
 import '../services/page_clipboard.dart';
@@ -2378,9 +2379,27 @@ class CanvasController extends ChangeNotifier {
   /// BuildContext (a modal picker) and the screen's link-registration plumbing.
   VoidCallback? addTextLinkHook;
 
-  void deleteSelection() {
+  /// Set by the screen: when a delete would remove attachment/media chips, the
+  /// screen intercepts to ask whether to also remove the underlying media (the
+  /// recording/attachment) or just the on-canvas icon. Kept as a hook because
+  /// it needs a BuildContext (a confirm dialog). The hook is responsible for
+  /// actually performing the delete (via `deleteSelection(force: true)`) and,
+  /// if chosen, `deleteMediaCompletely`.
+  void Function(List<AttachmentElement> chips)? onDeleteMediaChips;
+
+  void deleteSelection({bool force = false}) {
     final pageId = selectionPageId;
     if (pageId == null || selection.isEmpty) return;
+    // Deleting a media chip: let the screen ask "also remove the file, or just
+    // the icon?" before we commit. `force` (cut, or the hook's own follow-up
+    // call) skips the prompt.
+    if (!force && onDeleteMediaChips != null) {
+      final chips = selection.whereType<AttachmentElement>().toList();
+      if (chips.isNotEmpty) {
+        onDeleteMediaChips!(chips);
+        return;
+      }
+    }
     final page = pages[pageId]!;
     final slots = <_ElSlot>[];
     // Standalone link markers among the deleted elements: deleting a marker
@@ -2423,7 +2442,22 @@ class CanvasController extends ChangeNotifier {
 
   void cutSelection() {
     copySelection();
-    deleteSelection();
+    deleteSelection(force: true);
+  }
+
+  /// Permanently removes the recording and/or attachment record backed by
+  /// [assetId] (the underlying media, not just its on-canvas chip). The chip
+  /// itself is removed separately via [deleteSelection]. The asset file is left
+  /// on disk (content-addressed, may be shared — matches image/recording delete).
+  void deleteMediaCompletely(String assetId) {
+    final hadRec = canvas.recordings.any((r) => r.assetId == assetId);
+    final hadAtt = canvas.attachments.any((a) => a.assetId == assetId);
+    if (!hadRec && !hadAtt) return;
+    canvas.recordings.removeWhere((r) => r.assetId == assetId);
+    canvas.attachments.removeWhere((a) => a.assetId == assetId);
+    _markDirty(const {}, structural: true);
+    unawaited(_flushThenReindex());
+    notifyListeners();
   }
 
   void duplicateSelection() {
@@ -3182,7 +3216,7 @@ class CanvasController extends ChangeNotifier {
   /// so the link is *seen* next to the ink it belongs to (and, being an
   /// ordinary text element, can be moved out of the way).
   TextElement? insertLinkItem(String pageId, String uri, String title,
-      {Rect? nearBounds}) {
+      {Rect? nearBounds, List<Rect>? pdfLinkRects}) {
     final page = pages[pageId];
     if (page == null) return null;
     TextRun run(String text, {String? link}) => TextRun(
@@ -3199,6 +3233,7 @@ class CanvasController extends ChangeNotifier {
       deviceId: SettingsService().deviceId,
       rect: const Rect.fromLTWH(0, 0, 10, 10),
       runs: [run(title, link: uri), run(' ')],
+      pdfLinkRects: pdfLinkRects,
       fontFamily: textFontFamily,
       fontSize: textFontSize,
       color: textColor,
@@ -4393,10 +4428,78 @@ class CanvasController extends ChangeNotifier {
     return _playback!;
   }
 
+  VideoPlaybackService? _videoPlayback;
+
+  /// Lazily-created video playback service (one media_kit Player per open
+  /// canvas). Created on first use so canvases with no video never touch the
+  /// plugin.
+  VideoPlaybackService get videoPlayback {
+    if (_videoPlayback == null) {
+      final v = VideoPlaybackService();
+      v.position.addListener(_updateVideoPlayhead);
+      v.currentId.addListener(_updateVideoPlayhead);
+      v.playing.addListener(_updateVideoPlayhead);
+      _videoPlayback = v;
+    }
+    return _videoPlayback!;
+  }
+
+  /// Imports a video file [srcPath] onto this canvas: stores it as a
+  /// content-addressed asset, records it as an [Attachment] (so it lists in the
+  /// Attachments sheet + syncs via canvas.json), and drops a tappable video
+  /// chip on the current page. Returns the attachment, or null on read failure.
+  Future<Attachment?> importVideo(String srcPath, String name) async {
+    final ext = srcPath.contains('.')
+        ? srcPath.split('.').last.toLowerCase()
+        : 'mp4';
+    final String assetId;
+    try {
+      final bytes = await File(srcPath).readAsBytes();
+      assetId = await _service.putAsset(canvas, bytes, ext);
+    } catch (_) {
+      return null;
+    }
+    final att = Attachment(
+      id: newModelId('att'),
+      name: name.isEmpty ? 'Video' : name,
+      assetId: assetId,
+      mime: _videoMimeForExt(ext),
+      addedAt: DateTime.now(),
+    );
+    addAttachment(att);
+    addAttachmentChip(assetId, att.name, att.mime);
+    return att;
+  }
+
+  String _videoMimeForExt(String ext) {
+    switch (ext) {
+      case 'mp4':
+      case 'm4v':
+        return 'video/mp4';
+      case 'mov':
+        return 'video/quicktime';
+      case 'webm':
+        return 'video/webm';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'avi':
+        return 'video/x-msvideo';
+      default:
+        return 'video/mp4';
+    }
+  }
+
   void _updateAudioPlayhead() {
     final p = _playback;
     if (p == null || !p.playing.value) {
       audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
+      return;
+    }
+    // No glow while a pass is being recorded — the glow is for replay.
+    if (actionRecordingNotifier.value != null) {
+      audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
       return;
     }
     final id = p.currentId.value;
@@ -4407,9 +4510,160 @@ class CanvasController extends ChangeNotifier {
         break;
       }
     }
-    final playhead = rec?.startedAt.add(p.position.value);
-    audioPlayheadNotifier.value = playhead;
-    if (playhead != null) _followAudioGlow(playhead);
+    if (rec == null) {
+      audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
+      return;
+    }
+    final segments = SettingsService().actionSegmentsFor(canvas.id, rec.id);
+    if (segments.isNotEmpty) {
+      // Explicit action passes recorded over this take (possibly imported):
+      // glow by segment mapping, including the take's own implicit span so the
+      // "drew while recording" glow is preserved alongside the added passes.
+      final all = [_implicitSegmentFor(rec), ...segments];
+      _applyActionGlow(all, p.position.value.inMilliseconds);
+    } else {
+      // Voice take with no added passes: the original wall-clock glow.
+      final playhead = rec.startedAt.add(p.position.value);
+      audioPlayheadNotifier.value = playhead;
+      actionGlowNotifier.value = null;
+      _followAudioGlow(playhead);
+    }
+  }
+
+  /// Media id used for a video's action-recording track.
+  static String videoActionMediaId(String assetId) => 'video:$assetId';
+
+  void _updateVideoPlayhead() {
+    final v = _videoPlayback;
+    if (v == null || !v.playing.value) {
+      if (v != null && v.currentId.value != null) {
+        audioPlayheadNotifier.value = null;
+        actionGlowNotifier.value = null;
+      }
+      return;
+    }
+    if (actionRecordingNotifier.value != null) {
+      audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
+      return;
+    }
+    final assetId = v.currentId.value;
+    if (assetId == null) return;
+    // Video has no wall-clock ink correlation, so it only glows after a
+    // "record actions" pass gives it segments.
+    final segments =
+        SettingsService().actionSegmentsFor(canvas.id, videoActionMediaId(assetId));
+    if (segments.isEmpty) {
+      audioPlayheadNotifier.value = null;
+      actionGlowNotifier.value = null;
+      return;
+    }
+    _applyActionGlow(segments, v.position.value.inMilliseconds);
+  }
+
+  // ── Action recording (glow ink drawn while a media plays) ──────────────
+
+  /// The media id ('rec…' or 'video:…') currently being action-recorded, or
+  /// null. Drives the "record actions" button state on the players.
+  final ValueNotifier<String?> actionRecordingNotifier = ValueNotifier(null);
+
+  /// Stroke ids to glow at the current media position (from action segments).
+  /// The painter merges this into its repaint listenable; null when idle.
+  final ValueNotifier<Set<String>?> actionGlowNotifier = ValueNotifier(null);
+
+  /// The in-progress pass's wall-clock + media start, while recording.
+  ({int ws, int ms})? _recSegment;
+
+  /// A voice take's implicit segment: its wall-clock span maps to media [0..dur].
+  ({int ws, int we, int ms}) _implicitSegmentFor(AudioRecording rec) {
+    final ws = rec.startedAt.millisecondsSinceEpoch;
+    return (ws: ws, we: ws + rec.durationMs, ms: 0);
+  }
+
+  /// Computes the glowing stroke ids for [positionMs] across [segments] and
+  /// pushes them to [actionGlowNotifier]; also gently follows them into view.
+  void _applyActionGlow(
+      List<({int ws, int we, int ms})> segments, int positionMs) {
+    final ids = <String>{};
+    StrokeElement? latest;
+    CanvasPage? latestPage;
+    for (final page in pages.values) {
+      for (final s in page.strokes) {
+        for (final seg in segments) {
+          final span = seg.we - seg.ws;
+          if (positionMs < seg.ms || positionMs > seg.ms + span) continue;
+          final wall = seg.ws + (positionMs - seg.ms);
+          if (strokeActiveAt(
+              s.createdAt, DateTime.fromMillisecondsSinceEpoch(wall))) {
+            ids.add(s.id);
+            if (latest == null || s.createdAt.isAfter(latest.createdAt)) {
+              latest = s;
+              latestPage = page;
+            }
+            break;
+          }
+        }
+      }
+    }
+    audioPlayheadNotifier.value = null;
+    actionGlowNotifier.value = ids.isEmpty ? null : ids;
+    if (latest != null && latestPage != null) {
+      final l = layout.layoutOf(latestPage.id);
+      if (l != null) {
+        ensureCanvasRectVisible(latest.bounds.shift(l.rect.topLeft), margin: 48);
+      }
+    }
+  }
+
+  /// True if [mediaId] has any recorded action segments on this device.
+  bool hasActionTrack(String mediaId) =>
+      SettingsService().hasActionSegments(canvas.id, mediaId);
+
+  /// Begins an action-recording pass for [mediaId] at media position
+  /// [positionMs] (kept — additive with any earlier passes). Forces 1× so the
+  /// wall-clock ↔ position mapping stays linear; glow is suppressed while
+  /// recording.
+  Future<void> startActionRecording(String mediaId, int positionMs) async {
+    _recSegment = (ws: DateTime.now().millisecondsSinceEpoch, ms: positionMs);
+    if (mediaId.startsWith('video:')) {
+      await _videoPlayback?.setSpeed(1.0);
+    } else {
+      await _playback?.setSpeed(1.0);
+    }
+    actionRecordingNotifier.value = mediaId;
+    audioPlayheadNotifier.value = null;
+    actionGlowNotifier.value = null;
+    notifyListeners();
+  }
+
+  /// Ends the pass, appending it to [mediaId]'s track (additive).
+  Future<void> stopActionRecording() async {
+    final mediaId = actionRecordingNotifier.value;
+    final seg = _recSegment;
+    actionRecordingNotifier.value = null;
+    _recSegment = null;
+    if (mediaId != null && seg != null) {
+      await SettingsService().addActionSegment(
+        canvas.id,
+        mediaId,
+        seg.ws,
+        DateTime.now().millisecondsSinceEpoch,
+        seg.ms,
+      );
+    }
+    notifyListeners();
+  }
+
+  /// Deletes ALL recorded action passes for [mediaId] (no more glow).
+  Future<void> clearActionTrack(String mediaId) async {
+    await SettingsService().clearActionSegments(canvas.id, mediaId);
+    if (actionRecordingNotifier.value == mediaId) {
+      actionRecordingNotifier.value = null;
+      _recSegment = null;
+    }
+    actionGlowNotifier.value = null;
+    notifyListeners();
   }
 
   // ── Connections: navigate-to-element landing flash ─────────────────────
@@ -4478,8 +4732,11 @@ class CanvasController extends ChangeNotifier {
 
   // ── Read-aloud (text-to-speech over typed + PDF text) ─────────────────
 
-  PdfTextCache? _pdfTextCache;
-  PdfTextCache get _pdfText => _pdfTextCache ??= PdfTextCache(assetFileOf);
+  /// Resolves an imported PDF page's text via pdfium (the already-open render
+  /// document) — fast, per-page, no second parse. Shared by read-aloud, text
+  /// selection, and find.
+  Future<PdfTextPage?> _resolvePdfText(String assetId, int pageIndex) =>
+      renderCache.pdfPageText(assetFileOf(assetId).path, pageIndex);
 
   TtsService? _tts;
 
@@ -4523,7 +4780,65 @@ class CanvasController extends ChangeNotifier {
   /// and everything downstream (ordering, sentence-splitting, the reader bar)
   /// works unchanged.
   List<PageTextSource> get _textSources =>
-      [const TypedTextSource(), PdfPageTextSource(_pdfText)];
+      [const TypedTextSource(), PdfPageTextSource(_resolvePdfText)];
+
+  /// Per-line PDF text of a PDF-backed page, each with its page-local rect
+  /// (scaled from the original PDF page to the normalized canvas page). Empty
+  /// for non-PDF pages and PDFs with no text layer (scanned). Used by the PDF
+  /// text-selection overlay.
+  Future<List<({String text, Rect rect})>> pdfLinesFor(String pageId) async {
+    final page = pages[pageId];
+    final src = page?.source;
+    if (page == null || src == null) return const [];
+    final pt = await _resolvePdfText(src.assetId, src.pageIndex);
+    if (pt == null || pt.lines.isEmpty) return const [];
+    final scale = pt.width > 0 ? page.width / pt.width : 1.0;
+    return [
+      for (final l in pt.lines)
+        if (l.text.trim().isNotEmpty)
+          (
+            text: l.text,
+            rect: Rect.fromLTRB(l.left * scale, l.top * scale, l.right * scale,
+                l.bottom * scale),
+          ),
+    ];
+  }
+
+  /// Per-word PDF text of a PDF-backed page (reading order) with page-local
+  /// rects, for word-level text selection. Empty for non-PDF / scanned pages.
+  Future<List<({String text, Rect rect})>> pdfWordsFor(String pageId) async {
+    final page = pages[pageId];
+    final src = page?.source;
+    if (page == null || src == null) return const [];
+    final pt = await _resolvePdfText(src.assetId, src.pageIndex);
+    if (pt == null || pt.words.isEmpty) return const [];
+    final scale = pt.width > 0 ? page.width / pt.width : 1.0;
+    return [
+      for (final w in pt.words)
+        (
+          text: w.text,
+          rect: Rect.fromLTRB(w.left * scale, w.top * scale, w.right * scale,
+              w.bottom * scale),
+        ),
+    ];
+  }
+
+  /// Warms the PDF text cache for every PDF-backed page in the background, so
+  /// the first text selection / find doesn't pay the extraction cost inline.
+  /// Cheap no-op once each asset is cached.
+  void warmPdfText() {
+    for (final pl in layout.pages) {
+      final src = pages[pl.pageId]?.source;
+      if (src == null) continue;
+      // Per-page + cached in RenderCache, so duplicate calls are no-ops.
+      unawaited(_resolvePdfText(src.assetId, src.pageIndex));
+    }
+  }
+
+  /// Current PDF text-selection / find highlight (page-local rects on a page).
+  /// The painter merges this into its repaint listenable; null when idle.
+  final ValueNotifier<({String pageId, List<Rect> rects})?>
+      pdfSelectionNotifier = ValueNotifier(null);
 
   /// Builds the flat, in-order list of sentences to read for the given scope.
   Future<List<ReadingUnit>> buildReadingUnits(
@@ -4734,6 +5049,10 @@ class CanvasController extends ChangeNotifier {
       canvas.recordings.add(rec);
       _markDirty(const {}, structural: true);
       unawaited(_flushThenReindex());
+      // Drop a tappable audio chip so the recording has an on-canvas presence
+      // (tapping it plays the take). Deleting the chip leaves the recording in
+      // the Attachments list; it can be re-added from there.
+      addAttachmentChip(assetId, rec.name, 'audio/mp4');
     } finally {
       try {
         await file.delete();
@@ -4741,6 +5060,66 @@ class CanvasController extends ChangeNotifier {
     }
     notifyListeners();
     return rec;
+  }
+
+  /// Imports an existing audio file [srcPath] as a recording on this canvas
+  /// (stored content-addressed like an in-app take, so it shows in the player
+  /// and syncs via canvas.json). [name] is the display label. The file's length
+  /// is probed so the scrubber is correct before first play. Returns the new
+  /// recording, or null if the file couldn't be read.
+  Future<AudioRecording?> importAudio(String srcPath, String name) async {
+    final ext = srcPath.contains('.')
+        ? srcPath.split('.').last.toLowerCase()
+        : 'm4a';
+    final String assetId;
+    try {
+      final bytes = await File(srcPath).readAsBytes();
+      assetId = await _service.putAsset(canvas, bytes, ext);
+    } catch (_) {
+      return null;
+    }
+    // Probe from the stored asset (a stable path) rather than the picked temp.
+    final probed =
+        await AudioPlaybackService.probeDuration(assetFileOf(assetId).path);
+    final rec = AudioRecording(
+      id: newModelId('rec'),
+      name: name.isEmpty ? 'Audio ${canvas.recordings.length + 1}' : name,
+      assetId: assetId,
+      // Imported audio has no correlated ink, so audio-sync glow won't apply
+      // (that's what the action-recording track is for); startedAt is only a
+      // placeholder anchor here.
+      startedAt: DateTime.now(),
+      durationMs: probed?.inMilliseconds ?? 0,
+      createdAt: DateTime.now(),
+    );
+    canvas.recordings.add(rec);
+    _markDirty(const {}, structural: true);
+    unawaited(_flushThenReindex());
+    // Drop a tappable audio chip (same rationale as a recorded take).
+    addAttachmentChip(assetId, rec.name, _audioMimeForExt(ext));
+    notifyListeners();
+    return rec;
+  }
+
+  /// Best-effort audio mime for a file extension — used only for the on-canvas
+  /// chip's glyph/open type; playback resolves the recording by asset id.
+  String _audioMimeForExt(String ext) {
+    switch (ext) {
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'm4a':
+      case 'aac':
+        return 'audio/mp4';
+      case 'wav':
+        return 'audio/wav';
+      case 'ogg':
+      case 'opus':
+        return 'audio/ogg';
+      case 'flac':
+        return 'audio/flac';
+      default:
+        return 'audio/mpeg';
+    }
   }
 
   /// Aborts an in-progress recording without saving anything.
@@ -4765,6 +5144,35 @@ class CanvasController extends ChangeNotifier {
     _markDirty(const {}, structural: true);
     notifyListeners();
     unawaited(_flushThenReindex());
+  }
+
+  /// The PDF asset id to show a table-of-contents for: the current page's PDF
+  /// if it's PDF-backed, else the first PDF-backed page in the canvas. Null when
+  /// the canvas has no imported PDF pages.
+  String? get outlinePdfAssetId {
+    final cur = currentPageLayout;
+    if (cur != null) {
+      final p = pages[cur.pageId];
+      if (p?.source != null) return p!.source!.assetId;
+    }
+    for (final pl in layout.pages) {
+      final p = pages[pl.pageId];
+      if (p?.source != null) return p!.source!.assetId;
+    }
+    return null;
+  }
+
+  /// Jumps to the canvas page rendering [assetId]'s [pageIndex]. Returns false
+  /// if no such page is in the canvas (e.g. that PDF page wasn't inserted).
+  bool jumpToPdfPage(String assetId, int pageIndex) {
+    for (final pl in layout.pages) {
+      final src = pages[pl.pageId]?.source;
+      if (src != null && src.assetId == assetId && src.pageIndex == pageIndex) {
+        jumpToPage(pl.pageId);
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Jumps to a bookmark's page (no-op if that page is gone).
@@ -5010,11 +5418,11 @@ class CanvasController extends ChangeNotifier {
     _saveTimer?.cancel();
     unawaited(_recorder?.dispose());
     unawaited(_playback?.dispose());
+    unawaited(_videoPlayback?.dispose());
     _saveReadingPosition();
     unawaited(_tts?.dispose());
-    _pdfTextCache?.clear();
     flushSaves();
-    renderCache.dispose();
+    renderCache.dispose(); // also clears the PDF text cache
     pictureCache.dispose();
     toolNotifier.dispose();
     toolOptionsOpenNotifier.dispose();
@@ -5024,6 +5432,9 @@ class CanvasController extends ChangeNotifier {
     clipboardNotifier.dispose();
     isRecordingAudioNotifier.dispose();
     audioPlayheadNotifier.dispose();
+    actionRecordingNotifier.dispose();
+    actionGlowNotifier.dispose();
+    pdfSelectionNotifier.dispose();
     _linkFlashTimer?.cancel();
     linkFlashNotifier.dispose();
     readAloudActive.dispose();

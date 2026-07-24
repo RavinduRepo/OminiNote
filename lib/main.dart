@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'screens/desktop_shell_screen.dart';
@@ -26,6 +27,9 @@ String? _initialDesktopOpen;
 void main(List<String> args) async {
   // Ensures hardware bindings are initialized for rendering
   WidgetsFlutterBinding.ensureInitialized();
+
+  // media_kit (video playback) needs a one-time native init before any Player.
+  MediaKit.ensureInitialized();
 
   // Desktop open-with: the OS may launch us with a file path or omninote:// URI
   // as a command-line argument (double-click a .omninote / tap a link).

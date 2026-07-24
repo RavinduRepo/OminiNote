@@ -1860,7 +1860,14 @@ class NotebookService {
       if (localOnly.contains(e.key)) continue;
       final json = e.value as Map<String, dynamic>;
       final target = (json['syncTarget'] as String?) ?? defaultAccountId;
-      if (target == accountId) filtered[e.key] = e.value;
+      if (target != accountId) continue;
+      // Stamp a null target explicitly in the UPLOADED copy (local file
+      // untouched): the filter just decided this entry is [accountId]'s, and
+      // writing that into the Drive copy stops a device with a different
+      // default account from silently rebinding the notebook on pull.
+      filtered[e.key] = json['syncTarget'] == null
+          ? (Map<String, dynamic>.from(json)..['syncTarget'] = accountId)
+          : e.value;
     }
     return jsonEncode(filtered);
   }

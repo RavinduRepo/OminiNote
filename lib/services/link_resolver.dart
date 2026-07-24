@@ -226,6 +226,8 @@ LinkEndpoint? endpointOfSearchResult(SearchResult r) {
         canvasId: r.canvas!.id,
       );
     case SearchKind.bookmark:
+    case SearchKind.thing:
+      // A content hit ("thing") links to its page, like a bookmark.
       if (r.section == null || r.canvas == null) return null;
       return LinkEndpoint(
         notebookId: r.notebook.id,

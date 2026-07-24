@@ -38,7 +38,9 @@ class CanvasPainter extends CustomPainter {
           repaint: Listenable.merge([
             controller,
             controller.audioPlayheadNotifier,
+            controller.actionGlowNotifier,
             controller.readAloudHighlightNotifier,
+            controller.pdfSelectionNotifier,
             controller.linkFlashNotifier,
           ]),
         );
@@ -190,6 +192,28 @@ class CanvasPainter extends CustomPainter {
       }
     }
 
+    // Action-recording replay: glow the strokes recorded at the current media
+    // position (id set computed by the controller from action segments).
+    final actionGlow = controller.actionGlowNotifier.value;
+    if (actionGlow != null) {
+      for (final s in page.strokes) {
+        if (s.id == skipped) continue;
+        if (actionGlow.contains(s.id)) _paintAudioGlow(canvas, s);
+      }
+    }
+
+    // PDF text selection / find highlight: page-local rects behind the text.
+    final pdfSel = controller.pdfSelectionNotifier.value;
+    if (pdfSel != null && pdfSel.pageId == page.id) {
+      final hl = Paint()..color = accentColor.withValues(alpha: 0.30);
+      for (final r in pdfSel.rects) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(r, const Radius.circular(2)),
+          hl,
+        );
+      }
+    }
+
     // Connections landing flash: halo the elements an internal link led to.
     // Like the audio glow — outside the picture cache, no-op when idle.
     final flash = controller.linkFlashNotifier.value;
@@ -294,8 +318,26 @@ class CanvasPainter extends CustomPainter {
     }
   }
 
-  /// The attachment chip: rounded rect, a small "document" glyph with a
-  /// folded corner, and the file name. Tap-to-open is handled by the screen.
+  /// Icon + tint for an attachment chip, chosen by the file's mime family so
+  /// audio/image/video/PDF/other chips are distinguishable at a glance.
+  (IconData, Color) _attachmentGlyph(String mime) {
+    if (mime == 'application/pdf') {
+      return (Icons.picture_as_pdf, const Color(0xFFD9534F));
+    }
+    if (mime.startsWith('audio/')) {
+      return (Icons.audiotrack, const Color(0xFF7E57C2));
+    }
+    if (mime.startsWith('image/')) {
+      return (Icons.image, const Color(0xFF2E9E8F));
+    }
+    if (mime.startsWith('video/')) {
+      return (Icons.movie, const Color(0xFF3F51B5));
+    }
+    return (Icons.insert_drive_file, const Color(0xFF8A8A8A));
+  }
+
+  /// The attachment chip: rounded rect, a media glyph tinted by file kind, and
+  /// the file name. Tap-to-open/play is handled by the screen.
   void _paintAttachment(Canvas canvas, AttachmentElement el) {
     final r = el.rect;
     canvas.save();
@@ -315,29 +357,27 @@ class CanvasPainter extends CustomPainter {
         ..color = const Color(0xFFB9B2A4),
     );
 
-    // Document glyph with folded corner, sized to the chip height.
+    // Media glyph — the icon depends on the file kind (audio/image/video/pdf/
+    // file) — sized to the chip height and painted from the icon font.
+    final (glyphIcon, glyphColor) = _attachmentGlyph(el.mime);
     final gh = r.height * 0.62;
-    final gw = gh * 0.78;
     final gx = r.left + r.height * 0.22;
-    final gy = r.center.dy - gh / 2;
-    const fold = 0.32;
-    final doc = Path()
-      ..moveTo(gx, gy)
-      ..lineTo(gx + gw * (1 - fold), gy)
-      ..lineTo(gx + gw, gy + gh * fold)
-      ..lineTo(gx + gw, gy + gh)
-      ..lineTo(gx, gy + gh)
-      ..close();
-    canvas.drawPath(doc, Paint()..color = const Color(0xFFD9534F));
-    final foldPath = Path()
-      ..moveTo(gx + gw * (1 - fold), gy)
-      ..lineTo(gx + gw * (1 - fold), gy + gh * fold)
-      ..lineTo(gx + gw, gy + gh * fold)
-      ..close();
-    canvas.drawPath(foldPath, Paint()..color = const Color(0xFFB23C38));
+    final glyph = TextPainter(
+      text: TextSpan(
+        text: String.fromCharCode(glyphIcon.codePoint),
+        style: TextStyle(
+          fontFamily: glyphIcon.fontFamily,
+          package: glyphIcon.fontPackage,
+          fontSize: gh,
+          color: glyphColor,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    glyph.paint(canvas, Offset(gx, r.center.dy - glyph.height / 2));
 
     // File name, ellipsized to the remaining width.
-    final textLeft = gx + gw + r.height * 0.2;
+    final textLeft = gx + glyph.width + r.height * 0.2;
     final maxW = r.right - textLeft - 8;
     if (maxW > 12) {
       final tp = TextPainter(
@@ -432,6 +472,19 @@ class CanvasPainter extends CustomPainter {
   }
 
   void _paintText(Canvas canvas, TextElement el) {
+    // Linked-PDF-text highlight: a distinct-colour box over the exact words this
+    // marker links (the words' absolute page-local rects, not the marker chip's
+    // rect). Recorded into the page picture, so it costs nothing per frame.
+    final linkRects = el.pdfLinkRects;
+    if (linkRects != null) {
+      final hl = Paint()..color = kLinkColor.withValues(alpha: 0.22);
+      for (final r in linkRects) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(r, const Radius.circular(2)),
+          hl,
+        );
+      }
+    }
     final painter = TextPainter(
       text: textSpanForElement(el),
       textDirection: TextDirection.ltr,

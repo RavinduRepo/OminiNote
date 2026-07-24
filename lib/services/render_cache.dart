@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:pdfrx/pdfrx.dart';
 
+import 'pdf_text_extractor.dart';
+
 /// Renders pages of imported PDFs to [ui.Image]s and caches them, and decodes
 /// raster image assets. pdfrx is used purely as a *renderer* here — the app
 /// owns the viewport (spec §6), so `PdfViewer` and its gestures are not used.
@@ -17,6 +19,8 @@ class RenderCache {
   final void Function() onUpdated;
 
   final _docs = <String, Future<PdfDocument>>{};
+  final _outlines = <String, Future<List<PdfOutlineEntry>>>{};
+  final _pdfText = <String, Future<PdfTextPage?>>{};
   // Insertion-ordered map used as an LRU (re-insert on touch, evict oldest).
   final _pdfImages = <String, _CachedPdfImage>{};
   final _pdfPending = <String>{};
@@ -35,6 +39,100 @@ class RenderCache {
   Future<List<ui.Size>> pdfPageSizes(String path) async {
     final doc = await _open(path);
     return [for (final p in doc.pages) ui.Size(p.width, p.height)];
+  }
+
+  /// The PDF's document outline (table of contents) as an app-level tree, with
+  /// pdfrx's 1-based destination page numbers converted to 0-based page
+  /// indices. Cached per path; an outline-less or unreadable PDF yields `[]`.
+  Future<List<PdfOutlineEntry>> pdfOutline(String path) =>
+      _outlines.putIfAbsent(path, () async {
+        try {
+          final doc = await _open(path);
+          return _mapOutline(await doc.loadOutline());
+        } catch (_) {
+          return const [];
+        }
+      });
+
+  static List<PdfOutlineEntry> _mapOutline(List<PdfOutlineNode> nodes) => [
+        for (final n in nodes)
+          PdfOutlineEntry(
+            title: n.title,
+            pageIndex: n.dest != null ? n.dest!.pageNumber - 1 : null,
+            children: _mapOutline(n.children),
+          ),
+      ];
+
+  /// One PDF page's text from **pdfium's own text layer** — reusing the already-
+  /// open render document (no second full-document parse, no whole-file read, no
+  /// main-thread byte copy), on pdfium's background worker, per page. Rects are
+  /// converted from pdfium's bottom-left origin to the app's top-left origin (in
+  /// PDF points); callers scale to the canvas page. Cached per (path, pageIndex);
+  /// a page with no text layer (scanned) yields empty lines/words. Null on error.
+  Future<PdfTextPage?> pdfPageText(String path, int pageIndex) {
+    final key = '$path#$pageIndex';
+    return _pdfText.putIfAbsent(key, () async {
+      try {
+        final doc = await _open(path);
+        if (pageIndex < 0 || pageIndex >= doc.pages.length) return null;
+        final page = doc.pages[pageIndex];
+        final ph = page.height; // page height in points (for the Y-flip)
+        final st = await page.loadStructuredText();
+        final lines = <PdfLineText>[];
+        final words = <PdfWordText>[];
+        for (final f in st.fragments) {
+          final b = f.bounds;
+          if (f.text.trim().isNotEmpty) {
+            lines.add(PdfLineText(
+                f.text, b.left, ph - b.top, b.right, ph - b.bottom));
+          }
+          _splitWords(f, ph, words);
+        }
+        return PdfTextPage(page.width, page.height, lines, words);
+      } catch (_) {
+        return null;
+      }
+    });
+  }
+
+  /// Splits a fragment into words on whitespace, each word's rect = the union of
+  /// its (non-space) character boxes, converted to top-left origin.
+  static void _splitWords(
+      PdfPageTextFragment f, double ph, List<PdfWordText> out) {
+    final text = f.text;
+    final rects = f.charRects;
+    final n = text.length < rects.length ? text.length : rects.length;
+    var start = -1;
+    double wl = 0, wr = 0, wt = 0, wb = 0;
+    void flush(int endExclusive) {
+      if (start < 0) return;
+      final w = text.substring(start, endExclusive).trim();
+      if (w.isNotEmpty) {
+        out.add(PdfWordText(w, wl, ph - wt, wr, ph - wb));
+      }
+      start = -1;
+    }
+
+    for (var i = 0; i < n; i++) {
+      if (text[i].trim().isEmpty) {
+        flush(i);
+        continue;
+      }
+      final r = rects[i];
+      if (start < 0) {
+        start = i;
+        wl = r.left;
+        wr = r.right;
+        wt = r.top;
+        wb = r.bottom;
+      } else {
+        if (r.left < wl) wl = r.left;
+        if (r.right > wr) wr = r.right;
+        if (r.top > wt) wt = r.top;
+        if (r.bottom < wb) wb = r.bottom;
+      }
+    }
+    flush(n);
   }
 
   static double _bucketFor(double scale) => _scaleBuckets.firstWhere(
@@ -148,6 +246,8 @@ class RenderCache {
       doc.then((d) => d.dispose()).catchError((_) {});
     }
     _docs.clear();
+    _outlines.clear();
+    _pdfText.clear();
   }
 }
 
@@ -155,4 +255,17 @@ class _CachedPdfImage {
   final ui.Image image;
   final double bucket;
   _CachedPdfImage(this.image, this.bucket);
+}
+
+/// One node of a PDF's table of contents, flattened from pdfrx's outline. A
+/// null [pageIndex] means the entry has no jump destination (a plain header).
+class PdfOutlineEntry {
+  final String title;
+  final int? pageIndex; // 0-based into the PDF
+  final List<PdfOutlineEntry> children;
+  const PdfOutlineEntry({
+    required this.title,
+    required this.pageIndex,
+    required this.children,
+  });
 }
