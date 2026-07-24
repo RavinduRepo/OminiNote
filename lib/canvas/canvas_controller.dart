@@ -3266,6 +3266,100 @@ class CanvasController extends ChangeNotifier {
     return el;
   }
 
+  TextRun _linkRun(String text, {String? link}) => TextRun(
+        text: text,
+        fontSize: textFontSize,
+        bold: false,
+        italic: false,
+        color: textColor,
+        fontFamily: textFontFamily,
+        link: link,
+      );
+
+  /// Drops a **PDF-text link anchor** on [pageId]: a highlight-only element over
+  /// the selected words' [rects] (their absolute page-local rects) whose visible
+  /// body IS the highlight — tapping it navigates the link, with no chip box
+  /// beneath (unlike [insertLinkItem]). Starts unlinked when [uri] is null (just
+  /// a highlight); [setPdfAnchorLink] fills the link in once a target is
+  /// connected. A link run makes it a standalone marker, so removing the
+  /// connection deletes it. One undoable op; returns the created element.
+  TextElement? insertPdfLinkAnchor(String pageId, List<Rect> rects,
+      {String? uri, String title = 'Linked'}) {
+    final page = pages[pageId];
+    if (page == null || rects.isEmpty) return null;
+    var union = rects.first;
+    for (final r in rects.skip(1)) {
+      union = union.expandToInclude(r);
+    }
+    final el = TextElement(
+      id: newModelId('el'),
+      deviceId: SettingsService().deviceId,
+      rect: union, // bounds match the highlight (the text itself isn't painted)
+      runs: uri == null
+          ? [_linkRun(' ')]
+          : [_linkRun(title, link: uri), _linkRun(' ')],
+      pdfLinkRects: List<Rect>.from(rects),
+      fontFamily: textFontFamily,
+      fontSize: textFontSize,
+      color: textColor,
+    );
+    _doOp(_addElementsOp('Link PDF text', pageId, [el]));
+    return el;
+  }
+
+  /// Sets/replaces the link a PDF anchor [anchorId] points at — called when a
+  /// target is connected to a just-materialized anchor (its highlight becomes
+  /// tappable). One undoable, `_stamp`ed op, like [applyLinkToRange].
+  void setPdfAnchorLink(
+      String pageId, String anchorId, String uri, String title) {
+    final page = pages[pageId];
+    if (page == null) return;
+    TextElement? el;
+    for (final o in page.objects) {
+      if (o.id == anchorId && o is TextElement) {
+        el = o;
+        break;
+      }
+    }
+    if (el == null) return;
+    final before = <CanvasElement>[el.deepCopy()];
+    el.runs = [_linkRun(title, link: uri), _linkRun(' ')];
+    _stamp([el]);
+    final after = <CanvasElement>[el.deepCopy()];
+    var applied = true;
+    _doOp(
+      _CanvasOp(
+        label: 'Link PDF text',
+        dirtyPageIds: {pageId},
+        apply: () {
+          if (applied) {
+            applied = false;
+            return;
+          }
+          _replaceElements(pageId, after);
+        },
+        revert: () => _replaceElements(pageId, before),
+      ),
+    );
+  }
+
+  /// The link URI of a PDF-text anchor whose highlight rects contain [localPt]
+  /// (page-local), or null when no anchor is hit / it isn't linked yet. Lets a
+  /// tap on the highlighted PDF words navigate the link (the words ARE the
+  /// link). Topmost first.
+  String? pdfAnchorLinkAt(String pageId, Offset localPt) {
+    final page = pages[pageId];
+    if (page == null) return null;
+    for (final o in page.objects.reversed) {
+      if (o is! TextElement || o.pdfLinkRects == null) continue;
+      final hit = o.pdfLinkRects!.any((r) => r.inflate(1).contains(localPt));
+      if (!hit) continue;
+      final uri = standaloneMarkerUri(o);
+      if (uri != null) return uri;
+    }
+    return null;
+  }
+
   /// Pastes [runs] as text starting on [pageId]. Fits on the page → one
   /// auto-sized box centered there (the classic paste). Taller than the page
   /// → split at line boundaries into **linked** continuation boxes
