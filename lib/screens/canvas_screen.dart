@@ -4672,19 +4672,34 @@ class _DraggableFloatingBar extends StatefulWidget {
 }
 
 class _DraggableFloatingBarState extends State<_DraggableFloatingBar> {
-  Offset _offset = Offset.zero;
-  Size _lastSize = Size.zero;
+  // Position as an Alignment (-1..1 per axis): the Align moves the bar's REAL
+  // layout box (so hit-testing tracks the visuals) and -1..1 spans the whole
+  // canvas, so the bar reaches every edge.
+  late Alignment _align = widget.initialAlignment;
+  Size _lastSize = Size.zero; // canvas area
+  Size _barSize = Size.zero; // measured bar (handle + card + margin)
+  final _barKey = GlobalKey();
+
+  void _measure() {
+    final s = _barKey.currentContext?.size;
+    if (s != null && s != _barSize && mounted) setState(() => _barSize = s);
+  }
 
   void _onDrag(PointerMoveEvent e) {
-    // Accumulate the raw per-event delta (summing every move, so nothing is
-    // dropped when several fire in one frame) and clamp so the bar can't be
-    // dragged fully off-screen.
-    final maxDx = (_lastSize.width / 2 - 24).clamp(0.0, double.infinity);
-    final maxDy = (_lastSize.height / 2 - 24).clamp(0.0, double.infinity);
+    // Convert the finger's pixel delta to an alignment delta using the bar's
+    // measured size: the free travel per axis is (canvas − bar), which the
+    // alignment range of 2 spans — so the bar moves exactly as far as the
+    // finger (1:1), and clamping alignment to ±1 keeps it fully on-screen.
+    final travelX = _lastSize.width - _barSize.width;
+    final travelY = _lastSize.height - _barSize.height;
     setState(() {
-      _offset = Offset(
-        (_offset.dx + e.delta.dx).clamp(-maxDx, maxDx),
-        (_offset.dy + e.delta.dy).clamp(-maxDy, maxDy),
+      _align = Alignment(
+        travelX > 0
+            ? (_align.x + 2 * e.delta.dx / travelX).clamp(-1.0, 1.0)
+            : _align.x,
+        travelY > 0
+            ? (_align.y + 2 * e.delta.dy / travelY).clamp(-1.0, 1.0)
+            : _align.y,
       );
     });
   }
@@ -4692,22 +4707,14 @@ class _DraggableFloatingBarState extends State<_DraggableFloatingBar> {
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
     return LayoutBuilder(
       builder: (context, constraints) {
         _lastSize = constraints.biggest;
-        final w = constraints.maxWidth;
-        final h = constraints.maxHeight;
-        // Move the bar by shifting the Align's alignment — which moves the
-        // child's REAL layout box, so its hit region tracks the visuals. (The
-        // old Transform.translate moved only the painting, stranding the buttons
-        // + the opaque blocker at the original spot: after one drag the bar went
-        // dead and pen taps fell through to the canvas.)
-        final base = widget.initialAlignment;
-        final ax = w > 0 ? (base.x + 2 * _offset.dx / w).clamp(-1.0, 1.0) : base.x;
-        final ay = h > 0 ? (base.y + 2 * _offset.dy / h).clamp(-1.0, 1.0) : base.y;
         return Align(
-          alignment: Alignment(ax.toDouble(), ay.toDouble()),
+          alignment: _align,
           child: Padding(
+            key: _barKey,
             padding: widget.margin,
             // One opaque Listener around the WHOLE bar (handle + card, no seams)
             // so NO pointer over the bar's bounds — pen included — falls through
@@ -5333,7 +5340,7 @@ class _ReaderBar extends StatelessWidget {
 /// The floating video player — a small movable panel showing the media_kit
 /// video surface with a scrubber, ±10s skips, play/pause, a cycling speed chip,
 /// and a close button. Mirrors [_AudioPlayerBar]'s look.
-class _VideoPlayerBar extends StatelessWidget {
+class _VideoPlayerBar extends StatefulWidget {
   final CanvasController controller;
   final String name;
   final VoidCallback onClose;
@@ -5344,16 +5351,24 @@ class _VideoPlayerBar extends StatelessWidget {
     required this.onClose,
   });
 
+  @override
+  State<_VideoPlayerBar> createState() => _VideoPlayerBarState();
+}
+
+class _VideoPlayerBarState extends State<_VideoPlayerBar> {
   static const List<double> _speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+  /// User-resizable panel width; the 16:9 video scales with it.
+  double _width = 320;
 
   @override
   Widget build(BuildContext context) {
     final palette = Theme.of(context).extension<AppPalette>()!;
-    final playback = controller.videoPlayback;
+    final playback = widget.controller.videoPlayback;
     return Material(
       color: Colors.transparent,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 320),
+      child: SizedBox(
+        width: _width,
         child: Container(
           padding: const EdgeInsets.fromLTRB(8, 6, 6, 8),
           decoration: BoxDecoration(
@@ -5377,7 +5392,7 @@ class _VideoPlayerBar extends StatelessWidget {
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
-                      name,
+                      widget.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -5391,7 +5406,7 @@ class _VideoPlayerBar extends StatelessWidget {
                     icon: const Icon(Icons.close, size: 18),
                     visualDensity: VisualDensity.compact,
                     tooltip: 'Close',
-                    onPressed: onClose,
+                    onPressed: widget.onClose,
                   ),
                 ],
               ),
@@ -5499,7 +5514,7 @@ class _VideoPlayerBar extends StatelessWidget {
                         : _actionRecordButton(
                             context,
                             palette,
-                            controller,
+                            widget.controller,
                             CanvasController.videoActionMediaId(assetId),
                             () => playback.position.value.inMilliseconds,
                             () {
@@ -5510,6 +5525,29 @@ class _VideoPlayerBar extends StatelessWidget {
                           ),
                   ),
                 ],
+              ),
+              // Resize grip: drag horizontally to scale the panel (the 16:9
+              // video follows). Raw pointer events so it doesn't fight the
+              // canvas gesture arena.
+              Align(
+                alignment: Alignment.centerRight,
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerMove: (e) => setState(() {
+                    _width = (_width + e.delta.dx).clamp(220.0, 640.0);
+                  }),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.resizeLeftRight,
+                    child: Tooltip(
+                      message: 'Drag to resize',
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 2, right: 2),
+                        child: Icon(Icons.open_in_full,
+                            size: 15, color: palette.textDim),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ],
           ),
