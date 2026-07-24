@@ -5,7 +5,7 @@ import '../models/canvas_page.dart';
 import '../models/element.dart';
 import '../models/tree.dart';
 import 'notebook_service.dart';
-import 'pdf_text_extractor.dart';
+import 'render_cache.dart';
 
 /// What a [SearchResult] points at. [thing] = content *inside* a canvas (typed
 /// text or extracted PDF text) — the opt-in "Things" search.
@@ -198,10 +198,11 @@ class SearchService {
         for (final canvas in canvases) {
           if (canvas == null) continue;
           final pages = await _service.loadPages(canvas);
-          final pdfCache =
-              PdfTextCache((assetId) => _service.assetFile(canvas, assetId));
+          // Extract PDF text via pdfium (a throwaway RenderCache per canvas so
+          // the open documents are disposed and memory stays bounded).
+          final rc = RenderCache(onUpdated: () {});
           for (final page in pages.values) {
-            final text = await _pageText(page, pdfCache);
+            final text = await _pageText(page, rc, canvas);
             if (text.trim().isEmpty) continue;
             out.add(ContentEntry(
               notebook: nb,
@@ -211,7 +212,7 @@ class SearchService {
               text: text,
             ));
           }
-          pdfCache.clear();
+          rc.dispose();
         }
       }
     }
@@ -220,7 +221,7 @@ class SearchService {
 
   /// A page's combined searchable text: every typed [TextElement] plus the
   /// extracted text of an imported-PDF background, if any.
-  Future<String> _pageText(CanvasPage page, PdfTextCache pdfCache) async {
+  Future<String> _pageText(CanvasPage page, RenderCache rc, Canvas canvas) async {
     final buf = StringBuffer();
     for (final el in page.objects) {
       if (el is TextElement) {
@@ -230,7 +231,8 @@ class SearchService {
     }
     final src = page.source;
     if (src != null) {
-      final pt = await pdfCache.page(src.assetId, src.pageIndex);
+      final pt = await rc.pdfPageText(
+          _service.assetFile(canvas, src.assetId).path, src.pageIndex);
       if (pt != null) {
         for (final line in pt.lines) {
           final t = line.text.trim();

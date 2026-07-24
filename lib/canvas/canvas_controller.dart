@@ -4731,8 +4731,11 @@ class CanvasController extends ChangeNotifier {
 
   // ── Read-aloud (text-to-speech over typed + PDF text) ─────────────────
 
-  PdfTextCache? _pdfTextCache;
-  PdfTextCache get _pdfText => _pdfTextCache ??= PdfTextCache(assetFileOf);
+  /// Resolves an imported PDF page's text via pdfium (the already-open render
+  /// document) — fast, per-page, no second parse. Shared by read-aloud, text
+  /// selection, and find.
+  Future<PdfTextPage?> _resolvePdfText(String assetId, int pageIndex) =>
+      renderCache.pdfPageText(assetFileOf(assetId).path, pageIndex);
 
   TtsService? _tts;
 
@@ -4776,7 +4779,7 @@ class CanvasController extends ChangeNotifier {
   /// and everything downstream (ordering, sentence-splitting, the reader bar)
   /// works unchanged.
   List<PageTextSource> get _textSources =>
-      [const TypedTextSource(), PdfPageTextSource(_pdfText)];
+      [const TypedTextSource(), PdfPageTextSource(_resolvePdfText)];
 
   /// Per-line PDF text of a PDF-backed page, each with its page-local rect
   /// (scaled from the original PDF page to the normalized canvas page). Empty
@@ -4786,7 +4789,7 @@ class CanvasController extends ChangeNotifier {
     final page = pages[pageId];
     final src = page?.source;
     if (page == null || src == null) return const [];
-    final pt = await _pdfText.page(src.assetId, src.pageIndex);
+    final pt = await _resolvePdfText(src.assetId, src.pageIndex);
     if (pt == null || pt.lines.isEmpty) return const [];
     final scale = pt.width > 0 ? page.width / pt.width : 1.0;
     return [
@@ -4806,7 +4809,7 @@ class CanvasController extends ChangeNotifier {
     final page = pages[pageId];
     final src = page?.source;
     if (page == null || src == null) return const [];
-    final pt = await _pdfText.page(src.assetId, src.pageIndex);
+    final pt = await _resolvePdfText(src.assetId, src.pageIndex);
     if (pt == null || pt.words.isEmpty) return const [];
     final scale = pt.width > 0 ? page.width / pt.width : 1.0;
     return [
@@ -4823,11 +4826,11 @@ class CanvasController extends ChangeNotifier {
   /// the first text selection / find doesn't pay the extraction cost inline.
   /// Cheap no-op once each asset is cached.
   void warmPdfText() {
-    final seen = <String>{};
     for (final pl in layout.pages) {
       final src = pages[pl.pageId]?.source;
-      if (src == null || !seen.add(src.assetId)) continue;
-      unawaited(_pdfText.page(src.assetId, src.pageIndex));
+      if (src == null) continue;
+      // Per-page + cached in RenderCache, so duplicate calls are no-ops.
+      unawaited(_resolvePdfText(src.assetId, src.pageIndex));
     }
   }
 
@@ -5417,9 +5420,8 @@ class CanvasController extends ChangeNotifier {
     unawaited(_videoPlayback?.dispose());
     _saveReadingPosition();
     unawaited(_tts?.dispose());
-    _pdfTextCache?.clear();
     flushSaves();
-    renderCache.dispose();
+    renderCache.dispose(); // also clears the PDF text cache
     pictureCache.dispose();
     toolNotifier.dispose();
     toolOptionsOpenNotifier.dispose();
